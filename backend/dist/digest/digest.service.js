@@ -6,16 +6,23 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
     return c > 3 && r && Object.defineProperty(target, key, r), r;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AppModule = void 0;
+exports.DigestService = void 0;
 const common_1 = require("@nestjs/common");
-const digest_module_1 = require("./digest/digest.module");
-const scheduler_module_1 = require("./scheduler/scheduler.module");
-let AppModule = class AppModule {
+let DigestService = class DigestService {
+    generateDailyDigest(responses) {
+        const updates = responses
+            .map((response) => {
+            const blockerText = response.blocker
+                ? `\nBlocker: ${response.blocker}`
+                : '';
+            return `*${response.name}*\n${response.update}${blockerText}`;
+        })
+            .join('\n\n');
+        return `*Daily Standup Digest*\n\n${updates}`;
+    }
 };
-exports.AppModule = AppModule;
-exports.AppModule = AppModule = __decorate([
-    (0, common_1.Module)({
-        imports: [digest_module_1.DigestModule, scheduler_module_1.SchedulerModule],
-    })
-], AppModule);
-//# sourceMappingURL=app.module.js.map
+exports.DigestService = DigestService;
+exports.DigestService = DigestService = __decorate([
+    (0, common_1.Injectable)()
+], DigestService);
+//# sourceMappingURL=digest.service.js.map

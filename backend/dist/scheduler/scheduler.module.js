@@ -6,16 +6,20 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
     return c > 3 && r && Object.defineProperty(target, key, r), r;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AppModule = void 0;
+exports.SchedulerModule = void 0;
 const common_1 = require("@nestjs/common");
-const digest_module_1 = require("./digest/digest.module");
-const scheduler_module_1 = require("./scheduler/scheduler.module");
-let AppModule = class AppModule {
+const digest_module_1 = require("../digest/digest.module");
+const scheduler_controller_1 = require("./scheduler.controller");
+const scheduler_service_1 = require("./scheduler.service");
+let SchedulerModule = class SchedulerModule {
 };
-exports.AppModule = AppModule;
-exports.AppModule = AppModule = __decorate([
+exports.SchedulerModule = SchedulerModule;
+exports.SchedulerModule = SchedulerModule = __decorate([
     (0, common_1.Module)({
-        imports: [digest_module_1.DigestModule, scheduler_module_1.SchedulerModule],
+        imports: [digest_module_1.DigestModule],
+        controllers: [scheduler_controller_1.SchedulerController],
+        providers: [scheduler_service_1.SchedulerService],
+        exports: [scheduler_service_1.SchedulerService],
     })
-], AppModule);
-//# sourceMappingURL=app.module.js.map
+], SchedulerModule);
+//# sourceMappingURL=scheduler.module.js.map

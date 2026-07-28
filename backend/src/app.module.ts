@@ -1,8 +1,8 @@
 import { Module } from '@nestjs/common';
+import { DigestModule } from './digest/digest.module';
+import { SchedulerModule } from './scheduler/scheduler.module';
 
 @Module({
-  imports: [],
-  controllers: [],
-  providers: [],
+  imports: [DigestModule, SchedulerModule],
 })
 export class AppModule {}
