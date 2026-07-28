@@ -1,10 +1,5 @@
 import { Injectable } from '@nestjs/common';
-
-type StandupResponse = {
-  name: string;
-  update: string;
-  blocker?: string;
-};
+import { StandupResponse } from '../common/types/standup-response.type';
 
 @Injectable()
 export class DigestService {

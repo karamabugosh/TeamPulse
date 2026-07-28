@@ -22,13 +22,17 @@ let SchedulerService = SchedulerService_1 = class SchedulerService {
     runDailyDigest() {
         const sampleResponses = [
             {
+                userId: 'user-1',
                 name: 'Ghassan',
                 update: 'Completed the scheduling setup',
                 blocker: 'Waiting for Slack integration',
+                submittedAt: new Date().toISOString(),
             },
             {
+                userId: 'user-2',
                 name: 'Intern 2',
                 update: 'Finished the response model',
+                submittedAt: new Date().toISOString(),
             },
         ];
         const digest = this.digestService.generateDailyDigest(sampleResponses);
