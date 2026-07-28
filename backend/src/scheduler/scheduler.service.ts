@@ -1,10 +1,14 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { DigestService } from '../digest/digest.service';
 
 @Injectable()
 export class SchedulerService {
+  private readonly logger = new Logger(SchedulerService.name);
+
   constructor(private readonly digestService: DigestService) {}
 
+  @Cron('0 * * * * *')
   runDailyDigest() {
     const sampleResponses = [
       {
@@ -18,9 +22,14 @@ export class SchedulerService {
       },
     ];
 
+    const digest =
+      this.digestService.generateDailyDigest(sampleResponses);
+
+    this.logger.log('Scheduled digest generated');
+
     return {
       status: 'success',
-      digest: this.digestService.generateDailyDigest(sampleResponses),
+      digest,
       generatedAt: new Date().toISOString(),
     };
   }

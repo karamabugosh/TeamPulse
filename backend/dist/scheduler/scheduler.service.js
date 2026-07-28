@@ -8,13 +8,16 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
+var SchedulerService_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SchedulerService = void 0;
 const common_1 = require("@nestjs/common");
+const schedule_1 = require("@nestjs/schedule");
 const digest_service_1 = require("../digest/digest.service");
-let SchedulerService = class SchedulerService {
+let SchedulerService = SchedulerService_1 = class SchedulerService {
     constructor(digestService) {
         this.digestService = digestService;
+        this.logger = new common_1.Logger(SchedulerService_1.name);
     }
     runDailyDigest() {
         const sampleResponses = [
@@ -28,15 +31,23 @@ let SchedulerService = class SchedulerService {
                 update: 'Finished the response model',
             },
         ];
+        const digest = this.digestService.generateDailyDigest(sampleResponses);
+        this.logger.log('Scheduled digest generated');
         return {
             status: 'success',
-            digest: this.digestService.generateDailyDigest(sampleResponses),
+            digest,
             generatedAt: new Date().toISOString(),
         };
     }
 };
 exports.SchedulerService = SchedulerService;
-exports.SchedulerService = SchedulerService = __decorate([
+__decorate([
+    (0, schedule_1.Cron)('0 * * * * *'),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", void 0)
+], SchedulerService.prototype, "runDailyDigest", null);
+exports.SchedulerService = SchedulerService = SchedulerService_1 = __decorate([
     (0, common_1.Injectable)(),
     __metadata("design:paramtypes", [digest_service_1.DigestService])
 ], SchedulerService);
