@@ -10,7 +10,7 @@ export interface AiBaseline {
 }
 
 export const AI_BASELINE: AiBaseline = {
-  measuredAccuracy: 0.9,
+  measuredAccuracy: null,
   measuredCostPerRun: null,
   requiredAccuracy: REQUIRED_AI_ACCURACY,
   lastMeasuredAt: null,
