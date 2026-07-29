@@ -21,7 +21,7 @@ let SchedulerService = SchedulerService_1 = class SchedulerService {
         this.slackService = slackService;
         this.logger = new common_1.Logger(SchedulerService_1.name);
     }
-    runDailyDigest() {
+    async runDailyDigest() {
         if (process.env.DIGEST_SCHEDULER_ENABLED !== 'true') {
             this.logger.warn('Daily digest scheduler is disabled');
             return {
@@ -34,7 +34,7 @@ let SchedulerService = SchedulerService_1 = class SchedulerService {
                 userId: 'user-1',
                 name: 'Ghassan',
                 update: 'Completed the scheduling setup',
-                blocker: 'Waiting for Slack integration',
+                blocker: 'Waiting for Collection Loop integration',
                 submittedAt: new Date().toISOString(),
             },
             {
@@ -45,10 +45,22 @@ let SchedulerService = SchedulerService_1 = class SchedulerService {
             },
         ];
         const digest = this.digestService.generateDailyDigest(sampleResponses);
-        this.logger.log('Scheduled digest generated');
+        if (process.env.SLACK_DIGEST_ENABLED === 'true') {
+            const botToken = process.env.SLACK_BOT_TOKEN;
+            const channelId = process.env.SLACK_DIGEST_CHANNEL_ID;
+            if (!botToken || !channelId) {
+                throw new Error('SLACK_BOT_TOKEN or SLACK_DIGEST_CHANNEL_ID is missing');
+            }
+            await this.slackService.sendMessage(botToken, channelId, digest);
+            this.logger.log('Scheduled digest posted to Slack');
+        }
+        else {
+            this.logger.log('Scheduled digest generated without Slack delivery');
+        }
         return {
             status: 'success',
             digest,
+            slackDelivered: process.env.SLACK_DIGEST_ENABLED === 'true',
             generatedAt: new Date().toISOString(),
         };
     }
@@ -62,7 +74,7 @@ __decorate([
     }),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
-    __metadata("design:returntype", void 0)
+    __metadata("design:returntype", Promise)
 ], SchedulerService.prototype, "runDailyDigest", null);
 exports.SchedulerService = SchedulerService = SchedulerService_1 = __decorate([
     (0, common_1.Injectable)(),

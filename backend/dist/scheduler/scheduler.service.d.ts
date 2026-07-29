@@ -5,13 +5,15 @@ export declare class SchedulerService {
     private readonly slackService;
     private readonly logger;
     constructor(digestService: DigestService, slackService: SlackService);
-    runDailyDigest(): {
+    runDailyDigest(): Promise<{
         status: string;
         generatedAt: string;
         digest?: undefined;
+        slackDelivered?: undefined;
     } | {
         status: string;
         digest: string;
+        slackDelivered: boolean;
         generatedAt: string;
-    };
+    }>;
 }
