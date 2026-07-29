@@ -1,0 +1,40 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Question {
+  id        String   @id @default(uuid())
+  question  String
+  order     Int
+  isActive  Boolean  @default(true)
+  answers   Answer[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Answer {
+  id         String   @id @default(uuid())
+  userId     String
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id])
+  text       String
+  createdAt  DateTime @default(now())
+}
+
+model ConversationState {
+  id                String    @id @default(uuid())
+  userId            String    @unique
+  currentQuestionId String?
+  isCompleted       Boolean   @default(false)
+  startedAt         DateTime  @default(now())
+  completedAt       DateTime?
+  updatedAt         DateTime  @updatedAt
+}
