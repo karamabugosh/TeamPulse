@@ -21,15 +21,19 @@ export interface ThemeSummary {
   summary: string;
 }
 
+/**
+ * Input to the AI layer, matching the actual Prisma schema (Answer model):
+ * just userId, questionId, questionText, and the free-text answer. There is
+ * no answerType/severity/dependency stored at collection time — the AI is
+ * the only place blockers get identified and structured, extracted purely
+ * from free text.
+ */
 export interface RawResponseForAnalysis {
   userId: string;
   answers: {
     questionId: string;
     questionText: string;
-    answerType: 'text' | 'blocker' | 'rating' | 'skip';
-    answerText: string | null;
-    blockerSeverity?: BlockerSeverity | null;
-    blockerDependency?: string | null;
+    text: string;
   }[];
 }
 
