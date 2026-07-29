@@ -46,7 +46,7 @@ let SchedulerService = SchedulerService_1 = class SchedulerService {
 };
 exports.SchedulerService = SchedulerService;
 __decorate([
-    (0, schedule_1.Cron)('0 * * * * *'),
+    (0, schedule_1.Cron)(process.env.DAILY_DIGEST_CRON || '0 0 9 * * 1-5'),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", void 0)

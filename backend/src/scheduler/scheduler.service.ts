@@ -9,7 +9,7 @@ export class SchedulerService {
 
   constructor(private readonly digestService: DigestService) {}
 
-  @Cron('0 * * * * *')
+  @Cron(process.env.DAILY_DIGEST_CRON || '0 0 9 * * 1-5')
   runDailyDigest() {
     const sampleResponses: StandupResponse[] = [
       {
