@@ -1,8 +1,10 @@
 import { DigestService } from '../digest/digest.service';
+import { SlackService } from '../slack/slack.service';
 export declare class SchedulerService {
     private readonly digestService;
+    private readonly slackService;
     private readonly logger;
-    constructor(digestService: DigestService);
+    constructor(digestService: DigestService, slackService: SlackService);
     runDailyDigest(): {
         status: string;
         generatedAt: string;

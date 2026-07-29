@@ -14,9 +14,11 @@ exports.SchedulerService = void 0;
 const common_1 = require("@nestjs/common");
 const schedule_1 = require("@nestjs/schedule");
 const digest_service_1 = require("../digest/digest.service");
+const slack_service_1 = require("../slack/slack.service");
 let SchedulerService = SchedulerService_1 = class SchedulerService {
-    constructor(digestService) {
+    constructor(digestService, slackService) {
         this.digestService = digestService;
+        this.slackService = slackService;
         this.logger = new common_1.Logger(SchedulerService_1.name);
     }
     runDailyDigest() {
@@ -64,6 +66,7 @@ __decorate([
 ], SchedulerService.prototype, "runDailyDigest", null);
 exports.SchedulerService = SchedulerService = SchedulerService_1 = __decorate([
     (0, common_1.Injectable)(),
-    __metadata("design:paramtypes", [digest_service_1.DigestService])
+    __metadata("design:paramtypes", [digest_service_1.DigestService,
+        slack_service_1.SlackService])
 ], SchedulerService);
 //# sourceMappingURL=scheduler.service.js.map

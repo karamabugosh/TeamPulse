@@ -17,7 +17,7 @@ export class Workspace {
   @Column()
   slackWorkspaceName: string;
 
-  @Column({ encrypted: true })
+  @Column({ type: 'text' })
   botToken: string;
 
   @CreateDateColumn()

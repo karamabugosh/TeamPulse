@@ -2,12 +2,16 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { StandupResponse } from '../common/types/standup-response.type';
 import { DigestService } from '../digest/digest.service';
+import { SlackService } from '../slack/slack.service';
 
 @Injectable()
 export class SchedulerService {
   private readonly logger = new Logger(SchedulerService.name);
 
-  constructor(private readonly digestService: DigestService) {}
+  constructor(
+    private readonly digestService: DigestService,
+    private readonly slackService: SlackService,
+  ) {}
 
   @Cron(process.env.DAILY_DIGEST_CRON || '0 0 9 * * 0-4', {
     name: 'daily-digest',
