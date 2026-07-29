@@ -5,6 +5,10 @@ export declare class SchedulerService {
     constructor(digestService: DigestService);
     runDailyDigest(): {
         status: string;
+        generatedAt: string;
+        digest?: undefined;
+    } | {
+        status: string;
         digest: string;
         generatedAt: string;
     };

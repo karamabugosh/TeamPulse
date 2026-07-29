@@ -9,8 +9,21 @@ export class SchedulerService {
 
   constructor(private readonly digestService: DigestService) {}
 
-  @Cron(process.env.DAILY_DIGEST_CRON || '0 0 9 * * 1-5')
+  @Cron(process.env.DAILY_DIGEST_CRON || '0 0 9 * * 0-4', {
+    name: 'daily-digest',
+    timeZone: process.env.DAILY_DIGEST_TIMEZONE || 'Asia/Riyadh',
+    waitForCompletion: true,
+  })
   runDailyDigest() {
+    if (process.env.DIGEST_SCHEDULER_ENABLED !== 'true') {
+      this.logger.warn('Daily digest scheduler is disabled');
+
+      return {
+        status: 'disabled',
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
     const sampleResponses: StandupResponse[] = [
       {
         userId: 'user-1',

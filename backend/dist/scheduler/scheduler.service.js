@@ -20,6 +20,13 @@ let SchedulerService = SchedulerService_1 = class SchedulerService {
         this.logger = new common_1.Logger(SchedulerService_1.name);
     }
     runDailyDigest() {
+        if (process.env.DIGEST_SCHEDULER_ENABLED !== 'true') {
+            this.logger.warn('Daily digest scheduler is disabled');
+            return {
+                status: 'disabled',
+                generatedAt: new Date().toISOString(),
+            };
+        }
         const sampleResponses = [
             {
                 userId: 'user-1',
@@ -46,7 +53,11 @@ let SchedulerService = SchedulerService_1 = class SchedulerService {
 };
 exports.SchedulerService = SchedulerService;
 __decorate([
-    (0, schedule_1.Cron)(process.env.DAILY_DIGEST_CRON || '0 0 9 * * 1-5'),
+    (0, schedule_1.Cron)(process.env.DAILY_DIGEST_CRON || '0 0 9 * * 0-4', {
+        name: 'daily-digest',
+        timeZone: process.env.DAILY_DIGEST_TIMEZONE || 'Asia/Riyadh',
+        waitForCompletion: true,
+    }),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", void 0)
