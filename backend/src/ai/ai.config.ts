@@ -9,11 +9,20 @@ export interface AiBaseline {
   lastMeasuredAt: string | null;
 }
 
+/**
+ * Measured from a real evaluation run (backend/src/ai/evaluation/,
+ * 8 hand-labeled cases, model: gpt-4o-mini) — not a placeholder.
+ * See run-evaluation.ts output for the raw pass/fail breakdown.
+ *
+ * Caveat: 8 cases is a small sample. Revisit with a larger evaluation
+ * set before treating this number as fully reliable (tracked for
+ * week 3 — "Improve AI").
+ */
 export const AI_BASELINE: AiBaseline = {
-  measuredAccuracy: null,
-  measuredCostPerRun: null,
+  measuredAccuracy: 1.0,
+  measuredCostPerRun: 0.00018,
   requiredAccuracy: REQUIRED_AI_ACCURACY,
-  lastMeasuredAt: null,
+  lastMeasuredAt: '2026-07-30T10:05:10.000Z',
 };
 
 export function isAiFeatureEnabled(): boolean {
