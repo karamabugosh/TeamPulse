@@ -1,0 +1,107 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Workspace {
+  id                 String   @id @default(uuid())
+  slackWorkspaceId   String   @unique
+  slackWorkspaceName String
+  botToken           String?
+  installedAt        DateTime @default(now())
+
+  users User[]
+  teams Team[]
+}
+
+model User {
+  id               String   @id @default(uuid())
+  workspaceId      String
+  slackUserId      String   @unique
+  slackDisplayName String
+  email            String?
+  timezone         String?
+  createdAt        DateTime @default(now())
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id])
+  memberships TeamMember[]
+}
+
+model Team {
+  id             String   @id @default(uuid())
+  workspaceId    String
+  name           String
+  slackChannelId String?
+  scheduleCron   String?
+  timezone       String?
+  createdAt      DateTime @default(now())
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id])
+  members   TeamMember[]
+  runs      StandupRun[]
+}
+
+model TeamMember {
+  id       String   @id @default(uuid())
+  teamId   String
+  userId   String
+  role     String   @default("member")
+  optedOut Boolean  @default(false)
+  joinedAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([teamId, userId])
+}
+
+model Question {
+  id        String   @id @default(uuid())
+  question  String
+  order     Int
+  isActive  Boolean  @default(true)
+  answers   Answer[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model StandupRun {
+  id          String    @id @default(uuid())
+  teamId      String
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  status      String    @default("open")
+
+  team    Team                @relation(fields: [teamId], references: [id])
+  answers Answer[]
+  states  ConversationState[]
+}
+
+model Answer {
+  id         String   @id @default(uuid())
+  userId     String
+  questionId String
+  runId      String?
+  text       String
+  createdAt  DateTime @default(now())
+
+  question Question    @relation(fields: [questionId], references: [id])
+  run      StandupRun? @relation(fields: [runId], references: [id])
+}
+
+model ConversationState {
+  id                String    @id @default(uuid())
+  userId            String    @unique
+  runId             String?
+  currentQuestionId String?
+  isCompleted       Boolean   @default(false)
+  startedAt         DateTime  @default(now())
+  completedAt       DateTime?
+  updatedAt         DateTime  @updatedAt
+
+  run StandupRun? @relation(fields: [runId], references: [id])
+}

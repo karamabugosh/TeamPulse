@@ -1,0 +1,84 @@
+"use strict";
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var SchedulerService_1;
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.SchedulerService = void 0;
+const common_1 = require("@nestjs/common");
+const schedule_1 = require("@nestjs/schedule");
+const digest_service_1 = require("../digest/digest.service");
+const slack_service_1 = require("../slack/slack.service");
+let SchedulerService = SchedulerService_1 = class SchedulerService {
+    constructor(digestService, slackService) {
+        this.digestService = digestService;
+        this.slackService = slackService;
+        this.logger = new common_1.Logger(SchedulerService_1.name);
+    }
+    async runDailyDigest() {
+        if (process.env.DIGEST_SCHEDULER_ENABLED !== 'true') {
+            this.logger.warn('Daily digest scheduler is disabled');
+            return {
+                status: 'disabled',
+                generatedAt: new Date().toISOString(),
+            };
+        }
+        const sampleResponses = [
+            {
+                userId: 'user-1',
+                name: 'Ghassan',
+                update: 'Completed the scheduling setup',
+                blocker: 'Waiting for Collection Loop integration',
+                submittedAt: new Date().toISOString(),
+            },
+            {
+                userId: 'user-2',
+                name: 'Intern 2',
+                update: 'Finished the response model',
+                submittedAt: new Date().toISOString(),
+            },
+        ];
+        const digest = this.digestService.generateDailyDigest(sampleResponses);
+        if (process.env.SLACK_DIGEST_ENABLED === 'true') {
+            const botToken = process.env.SLACK_BOT_TOKEN;
+            const channelId = process.env.SLACK_DIGEST_CHANNEL_ID;
+            if (!botToken || !channelId) {
+                throw new Error('SLACK_BOT_TOKEN or SLACK_DIGEST_CHANNEL_ID is missing');
+            }
+            await this.slackService.sendMessage(botToken, channelId, digest);
+            this.logger.log('Scheduled digest posted to Slack');
+        }
+        else {
+            this.logger.log('Scheduled digest generated without Slack delivery');
+        }
+        return {
+            status: 'success',
+            digest,
+            slackDelivered: process.env.SLACK_DIGEST_ENABLED === 'true',
+            generatedAt: new Date().toISOString(),
+        };
+    }
+};
+exports.SchedulerService = SchedulerService;
+__decorate([
+    (0, schedule_1.Cron)(process.env.DAILY_DIGEST_CRON || '0 0 9 * * 0-4', {
+        name: 'daily-digest',
+        timeZone: process.env.DAILY_DIGEST_TIMEZONE || 'Asia/Riyadh',
+        waitForCompletion: true,
+    }),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], SchedulerService.prototype, "runDailyDigest", null);
+exports.SchedulerService = SchedulerService = SchedulerService_1 = __decorate([
+    (0, common_1.Injectable)(),
+    __metadata("design:paramtypes", [digest_service_1.DigestService,
+        slack_service_1.SlackService])
+], SchedulerService);
+//# sourceMappingURL=scheduler.service.js.map
