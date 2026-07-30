@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { StandupResponse } from '../common/types/standup-response.type';
+import { CollectionService } from '../collection/collection.service';
 import { DigestService } from '../digest/digest.service';
 import { SlackService } from '../slack/slack.service';
 
@@ -9,6 +9,7 @@ export class SchedulerService {
   private readonly logger = new Logger(SchedulerService.name);
 
   constructor(
+    private readonly collectionService: CollectionService,
     private readonly digestService: DigestService,
     private readonly slackService: SlackService,
   ) {}
@@ -28,50 +29,39 @@ export class SchedulerService {
       };
     }
 
-    const sampleResponses: StandupResponse[] = [
-      {
-        userId: 'user-1',
-        name: 'Ghassan',
-        update: 'Completed the scheduling setup',
-        blocker: 'Waiting for Collection Loop integration',
-        submittedAt: new Date().toISOString(),
-      },
-      {
-        userId: 'user-2',
-        name: 'Intern 2',
-        update: 'Finished the response model',
-        submittedAt: new Date().toISOString(),
-      },
-    ];
+    const responses =
+      await this.collectionService.getCompletedStandupResponses();
 
     const digest =
-      this.digestService.generateDailyDigest(sampleResponses);
+      this.digestService.generateDailyDigest(responses);
+
+    let slackDelivered = false;
 
     if (process.env.SLACK_DIGEST_ENABLED === 'true') {
-      const botToken = process.env.SLACK_BOT_TOKEN;
       const channelId = process.env.SLACK_DIGEST_CHANNEL_ID;
 
-      if (!botToken || !channelId) {
-        throw new Error(
-          'SLACK_BOT_TOKEN or SLACK_DIGEST_CHANNEL_ID is missing',
-        );
+      if (!channelId) {
+        throw new Error('SLACK_DIGEST_CHANNEL_ID is missing');
       }
 
-      await this.slackService.sendMessage(
-        botToken,
+      await this.slackService.sendMessage({
         channelId,
-        digest,
-      );
+        text: digest,
+      });
 
+      slackDelivered = true;
       this.logger.log('Scheduled digest posted to Slack');
     } else {
-      this.logger.log('Scheduled digest generated without Slack delivery');
+      this.logger.log(
+        'Scheduled digest generated without Slack delivery',
+      );
     }
 
     return {
       status: 'success',
+      responseCount: responses.length,
       digest,
-      slackDelivered: process.env.SLACK_DIGEST_ENABLED === 'true',
+      slackDelivered,
       generatedAt: new Date().toISOString(),
     };
   }

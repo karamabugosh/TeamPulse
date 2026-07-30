@@ -1,11 +1,15 @@
 import React from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import AdminQuestions from '../pages/AdminQuestions';
 
 function App() {
   return (
-    <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>
-      <h1>Pulse Application (Frontend)</h1>
-      <p>Feature-based React Architecture running on Vite.</p>
-    </div>
+    <Router>
+      <Routes>
+        <Route path="/admin/questions" element={<AdminQuestions />} />
+        <Route path="*" element={<Navigate to="/admin/questions" replace />} />
+      </Routes>
+    </Router>
   );
 }
 
