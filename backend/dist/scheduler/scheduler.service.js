@@ -13,10 +13,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SchedulerService = void 0;
 const common_1 = require("@nestjs/common");
 const schedule_1 = require("@nestjs/schedule");
+const collection_service_1 = require("../collection/collection.service");
 const digest_service_1 = require("../digest/digest.service");
 const slack_service_1 = require("../slack/slack.service");
 let SchedulerService = SchedulerService_1 = class SchedulerService {
-    constructor(digestService, slackService) {
+    constructor(collectionService, digestService, slackService) {
+        this.collectionService = collectionService;
         this.digestService = digestService;
         this.slackService = slackService;
         this.logger = new common_1.Logger(SchedulerService_1.name);
@@ -29,38 +31,41 @@ let SchedulerService = SchedulerService_1 = class SchedulerService {
                 generatedAt: new Date().toISOString(),
             };
         }
-        const sampleResponses = [
-            {
-                userId: 'user-1',
-                name: 'Ghassan',
-                update: 'Completed the scheduling setup',
-                blocker: 'Waiting for Collection Loop integration',
-                submittedAt: new Date().toISOString(),
-            },
-            {
-                userId: 'user-2',
-                name: 'Intern 2',
-                update: 'Finished the response model',
-                submittedAt: new Date().toISOString(),
-            },
-        ];
-        const digest = this.digestService.generateDailyDigest(sampleResponses);
+        const responses = await this.collectionService.getCompletedStandupResponses();
+        const digest = this.digestService.generateDailyDigest(responses);
+        let slackDelivered = false;
+        let slackError = null;
         if (process.env.SLACK_DIGEST_ENABLED === 'true') {
-            const botToken = process.env.SLACK_BOT_TOKEN;
             const channelId = process.env.SLACK_DIGEST_CHANNEL_ID;
-            if (!botToken || !channelId) {
-                throw new Error('SLACK_BOT_TOKEN or SLACK_DIGEST_CHANNEL_ID is missing');
+            if (!channelId) {
+                slackError = 'SLACK_DIGEST_CHANNEL_ID is missing';
+                this.logger.error(`Digest generated, but Slack delivery failed: ${slackError}`);
             }
-            await this.slackService.sendMessage(botToken, channelId, digest);
-            this.logger.log('Scheduled digest posted to Slack');
+            else {
+                try {
+                    await this.slackService.sendMessage({
+                        channelId,
+                        text: digest,
+                    });
+                    slackDelivered = true;
+                    this.logger.log('Scheduled digest posted to Slack');
+                }
+                catch (error) {
+                    slackError =
+                        error instanceof Error ? error.message : String(error);
+                    this.logger.error(`Digest generated, but Slack delivery failed: ${slackError}`);
+                }
+            }
         }
         else {
             this.logger.log('Scheduled digest generated without Slack delivery');
         }
         return {
             status: 'success',
+            responseCount: responses.length,
             digest,
-            slackDelivered: process.env.SLACK_DIGEST_ENABLED === 'true',
+            slackDelivered,
+            slackError,
             generatedAt: new Date().toISOString(),
         };
     }
@@ -78,7 +83,8 @@ __decorate([
 ], SchedulerService.prototype, "runDailyDigest", null);
 exports.SchedulerService = SchedulerService = SchedulerService_1 = __decorate([
     (0, common_1.Injectable)(),
-    __metadata("design:paramtypes", [digest_service_1.DigestService,
+    __metadata("design:paramtypes", [collection_service_1.CollectionService,
+        digest_service_1.DigestService,
         slack_service_1.SlackService])
 ], SchedulerService);
 //# sourceMappingURL=scheduler.service.js.map

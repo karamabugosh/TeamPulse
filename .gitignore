@@ -1,13 +1,18 @@
-# Environment variables - never push these
-backend/.env
+# Environment variables
 .env
+backend/.env
 
-# Dependencies - too large to push, npm install recreates them
+# Dependencies
 node_modules/
 backend/node_modules/
 
-# Build output - generated automatically, no need to push
+# Build output
+dist/
 backend/dist/
+
+# Local databases
+*.db
+backend/prisma/dev.db
 
 # OS files
 .DS_Store

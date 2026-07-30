@@ -8,14 +8,19 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SlackModule = void 0;
 const common_1 = require("@nestjs/common");
+const config_1 = require("@nestjs/config");
+const collection_module_1 = require("../collection/collection.module");
+const slack_gateway_1 = require("./slack.gateway");
+const slack_listener_1 = require("./slack.listener");
 const slack_service_1 = require("./slack.service");
 let SlackModule = class SlackModule {
 };
 exports.SlackModule = SlackModule;
 exports.SlackModule = SlackModule = __decorate([
     (0, common_1.Module)({
-        providers: [slack_service_1.SlackService],
-        exports: [slack_service_1.SlackService],
+        imports: [config_1.ConfigModule, collection_module_1.CollectionModule],
+        providers: [slack_service_1.SlackService, slack_gateway_1.SlackGateway, slack_listener_1.SlackListener],
+        exports: [slack_service_1.SlackService, slack_gateway_1.SlackGateway],
     })
 ], SlackModule);
 //# sourceMappingURL=slack.module.js.map

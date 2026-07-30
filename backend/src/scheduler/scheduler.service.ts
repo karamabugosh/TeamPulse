@@ -36,21 +36,35 @@ export class SchedulerService {
       this.digestService.generateDailyDigest(responses);
 
     let slackDelivered = false;
+    let slackError: string | null = null;
 
     if (process.env.SLACK_DIGEST_ENABLED === 'true') {
       const channelId = process.env.SLACK_DIGEST_CHANNEL_ID;
 
       if (!channelId) {
-        throw new Error('SLACK_DIGEST_CHANNEL_ID is missing');
+        slackError = 'SLACK_DIGEST_CHANNEL_ID is missing';
+
+        this.logger.error(
+          `Digest generated, but Slack delivery failed: ${slackError}`,
+        );
+      } else {
+        try {
+          await this.slackService.sendMessage({
+            channelId,
+            text: digest,
+          });
+
+          slackDelivered = true;
+          this.logger.log('Scheduled digest posted to Slack');
+        } catch (error) {
+          slackError =
+            error instanceof Error ? error.message : String(error);
+
+          this.logger.error(
+            `Digest generated, but Slack delivery failed: ${slackError}`,
+          );
+        }
       }
-
-      await this.slackService.sendMessage({
-        channelId,
-        text: digest,
-      });
-
-      slackDelivered = true;
-      this.logger.log('Scheduled digest posted to Slack');
     } else {
       this.logger.log(
         'Scheduled digest generated without Slack delivery',
@@ -62,6 +76,7 @@ export class SchedulerService {
       responseCount: responses.length,
       digest,
       slackDelivered,
+      slackError,
       generatedAt: new Date().toISOString(),
     };
   }

@@ -8,18 +8,26 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AppModule = void 0;
 const common_1 = require("@nestjs/common");
+const config_1 = require("@nestjs/config");
 const schedule_1 = require("@nestjs/schedule");
 const auth_module_1 = require("./auth/auth.module");
+const collection_module_1 = require("./collection/collection.module");
 const digest_module_1 = require("./digest/digest.module");
+const questions_module_1 = require("./questions/questions.module");
 const scheduler_module_1 = require("./scheduler/scheduler.module");
+const slack_module_1 = require("./slack/slack.module");
 let AppModule = class AppModule {
 };
 exports.AppModule = AppModule;
 exports.AppModule = AppModule = __decorate([
     (0, common_1.Module)({
         imports: [
+            config_1.ConfigModule.forRoot({ isGlobal: true }),
             schedule_1.ScheduleModule.forRoot(),
             auth_module_1.AuthModule,
+            slack_module_1.SlackModule,
+            collection_module_1.CollectionModule,
+            questions_module_1.QuestionsModule,
             digest_module_1.DigestModule,
             scheduler_module_1.SchedulerModule,
         ],

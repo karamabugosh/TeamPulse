@@ -8,6 +8,7 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SchedulerModule = void 0;
 const common_1 = require("@nestjs/common");
+const collection_module_1 = require("../collection/collection.module");
 const digest_module_1 = require("../digest/digest.module");
 const slack_module_1 = require("../slack/slack.module");
 const scheduler_controller_1 = require("./scheduler.controller");
@@ -17,7 +18,7 @@ let SchedulerModule = class SchedulerModule {
 exports.SchedulerModule = SchedulerModule;
 exports.SchedulerModule = SchedulerModule = __decorate([
     (0, common_1.Module)({
-        imports: [digest_module_1.DigestModule, slack_module_1.SlackModule],
+        imports: [collection_module_1.CollectionModule, digest_module_1.DigestModule, slack_module_1.SlackModule],
         controllers: [scheduler_controller_1.SchedulerController],
         providers: [scheduler_service_1.SchedulerService],
         exports: [scheduler_service_1.SchedulerService],
