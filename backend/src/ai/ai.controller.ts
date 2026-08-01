@@ -1,8 +1,8 @@
 // backend/src/ai/ai.controller.ts
 //
-// Not part of the main workflow (see ai-event.listener.ts for that).
-// Kept as a manual entry point for testing via Postman and as a
-// ready-made API surface if we need one later.
+// Not part of the main workflow (Ghassan calls AiService directly via
+// dependency injection). Kept as a manual entry point for testing via
+// Postman and as a ready-made API surface if we need one later.
 
 import { Body, Controller, Post } from '@nestjs/common';
 import { AiService } from './ai.service';

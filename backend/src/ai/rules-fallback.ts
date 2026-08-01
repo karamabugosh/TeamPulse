@@ -13,17 +13,15 @@ const FALLBACK_SUMMARY_MESSAGE =
 /**
  * Rules-based fallback (no model call).
  *
- * Unlike an earlier design, there is no structured blocker data collected
- * at answer time (see ai-result.dto.ts) — the Prisma schema stores only
- * free text per answer. Identifying blockers from free text requires
- * language understanding, which a rules-based fallback cannot do.
+ * There is no structured blocker data collected at answer time (see
+ * ai-result.dto.ts) — the Prisma schema stores only free text per answer.
+ * Identifying blockers from free text requires language understanding,
+ * which a rules-based fallback cannot do.
  *
  * So this fallback is intentionally honest about its limits: it always
  * returns an empty blockers list and an empty themes list rather than
  * faking a keyword-matching heuristic that would produce unreliable
- * results. When this path runs, the team simply doesn't get blocker/theme
- * detection for that run — they still get the raw responses elsewhere
- * (e.g. via Reports), just not the AI-derived structure.
+ * results.
  */
 export function runRulesFallback(
   teamId: string,

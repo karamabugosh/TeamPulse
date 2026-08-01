@@ -63,7 +63,6 @@ export function parseAndValidateAiResponse(raw: string): ParsedAiResponse {
       if (!isRecord(raw)) {
         throw new Error(`blockers[${i}] is not a valid object`);
       }
-
       if (!isNonEmptyString(raw.userId)) {
         throw new Error(`blockers[${i}].userId must be a non-empty string`);
       }
@@ -104,7 +103,6 @@ export function parseAndValidateAiResponse(raw: string): ParsedAiResponse {
     if (!isRecord(raw)) {
       throw new Error(`themes[${i}] is not a valid object`);
     }
-
     if (!isNonEmptyString(raw.theme)) {
       throw new Error(`themes[${i}].theme must be a non-empty string`);
     }
