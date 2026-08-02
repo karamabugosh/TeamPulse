@@ -1,7 +1,21 @@
+# Environment variables - never push these
 .env
 backend/.env
 frontend/.env
+
+# Dependencies - too large to push, npm install recreates them
 node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Build output - generated automatically, no need to push
 dist/
 build/
+backend/dist/
+
+# Logs
 *.log
+
+# OS files
+.DS_Store
+Thumbs.db
