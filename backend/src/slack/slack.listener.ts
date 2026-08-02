@@ -2,8 +2,8 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { SlackService } from './slack.service';
 import { SlackGateway } from './slack.gateway';
 import { IncomingMessageDto } from './dto/incoming-message.dto';
+import { AuthService } from '../auth/auth.service';
 import { CollectionService } from '../collection/collection.service';
-import { buildAppHomeBlocks } from './slack-app-home.view';
 
 @Injectable()
 export class SlackListener implements OnModuleInit {
@@ -12,7 +12,8 @@ export class SlackListener implements OnModuleInit {
   constructor(
     private readonly slackService: SlackService,
     private readonly slackGateway: SlackGateway,
-    private readonly collectionService: CollectionService,
+    private readonly authService: AuthService,
+    private readonly collectionService: CollectionService
   ) {}
 
   onModuleInit() {
@@ -29,19 +30,72 @@ export class SlackListener implements OnModuleInit {
       return;
     }
 
-    // Handle all messages using app.event('message') which is lower-level and catches everything
-    app.event('message', async ({ event, say }) => {
+    // --- APP HOME OPENED ---
+    app.event('app_home_opened', async ({ event, client }) => {
+      this.logger.log(`App home opened by user ${event.user}`);
+      try {
+        const userInfo = await client.users.info({ user: event.user });
+        const teamId = userInfo.user?.team_id || 'unknown_team';
+        await this.authService.syncSlackUser(event.user, teamId, 'TeamPulse Workspace');
+
+        const summary = await this.collectionService.getAppHomeSummary(event.user);
+        
+        let statusText = 'Unknown';
+        if (summary.status === 'not_started') statusText = 'Not started today. Type "hello" to begin.';
+        if (summary.status === 'in_progress') statusText = 'In Progress! Check your messages.';
+        if (summary.status === 'completed') statusText = `Completed at ${summary.lastCompletedAt?.toLocaleTimeString()}`;
+
+        await client.views.publish({
+          user_id: event.user,
+          view: {
+            type: 'home',
+            blocks: [
+              {
+                type: 'header',
+                text: { type: 'plain_text', text: '👋 Welcome to TeamPulse!' },
+              },
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: '*Daily Standup Status:* ' + statusText },
+              },
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: `*Active Questions:* ${summary.activeQuestionCount}` },
+              },
+              {
+                type: 'divider',
+              },
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: 'To manage questions, type `/manage-questions` anywhere in Slack.' },
+              }
+            ],
+          },
+        });
+      } catch (error) {
+        this.logger.error(`Error handling app_home_opened: ${error}`);
+      }
+    });
+
+    app.event('message', async ({ event, client }) => {
       this.logger.log(`[SLACK EVENT TRIGGERED] app.event('message') hit! Raw event: ${JSON.stringify(event)}`);
       
       const msg = event as any;
 
-      // Ignore bot messages or message_changed events to avoid loops
       if (msg.bot_id || msg.subtype === 'bot_message' || msg.subtype === 'message_changed') {
         this.logger.debug('Ignored bot message or edit event.');
         return;
       }
 
       this.logger.log(`Processing incoming Slack message from user ${msg.user}`);
+
+      try {
+          const userInfo = await client.users.info({ user: msg.user });
+          const teamId = userInfo.user?.team_id || 'unknown_team';
+          await this.authService.syncSlackUser(msg.user, teamId, 'TeamPulse Workspace');
+      } catch (err) {
+          this.logger.error(`Failed to sync user ${msg.user}: ${err}`);
+      }
 
       const payload: IncomingMessageDto = {
         userId: msg.user,
@@ -50,51 +104,11 @@ export class SlackListener implements OnModuleInit {
         timestamp: msg.ts,
       };
 
-      this.logger.log(`Payload prepared, sending to SlackGateway...`);
       await this.slackGateway.handleIncomingMessage(payload);
     });
 
-    app.event('app_mention', async ({ event, say }) => {
+    app.event('app_mention', async ({ event }) => {
       this.logger.log(`[SLACK EVENT TRIGGERED] app_mention hit! Event: ${JSON.stringify(event)}`);
-    });
-
-    app.event('app_home_opened', async ({ event, client }) => {
-      try {
-        const summary = await this.collectionService.getAppHomeSummary(event.user);
-        await client.views.publish({
-          user_id: event.user,
-          view: {
-            type: 'home',
-            blocks: buildAppHomeBlocks(summary),
-          },
-        });
-      } catch (error: any) {
-        this.logger.error(`Failed to publish App Home: ${error.message}`, error.stack);
-      }
-    });
-
-    app.action('start_standup', async ({ ack, body, client }) => {
-      await ack();
-      const userId = body.user.id;
-      try {
-        const open = await client.conversations.open({ users: userId });
-        const channelId = open.channel?.id;
-        if (!channelId) {
-          this.logger.error('Could not open DM channel for standup start.');
-          return;
-        }
-        await this.slackGateway.startConversationFlow(userId, channelId);
-        const summary = await this.collectionService.getAppHomeSummary(userId);
-        await client.views.publish({
-          user_id: userId,
-          view: {
-            type: 'home',
-            blocks: buildAppHomeBlocks(summary),
-          },
-        });
-      } catch (error: any) {
-        this.logger.error(`Start standup action failed: ${error.message}`, error.stack);
-      }
     });
     
     app.error(async (error: any) => {
@@ -103,4 +117,5 @@ export class SlackListener implements OnModuleInit {
 
     this.logger.log('Slack listeners successfully registered.');
   }
+
 }

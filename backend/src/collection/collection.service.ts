@@ -15,7 +15,18 @@ export class CollectionService implements CollectionGateway {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async getAppHomeSummary(userId: string): Promise<AppHomeSummary> {
+  private async getInternalUserId(slackUserId: string): Promise<string> {
+    const user = await this.prisma.user.findUnique({
+      where: { slackUserId },
+    });
+    if (!user) {
+      throw new Error(`User with Slack ID ${slackUserId} not found in database.`);
+    }
+    return user.id;
+  }
+
+  async getAppHomeSummary(slackUserId: string): Promise<AppHomeSummary> {
+    const userId = await this.getInternalUserId(slackUserId);
     const activeQuestionCount = await this.prisma.question.count({
       where: { isActive: true },
     });
@@ -37,8 +48,9 @@ export class CollectionService implements CollectionGateway {
     };
   }
 
-  async startConversation(userId: string): Promise<QuestionPayloadDto | null> {
-    this.logger.log(`Starting conversation for user ${userId}`);
+  async startConversation(slackUserId: string): Promise<QuestionPayloadDto | null> {
+    const userId = await this.getInternalUserId(slackUserId);
+    this.logger.log(`Starting conversation for user ${userId} (slack: ${slackUserId})`);
 
     // Check for an existing uncompleted session to resume
     let session = await this.prisma.conversationState.findUnique({
@@ -46,11 +58,11 @@ export class CollectionService implements CollectionGateway {
     });
 
     if (session && !session.isCompleted) {
-      const current = await this.getCurrentQuestion(userId);
+      const current = await this.getCurrentQuestion(slackUserId);
       if (current) {
         return current;
       }
-      return this.getNextQuestion(userId);
+      return this.getNextQuestion(slackUserId);
     }
 
     if (session && session.isCompleted) {
@@ -89,8 +101,9 @@ export class CollectionService implements CollectionGateway {
     return { questionId: firstQuestion.id, text: firstQuestion.question };
   }
 
-  async submitAnswer(userId: string, questionId: string, answer: string): Promise<void> {
-    this.logger.log(`Submitting answer for question ${questionId} from user ${userId}`);
+  async submitAnswer(slackUserId: string, questionId: string, answer: string): Promise<void> {
+    const userId = await this.getInternalUserId(slackUserId);
+    this.logger.log(`Submitting answer for question ${questionId} from user ${userId} (slack: ${slackUserId})`);
     if (!answer || answer.trim() === '') {
       throw new BadRequestException('Answer cannot be empty.');
     }
@@ -130,7 +143,8 @@ export class CollectionService implements CollectionGateway {
     }
   }
 
-  async getNextQuestion(userId: string): Promise<QuestionPayloadDto | null> {
+  async getNextQuestion(slackUserId: string): Promise<QuestionPayloadDto | null> {
+    const userId = await this.getInternalUserId(slackUserId);
     const session = await this.prisma.conversationState.findUnique({
       where: { userId },
     });
@@ -169,8 +183,9 @@ export class CollectionService implements CollectionGateway {
     return null;
   }
 
-  async finishConversation(userId: string): Promise<void> {
-    this.logger.log(`Finishing conversation for user ${userId}`);
+  async finishConversation(slackUserId: string): Promise<void> {
+    const userId = await this.getInternalUserId(slackUserId);
+    this.logger.log(`Finishing conversation for user ${userId} (slack: ${slackUserId})`);
     await this.prisma.conversationState.update({
       where: { userId },
       data: {
@@ -181,7 +196,8 @@ export class CollectionService implements CollectionGateway {
     });
   }
 
-  async getCurrentQuestion(userId: string): Promise<QuestionPayloadDto | null> {
+  async getCurrentQuestion(slackUserId: string): Promise<QuestionPayloadDto | null> {
+    const userId = await this.getInternalUserId(slackUserId);
     const session = await this.prisma.conversationState.findUnique({
       where: { userId },
     });
