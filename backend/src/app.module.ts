@@ -5,6 +5,7 @@ import { SlackModule } from './slack/slack.module';
 import { CollectionModule } from './collection/collection.module';
 import { QuestionsModule } from './questions/questions.module';
 import { AiModule } from './ai/ai.module';
+import { ReportsModule } from './reports/reports.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { AiModule } from './ai/ai.module';
     CollectionModule,
     QuestionsModule,
     AiModule,
+    ReportsModule,
   ],
   controllers: [],
   providers: [],
