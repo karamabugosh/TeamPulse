@@ -1,7 +1,12 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
 import { CollectionGateway } from '../slack/interfaces/collection.gateway';
 import { QuestionPayloadDto } from '../slack/dto/question-payload.dto';
-import { PrismaService } from '../prisma/prisma.service';
+import { StandupResponse } from '../common/types/standup-response.type';
 
 export type AppHomeSummary = {
   activeQuestionCount: number;
@@ -15,15 +20,21 @@ export class CollectionService implements CollectionGateway {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async getAppHomeSummary(userId: string): Promise<AppHomeSummary> {
-    const activeQuestionCount = await this.prisma.question.count({
-      where: { isActive: true },
-    });
-    const session = await this.prisma.conversationState.findUnique({
-      where: { userId },
-    });
+  async getAppHomeSummary(
+    userId: string,
+  ): Promise<AppHomeSummary> {
+    const activeQuestionCount =
+      await this.prisma.question.count({
+        where: { isActive: true },
+      });
+
+    const session =
+      await this.prisma.conversationState.findUnique({
+        where: { userId },
+      });
 
     let status: AppHomeSummary['status'] = 'not_started';
+
     if (session?.isCompleted) {
       status = 'completed';
     } else if (session?.currentQuestionId) {
@@ -37,45 +48,57 @@ export class CollectionService implements CollectionGateway {
     };
   }
 
-  async startConversation(userId: string): Promise<QuestionPayloadDto | null> {
-    this.logger.log(`Starting conversation for user ${userId}`);
+  async startConversation(
+    userId: string,
+  ): Promise<QuestionPayloadDto | null> {
+    this.logger.log(
+      `Starting conversation for user ${userId}`,
+    );
 
-    // Check for an existing uncompleted session to resume
-    let session = await this.prisma.conversationState.findUnique({
-      where: { userId },
-    });
+    let session =
+      await this.prisma.conversationState.findUnique({
+        where: { userId },
+      });
 
     if (session && !session.isCompleted) {
       const current = await this.getCurrentQuestion(userId);
+
       if (current) {
         return current;
       }
+
       return this.getNextQuestion(userId);
     }
 
     if (session && session.isCompleted) {
-      await this.prisma.answer.deleteMany({ where: { userId } });
-      session = await this.prisma.conversationState.update({
+      await this.prisma.answer.deleteMany({
         where: { userId },
-        data: {
-          isCompleted: false,
-          currentQuestionId: null,
-          completedAt: null,
-          startedAt: new Date(),
-        },
       });
+
+      session =
+        await this.prisma.conversationState.update({
+          where: { userId },
+          data: {
+            isCompleted: false,
+            currentQuestionId: null,
+            completedAt: null,
+            startedAt: new Date(),
+          },
+        });
     }
 
     if (!session) {
-      session = await this.prisma.conversationState.create({
-        data: { userId },
-      });
+      session =
+        await this.prisma.conversationState.create({
+          data: { userId },
+        });
     }
 
-    const firstQuestion = await this.prisma.question.findFirst({
-      where: { isActive: true },
-      orderBy: { order: 'asc' },
-    });
+    const firstQuestion =
+      await this.prisma.question.findFirst({
+        where: { isActive: true },
+        orderBy: { order: 'asc' },
+      });
 
     if (!firstQuestion) {
       return null;
@@ -83,94 +106,158 @@ export class CollectionService implements CollectionGateway {
 
     await this.prisma.conversationState.update({
       where: { userId },
-      data: { currentQuestionId: firstQuestion.id },
+      data: {
+        currentQuestionId: firstQuestion.id,
+      },
     });
 
-    return { questionId: firstQuestion.id, text: firstQuestion.question };
+    return {
+      questionId: firstQuestion.id,
+      text: firstQuestion.question,
+    };
   }
 
-  async submitAnswer(userId: string, questionId: string, answer: string): Promise<void> {
-    this.logger.log(`Submitting answer for question ${questionId} from user ${userId}`);
-    if (!answer || answer.trim() === '') {
-      throw new BadRequestException('Answer cannot be empty.');
+  async submitAnswer(
+    userId: string,
+    questionId: string,
+    answer: string,
+  ): Promise<void> {
+    this.logger.log(
+      `Submitting answer for question ${questionId} from user ${userId}`,
+    );
+
+    const trimmedAnswer = answer?.trim();
+
+    if (!trimmedAnswer) {
+      throw new BadRequestException(
+        'Answer cannot be empty.',
+      );
     }
 
-    // Check session
-    const session = await this.prisma.conversationState.findUnique({
-      where: { userId },
-    });
+    const session =
+      await this.prisma.conversationState.findUnique({
+        where: { userId },
+      });
 
     if (!session || session.isCompleted) {
-      this.logger.warn(`Attempted to submit answer for user ${userId} but no active session exists.`);
+      this.logger.warn(
+        `Attempted to submit answer for user ${userId} but no active session exists.`,
+      );
       return;
     }
 
     if (session.currentQuestionId !== questionId) {
-        this.logger.warn(`User ${userId} answered question ${questionId} but current question is ${session.currentQuestionId}`);
-        // Continuing anyway to handle edge case of duplicate answers. We can upsert.
+      this.logger.warn(
+        `User ${userId} answered question ${questionId} but current question is ${session.currentQuestionId}`,
+      );
     }
 
-    const existingAnswer = await this.prisma.answer.findFirst({
-        where: { userId, questionId }
-    });
+    const existingAnswer =
+      await this.prisma.answer.findFirst({
+        where: {
+          userId,
+          questionId,
+          createdAt: {
+            gte: session.startedAt,
+          },
+        },
+      });
 
     if (existingAnswer) {
-        await this.prisma.answer.update({
-            where: { id: existingAnswer.id },
-            data: { text: answer }
-        });
-    } else {
-        await this.prisma.answer.create({
-            data: {
-                userId,
-                questionId,
-                text: answer,
-            },
-        });
+      await this.prisma.answer.update({
+        where: { id: existingAnswer.id },
+        data: {
+          text: trimmedAnswer,
+        },
+      });
+
+      return;
     }
+
+    await this.prisma.answer.create({
+      data: {
+        userId,
+        questionId,
+        text: trimmedAnswer,
+      },
+    });
   }
 
-  async getNextQuestion(userId: string): Promise<QuestionPayloadDto | null> {
-    const session = await this.prisma.conversationState.findUnique({
-      where: { userId },
-    });
+  async getNextQuestion(
+    userId: string,
+  ): Promise<QuestionPayloadDto | null> {
+    const session =
+      await this.prisma.conversationState.findUnique({
+        where: { userId },
+      });
 
     if (!session || session.isCompleted) {
       return null;
     }
 
-    // Get all answered questions
     const answers = await this.prisma.answer.findMany({
       where: {
         userId,
-        createdAt: { gte: session.startedAt },
+        createdAt: {
+          gte: session.startedAt,
+        },
       },
-      select: { questionId: true },
-    });
-    const answeredQuestionIds = answers.map((a) => a.questionId);
-
-    // Find first question not answered
-    const nextQuestion = await this.prisma.question.findFirst({
-      where: {
-        isActive: true,
-        id: { notIn: answeredQuestionIds },
+      select: {
+        questionId: true,
       },
-      orderBy: { order: 'asc' },
     });
 
-    if (nextQuestion) {
-      await this.prisma.conversationState.update({
-        where: { userId },
-        data: { currentQuestionId: nextQuestion.id },
+    const answeredQuestionIds = answers.map(
+      (answer) => answer.questionId,
+    );
+
+    const nextQuestion =
+      await this.prisma.question.findFirst({
+        where: {
+          isActive: true,
+          id: {
+            notIn: answeredQuestionIds,
+          },
+        },
+        orderBy: {
+          order: 'asc',
+        },
       });
-      return { questionId: nextQuestion.id, text: nextQuestion.question };
+
+    if (!nextQuestion) {
+      return null;
     }
 
-    return null;
+    await this.prisma.conversationState.update({
+      where: { userId },
+      data: {
+        currentQuestionId: nextQuestion.id,
+      },
+    });
+
+    return {
+      questionId: nextQuestion.id,
+      text: nextQuestion.question,
+    };
   }
 
   async finishConversation(userId: string): Promise<void> {
-    this.logger.log(`Finishing conversation for user ${userId}`);
+    this.logger.log(
+      `Finishing conversation for user ${userId}`,
+    );
+
+    const session =
+      await this.prisma.conversationState.findUnique({
+        where: { userId },
+      });
+
+    if (!session) {
+      this.logger.warn(
+        `No conversation exists for user ${userId}`,
+      );
+      return;
+    }
+
     await this.prisma.conversationState.update({
       where: { userId },
       data: {
@@ -181,19 +268,103 @@ export class CollectionService implements CollectionGateway {
     });
   }
 
-  async getCurrentQuestion(userId: string): Promise<QuestionPayloadDto | null> {
-    const session = await this.prisma.conversationState.findUnique({
-      where: { userId },
-    });
-
-    if (session && session.currentQuestionId && !session.isCompleted) {
-      const question = await this.prisma.question.findUnique({
-        where: { id: session.currentQuestionId },
+  async getCurrentQuestion(
+    userId: string,
+  ): Promise<QuestionPayloadDto | null> {
+    const session =
+      await this.prisma.conversationState.findUnique({
+        where: { userId },
       });
-      if (question) {
-        return { questionId: question.id, text: question.question };
-      }
+
+    if (
+      !session ||
+      !session.currentQuestionId ||
+      session.isCompleted
+    ) {
+      return null;
     }
-    return null;
+
+    const question =
+      await this.prisma.question.findUnique({
+        where: {
+          id: session.currentQuestionId,
+        },
+      });
+
+    if (!question) {
+      return null;
+    }
+
+    return {
+      questionId: question.id,
+      text: question.question,
+    };
+  }
+
+  async getCompletedStandupResponses(): Promise<
+    StandupResponse[]
+  > {
+    const completedSessions =
+      await this.prisma.conversationState.findMany({
+        where: {
+          isCompleted: true,
+          completedAt: {
+            not: null,
+          },
+        },
+        orderBy: {
+          completedAt: 'desc',
+        },
+      });
+
+    const responses: StandupResponse[] = [];
+
+    for (const session of completedSessions) {
+      const answers = await this.prisma.answer.findMany({
+        where: {
+          userId: session.userId,
+          createdAt: {
+            gte: session.startedAt,
+          },
+        },
+        include: {
+          question: true,
+        },
+        orderBy: {
+          createdAt: 'asc',
+        },
+      });
+
+      if (answers.length === 0) {
+        continue;
+      }
+
+      const blockerAnswer = answers.find((answer) =>
+        answer.question.question
+          .toLowerCase()
+          .includes('blocker'),
+      );
+
+      const updateAnswers = answers.filter(
+        (answer) => answer.id !== blockerAnswer?.id,
+      );
+
+      responses.push({
+        userId: session.userId,
+        name: session.userId,
+        update: updateAnswers
+          .map(
+            (answer) =>
+              `*${answer.question.question}*\n${answer.text}`,
+          )
+          .join('\n'),
+        blocker: blockerAnswer?.text || undefined,
+        submittedAt: (
+          session.completedAt ?? new Date()
+        ).toISOString(),
+      });
+    }
+
+    return responses;
   }
 }

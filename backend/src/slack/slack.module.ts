@@ -3,7 +3,6 @@ import { ConfigModule } from '@nestjs/config';
 import { SlackService } from './slack.service';
 import { SlackListener } from './slack.listener';
 import { SlackGateway } from './slack.gateway';
-
 import { CollectionModule } from '../collection/collection.module';
 
 // We do not export slack.controller.ts since Slack Bolt handles its own events over WebSockets (Socket Mode)
@@ -12,6 +11,6 @@ import { CollectionModule } from '../collection/collection.module';
 @Module({
   imports: [ConfigModule, CollectionModule],
   providers: [SlackService, SlackGateway, SlackListener],
-  exports: [SlackGateway],
+  exports: [SlackGateway, SlackService],
 })
 export class SlackModule {}
