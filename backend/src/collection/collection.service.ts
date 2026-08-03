@@ -58,6 +58,38 @@ export class CollectionService implements CollectionGateway {
     });
   }
 
+  /**
+   * Updates the stored Slack display name for a user.
+   */
+  async syncSlackUserProfile(
+    slackUserId: string,
+    slackDisplayName: string,
+  ): Promise<void> {
+    const user = await this.getOrCreateUser(slackUserId);
+    const cleanDisplayName = slackDisplayName?.trim();
+
+    if (
+      !cleanDisplayName ||
+      cleanDisplayName === slackUserId ||
+      user.slackDisplayName === cleanDisplayName
+    ) {
+      return;
+    }
+
+    await this.prisma.user.update({
+      where: {
+        id: user.id,
+      },
+      data: {
+        slackDisplayName: cleanDisplayName,
+      },
+    });
+
+    this.logger.log(
+      `Updated display name for Slack user ${slackUserId}`,
+    );
+  }
+
   async getAppHomeSummary(
     slackUserId: string,
   ): Promise<AppHomeSummary> {

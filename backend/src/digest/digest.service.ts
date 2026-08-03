@@ -5,22 +5,85 @@ import { StandupResponse } from '../common/types/standup-response.type';
 export class DigestService {
   generateDailyDigest(responses: StandupResponse[]): string {
     if (responses.length === 0) {
-      return '*Daily Standup Digest*\n\nNo updates were submitted.';
+      return [
+        '*Daily Standup Digest*',
+        '',
+        '_No completed standup responses were submitted._',
+      ].join('\n');
     }
 
-    const updates = responses
-      .map((response) => `*${response.name}*\n${response.update}`)
+    const responseSections = responses
+      .map((response) => this.formatResponse(response))
       .join('\n\n');
 
-    const blockers = responses
-      .filter((response) => response.blocker)
-      .map((response) => `• *${response.name}:* ${response.blocker}`)
-      .join('\n');
+    const blockerResponses = responses.filter(
+      (response) =>
+        response.blocker &&
+        !this.isNoBlockerResponse(response.blocker),
+    );
 
-    const blockerSection = blockers
-      ? `\n\n*Blockers*\n${blockers}`
-      : '\n\n*Blockers*\nNone reported.';
+    const blockerSection =
+      blockerResponses.length > 0
+        ? [
+            '*🚧 Blockers*',
+            ...blockerResponses.map(
+              (response) =>
+                `• *${response.name}:* ${response.blocker}`,
+            ),
+          ].join('\n')
+        : '*🚧 Blockers*\n• None reported.';
 
-    return `*Daily Standup Digest*\n\n${updates}${blockerSection}`;
+    return [
+      '*Daily Standup Digest*',
+      '',
+      responseSections,
+      '',
+      blockerSection,
+      '',
+      `_Responses received: ${responses.length}_`,
+    ].join('\n');
+  }
+
+  private formatResponse(
+    response: StandupResponse,
+  ): string {
+    const submittedTime = this.formatSubmittedTime(
+      response.submittedAt,
+    );
+
+    return [
+      `*👤 ${response.name}*`,
+      response.update,
+      `_Submitted: ${submittedTime}_`,
+    ].join('\n');
+  }
+
+  private isNoBlockerResponse(blocker: string): boolean {
+    const normalized = blocker.trim().toLowerCase();
+
+    return [
+      'no',
+      'none',
+      'no blockers',
+      'none reported',
+      'n/a',
+      'na',
+    ].includes(normalized);
+  }
+
+  private formatSubmittedTime(
+    submittedAt: string,
+  ): string {
+    const date = new Date(submittedAt);
+
+    if (Number.isNaN(date.getTime())) {
+      return 'Unknown time';
+    }
+
+    return date.toLocaleString('en-US', {
+      timeZone: 'Asia/Riyadh',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
   }
 }
