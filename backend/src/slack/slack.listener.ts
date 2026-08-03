@@ -13,6 +13,7 @@ import { buildAppHomeBlocks } from './slack-app-home.view';
 @Injectable()
 export class SlackListener implements OnModuleInit {
   private readonly logger = new Logger(SlackListener.name);
+  private readonly processedMessageIds = new Set<string>();
 
   constructor(
     private readonly slackService: SlackService,
@@ -29,6 +30,18 @@ export class SlackListener implements OnModuleInit {
     this.registerListeners();
   }
 
+  private isDuplicateMessage(msgId: string): boolean {
+    if (!msgId) return false;
+    if (this.processedMessageIds.has(msgId)) {
+      return true;
+    }
+    this.processedMessageIds.add(msgId);
+    setTimeout(() => {
+      this.processedMessageIds.delete(msgId);
+    }, 10000);
+    return false;
+  }
+
   private registerListeners(): void {
     this.logger.log(
       'Attempting to register Slack listeners...',
@@ -43,35 +56,31 @@ export class SlackListener implements OnModuleInit {
       return;
     }
 
-    app.event('message', async ({ event, client }) => {
-      this.logger.log(
-        `[SLACK EVENT TRIGGERED] app.event('message') hit! Raw event: ${JSON.stringify(
-          event,
-        )}`,
-      );
+    const handleIncomingSlackMessage = async (msg: any, client: any) => {
+      const msgIdentifier = msg.client_msg_id || `${msg.user}-${msg.ts}`;
 
-      const msg = event as any;
+      if (this.isDuplicateMessage(msgIdentifier)) {
+        this.logger.debug(`Ignoring duplicate message event ${msgIdentifier}`);
+        return;
+      }
 
       if (
         msg.bot_id ||
         msg.subtype === 'bot_message' ||
-        msg.subtype === 'message_changed'
+        msg.subtype === 'message_changed' ||
+        msg.subtype === 'message_deleted'
       ) {
-        this.logger.debug(
-          'Ignored bot message or edit event.',
-        );
+        this.logger.debug('Ignored bot message or message modification event.');
         return;
       }
 
       if (!msg.user || !msg.channel) {
-        this.logger.warn(
-          'Ignored Slack message without a user or channel.',
-        );
+        this.logger.warn('Ignored Slack message without a user or channel.');
         return;
       }
 
       this.logger.log(
-        `Processing incoming Slack message from user ${msg.user}`,
+        `Processing incoming Slack message from user ${msg.user} in channel ${msg.channel}: "${msg.text}"`,
       );
 
       try {
@@ -90,6 +99,16 @@ export class SlackListener implements OnModuleInit {
       };
 
       await this.slackGateway.handleIncomingMessage(payload);
+    };
+
+    // Standard Bolt message listener for DMs and Channels
+    app.message(async ({ message, client }) => {
+      await handleIncomingSlackMessage(message, client);
+    });
+
+    // Generic Event listener as fallback
+    app.event('message', async ({ event, client }) => {
+      await handleIncomingSlackMessage(event, client);
     });
 
     app.event('app_mention', async ({ event }) => {

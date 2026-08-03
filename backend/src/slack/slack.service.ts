@@ -138,6 +138,93 @@ export class SlackService
   }
 
   /**
+   * Retrieves all active human members in the Slack Workspace using users.list().
+   * Filters out bots, deleted users, app users, and Slackbot.
+   */
+  public async getWorkspaceMembers(): Promise<
+    { id: string; name: string; realName: string; tz?: string }[]
+  > {
+    if (!this.app) {
+      this.logger.error(
+        'Cannot get workspace members: Slack app is not initialized.',
+      );
+      return [];
+    }
+
+    try {
+      const result = await this.app.client.users.list({});
+      if (!result.members) {
+        return [];
+      }
+
+      const humanMembers = result.members
+        .filter((member) => {
+          if (!member || member.deleted) return false;
+          if (member.is_bot || member.is_app_user) return false;
+          if (member.id === 'USLACKBOT' || member.name === 'slackbot') return false;
+          return true;
+        })
+        .map((member) => ({
+          id: member.id!,
+          name:
+            member.profile?.display_name?.trim() ||
+            member.profile?.real_name?.trim() ||
+            member.name ||
+            member.id!,
+          realName:
+            member.profile?.real_name?.trim() || member.real_name || member.name || member.id!,
+          tz: member.tz,
+        }));
+
+      this.logger.log(
+        `Retrieved ${humanMembers.length} human member(s) from Slack workspace.`,
+      );
+
+      return humanMembers;
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+
+      this.logger.error(
+        `Failed to retrieve workspace members from Slack API: ${message}`,
+      );
+
+      return [];
+    }
+  }
+
+  /**
+   * Opens a 1-on-1 direct message channel with a user via conversations.open().
+   */
+  public async openDirectMessage(
+    slackUserId: string,
+  ): Promise<string | null> {
+    if (!this.app) {
+      this.logger.error(
+        'Cannot open DM: Slack app is not initialized.',
+      );
+      return null;
+    }
+
+    try {
+      const result = await this.app.client.conversations.open({
+        users: slackUserId,
+      });
+
+      return result.channel?.id || null;
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+
+      this.logger.error(
+        `Failed to open DM channel for user ${slackUserId}: ${message}`,
+      );
+
+      return null;
+    }
+  }
+
+  /**
    * Sends a message to a Slack channel or user.
    * Returns true when Slack confirms delivery.
    * Returns false if validation or all retry attempts fail.

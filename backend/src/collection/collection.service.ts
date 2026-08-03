@@ -274,12 +274,21 @@ export class CollectionService implements CollectionGateway {
     const user = await this.getOrCreateUser(slackUserId);
     const userId = user.id;
 
-    const session =
-      await this.prisma.conversationState.findUnique({
-        where: { userId },
-      });
+    const session = await this.prisma.conversationState.findUnique({
+      where: { userId },
+    });
 
     if (!session || session.isCompleted) {
+      return null;
+    }
+
+    const activeQuestions = await this.prisma.question.findMany({
+      where: { isActive: true },
+      orderBy: { order: 'asc' },
+    });
+
+    if (activeQuestions.length === 0) {
+      await this.finishConversation(slackUserId);
       return null;
     }
 
@@ -295,26 +304,18 @@ export class CollectionService implements CollectionGateway {
       },
     });
 
-    const answeredQuestionIds = answers.map(
-      (answer) => answer.questionId,
+    const answeredQuestionIds = new Set(answers.map((answer) => answer.questionId));
+
+    const nextIndex = activeQuestions.findIndex(
+      (q) => !answeredQuestionIds.has(q.id),
     );
 
-    const nextQuestion =
-      await this.prisma.question.findFirst({
-        where: {
-          isActive: true,
-          id: {
-            notIn: answeredQuestionIds,
-          },
-        },
-        orderBy: {
-          order: 'asc',
-        },
-      });
-
-    if (!nextQuestion) {
+    if (nextIndex === -1) {
+      await this.finishConversation(slackUserId);
       return null;
     }
+
+    const nextQuestion = activeQuestions[nextIndex];
 
     await this.prisma.conversationState.update({
       where: { userId },
@@ -326,6 +327,8 @@ export class CollectionService implements CollectionGateway {
     return {
       questionId: nextQuestion.id,
       text: nextQuestion.question,
+      questionNumber: nextIndex + 1,
+      totalQuestions: activeQuestions.length,
     };
   }
 
@@ -379,20 +382,26 @@ export class CollectionService implements CollectionGateway {
       return null;
     }
 
-    const question =
-      await this.prisma.question.findUnique({
-        where: {
-          id: session.currentQuestionId,
-        },
-      });
+    const activeQuestions = await this.prisma.question.findMany({
+      where: { isActive: true },
+      orderBy: { order: 'asc' },
+    });
 
-    if (!question) {
-      return null;
+    const questionIndex = activeQuestions.findIndex(
+      (q) => q.id === session.currentQuestionId,
+    );
+
+    if (questionIndex === -1) {
+      return this.getNextQuestion(slackUserId);
     }
+
+    const question = activeQuestions[questionIndex];
 
     return {
       questionId: question.id,
       text: question.question,
+      questionNumber: questionIndex + 1,
+      totalQuestions: activeQuestions.length,
     };
   }
 
@@ -466,5 +475,95 @@ export class CollectionService implements CollectionGateway {
     }
 
     return responses;
+  }
+
+  async isStandupCompletedToday(slackUserId: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { slackUserId },
+    });
+
+    if (!user) {
+      return false;
+    }
+
+    const session = await this.prisma.conversationState.findUnique({
+      where: { userId: user.id },
+    });
+
+    if (!session || !session.isCompleted || !session.completedAt) {
+      return false;
+    }
+
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    return session.completedAt >= startOfToday;
+  }
+
+  async startDailyStandupForUser(
+    slackUserId: string,
+  ): Promise<QuestionPayloadDto | null> {
+    const user = await this.getOrCreateUser(slackUserId);
+    const userId = user.id;
+
+    const activeQuestions = await this.prisma.question.findMany({
+      where: { isActive: true },
+      orderBy: { order: 'asc' },
+    });
+
+    if (activeQuestions.length === 0) {
+      this.logger.warn('No active questions found for daily standup.');
+      return null;
+    }
+
+    const firstQuestion = activeQuestions[0];
+
+    await this.prisma.answer.deleteMany({
+      where: { userId },
+    });
+
+    await this.prisma.conversationState.upsert({
+      where: { userId },
+      update: {
+        isCompleted: false,
+        currentQuestionId: firstQuestion.id,
+        completedAt: null,
+        startedAt: new Date(),
+      },
+      create: {
+        userId,
+        currentQuestionId: firstQuestion.id,
+        isCompleted: false,
+        startedAt: new Date(),
+      },
+    });
+
+    return {
+      questionId: firstQuestion.id,
+      text: firstQuestion.question,
+      questionNumber: 1,
+      totalQuestions: activeQuestions.length,
+    };
+  }
+
+  async getDailyDigestData(
+    workspaceMembers: { id: string; name: string }[],
+  ): Promise<{
+    completedResponses: StandupResponse[];
+    noUpdateUsers: string[];
+  }> {
+    const completedResponses = await this.getCompletedStandupResponses();
+    const completedSlackUserIds = new Set(
+      completedResponses.map((r) => r.userId),
+    );
+
+    const noUpdateUsers = workspaceMembers
+      .filter((member) => !completedSlackUserIds.has(member.id))
+      .map((member) => member.name);
+
+    return {
+      completedResponses,
+      noUpdateUsers,
+    };
   }
 }
