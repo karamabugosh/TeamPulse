@@ -3,7 +3,6 @@ import { ConfigModule } from '@nestjs/config';
 import { SlackService } from './slack.service';
 import { SlackListener } from './slack.listener';
 import { SlackGateway } from './slack.gateway';
-
 import { CollectionModule } from '../collection/collection.module';
 import { AuthModule } from '../auth/auth.module';
 import { QuestionsModule } from '../questions/questions.module';
@@ -15,6 +14,6 @@ import { SlackQuestionsListener } from './slack-questions.listener';
 @Module({
   imports: [ConfigModule, CollectionModule, AuthModule, QuestionsModule],
   providers: [SlackService, SlackGateway, SlackListener, SlackQuestionsListener],
-  exports: [SlackGateway],
+  exports: [SlackGateway, SlackService],
 })
 export class SlackModule {}
