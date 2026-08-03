@@ -6,6 +6,7 @@ import { AiService } from '../ai.service';
 import { AI_BASELINE } from '../ai.config';
 import { EVAL_DATASET, EvalCase } from './eval-dataset';
 import { AiDigestResult } from '../dto/ai-result.dto';
+import { PrismaService } from '../../prisma/prisma.service';
 
 interface CaseResult {
   id: string;
@@ -50,7 +51,8 @@ async function main() {
   process.env.PULSE_AI_ENABLED = 'true';
   AI_BASELINE.measuredAccuracy = 1;
 
-  const service = new AiService();
+  const prisma = new PrismaService();
+  const service = new AiService(prisma);
   const results: CaseResult[] = [];
   let totalCases = 0;
   let passedCases = 0;
@@ -108,6 +110,8 @@ async function main() {
     `\nNext step: if accuracy meets the required baseline (${AI_BASELINE.requiredAccuracy * 100}%), ` +
       `update AI_BASELINE in ai.config.ts with measuredAccuracy=${accuracy.toFixed(2)} and measuredCostPerRun=${costSummary.averageCostPerCall?.toFixed(6) ?? 'N/A'}.`,
   );
+
+  await prisma.$disconnect();
 }
 
 main().catch((e) => {

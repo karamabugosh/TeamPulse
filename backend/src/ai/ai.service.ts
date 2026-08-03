@@ -8,35 +8,62 @@ import { isAiFeatureEnabled } from './ai.config';
 import { getOpenAiClient, getOpenAiModel } from './openai-client';
 import { parseAndValidateAiResponse } from './ai-response-validator';
 import { CostAccumulator } from './cost-tracker';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
   private readonly costAccumulator = new CostAccumulator();
 
+  constructor(private readonly prisma: PrismaService) {}
+
   async analyzeRun(
     teamId: string,
     runId: string,
     responses: RawResponseForAnalysis[],
   ): Promise<AiDigestResult> {
+    let result: AiDigestResult;
+
     if (!isAiFeatureEnabled()) {
       this.logger.log(`AI layer disabled — using rules fallback for run ${runId}`);
-      return runRulesFallback(teamId, runId, responses);
-    }
-
-    if (responses.length === 0) {
+      result = runRulesFallback(teamId, runId, responses);
+    } else if (responses.length === 0) {
       this.logger.warn(`No responses found for run ${runId}; using rules fallback`);
-      return runRulesFallback(teamId, runId, responses);
+      result = runRulesFallback(teamId, runId, responses);
+    } else {
+      try {
+        result = await this.runAiExtraction(teamId, runId, responses);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.error(
+          `AI extraction failed for run ${runId}, falling back to rules: ${message}`,
+        );
+        result = runRulesFallback(teamId, runId, responses);
+      }
     }
 
+    await this.saveDigest(result);
+    return result;
+  }
+
+  private async saveDigest(result: AiDigestResult): Promise<void> {
     try {
-      return await this.runAiExtraction(teamId, runId, responses);
+      await this.prisma.aiDigest.create({
+        data: {
+          teamId: result.teamId,
+          runId: result.runId,
+          generatedAt: new Date(result.generatedAt),
+          source: result.source,
+          summary: result.summary,
+          blockers: result.blockers as any,
+          themes: result.themes as any,
+        },
+      });
+      this.logger.log(`Saved AI digest for run ${result.runId} to database`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.logger.error(
-        `AI extraction failed for run ${runId}, falling back to rules: ${message}`,
-      );
-      return runRulesFallback(teamId, runId, responses);
+      this.logger.error(`Failed to save AI digest for run ${result.runId}: ${message}`);
+      // Do not throw — saving history is not critical enough to fail the whole request.
     }
   }
 

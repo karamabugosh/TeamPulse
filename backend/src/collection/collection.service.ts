@@ -1,7 +1,12 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
-import { CollectionGateway } from '../slack/interfaces/collection.gateway';
-import { QuestionPayloadDto } from '../slack/dto/question-payload.dto';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { QuestionPayloadDto } from '../slack/dto/question-payload.dto';
+import { CollectionGateway } from '../slack/interfaces/collection.gateway';
 
 export type AppHomeSummary = {
   activeQuestionCount: number;
@@ -15,15 +20,65 @@ export class CollectionService implements CollectionGateway {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async getAppHomeSummary(userId: string): Promise<AppHomeSummary> {
-    const activeQuestionCount = await this.prisma.question.count({
-      where: { isActive: true },
+  /**
+   * Slack sends slackUserId, while ConversationState and Answer
+   * reference the internal User.id.
+   *
+   * This helper resolves either identifier to the internal database ID.
+   */
+  private async resolveInternalUserId(userIdentifier: string): Promise<string> {
+    const userBySlackId = await this.prisma.user.findUnique({
+      where: {
+        slackUserId: userIdentifier,
+      },
+      select: {
+        id: true,
+      },
     });
+
+    if (userBySlackId) {
+      return userBySlackId.id;
+    }
+
+    // Also support calls that already provide the internal database ID.
+    const userByInternalId = await this.prisma.user.findUnique({
+      where: {
+        id: userIdentifier,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (userByInternalId) {
+      return userByInternalId.id;
+    }
+
+    throw new NotFoundException(
+      `User with identifier "${userIdentifier}" was not found in the database.`,
+    );
+  }
+
+  async getAppHomeSummary(
+    userIdentifier: string,
+  ): Promise<AppHomeSummary> {
+    const internalUserId =
+      await this.resolveInternalUserId(userIdentifier);
+
+    const activeQuestionCount = await this.prisma.question.count({
+      where: {
+        isActive: true,
+      },
+    });
+
     const session = await this.prisma.conversationState.findUnique({
-      where: { userId },
+      where: {
+        userId: internalUserId,
+      },
     });
 
     let status: AppHomeSummary['status'] = 'not_started';
+
     if (session?.isCompleted) {
       status = 'completed';
     } else if (session?.currentQuestionId) {
@@ -37,26 +92,52 @@ export class CollectionService implements CollectionGateway {
     };
   }
 
-  async startConversation(userId: string): Promise<QuestionPayloadDto | null> {
-    this.logger.log(`Starting conversation for user ${userId}`);
+  async startConversation(
+    userIdentifier: string,
+  ): Promise<QuestionPayloadDto | null> {
+    const internalUserId =
+      await this.resolveInternalUserId(userIdentifier);
 
-    // Check for an existing uncompleted session to resume
+    this.logger.log(
+      `Starting conversation for user ${userIdentifier} ` +
+        `(internal ID: ${internalUserId})`,
+    );
+
     let session = await this.prisma.conversationState.findUnique({
-      where: { userId },
+      where: {
+        userId: internalUserId,
+      },
     });
 
+    // Resume an existing unfinished conversation.
     if (session && !session.isCompleted) {
-      const current = await this.getCurrentQuestion(userId);
-      if (current) {
-        return current;
+      const currentQuestion =
+        await this.getCurrentQuestion(userIdentifier);
+
+      if (currentQuestion) {
+        return currentQuestion;
       }
-      return this.getNextQuestion(userId);
+
+      return this.getNextQuestion(userIdentifier);
     }
 
-    if (session && session.isCompleted) {
-      await this.prisma.answer.deleteMany({ where: { userId } });
+    // Reset an already completed conversation.
+    if (session?.isCompleted) {
+      /*
+       * Current schema has no StandupRun relation, so the existing
+       * implementation removes previous answers before starting again.
+       * This should later be replaced with run-based answer history.
+       */
+      await this.prisma.answer.deleteMany({
+        where: {
+          userId: internalUserId,
+        },
+      });
+
       session = await this.prisma.conversationState.update({
-        where: { userId },
+        where: {
+          userId: internalUserId,
+        },
         data: {
           isCompleted: false,
           currentQuestionId: null,
@@ -66,113 +147,213 @@ export class CollectionService implements CollectionGateway {
       });
     }
 
+    // Create the user's first conversation state.
     if (!session) {
       session = await this.prisma.conversationState.create({
-        data: { userId },
+        data: {
+          userId: internalUserId,
+        },
       });
     }
 
     const firstQuestion = await this.prisma.question.findFirst({
-      where: { isActive: true },
-      orderBy: { order: 'asc' },
+      where: {
+        isActive: true,
+      },
+      orderBy: {
+        order: 'asc',
+      },
     });
 
     if (!firstQuestion) {
+      this.logger.warn('No active questions were found.');
       return null;
     }
 
     await this.prisma.conversationState.update({
-      where: { userId },
-      data: { currentQuestionId: firstQuestion.id },
+      where: {
+        userId: internalUserId,
+      },
+      data: {
+        currentQuestionId: firstQuestion.id,
+      },
     });
 
-    return { questionId: firstQuestion.id, text: firstQuestion.question };
+    return {
+      questionId: firstQuestion.id,
+      text: firstQuestion.question,
+    };
   }
 
-  async submitAnswer(userId: string, questionId: string, answer: string): Promise<void> {
-    this.logger.log(`Submitting answer for question ${questionId} from user ${userId}`);
-    if (!answer || answer.trim() === '') {
+  async submitAnswer(
+    userIdentifier: string,
+    questionId: string,
+    answer: string,
+  ): Promise<void> {
+    const internalUserId =
+      await this.resolveInternalUserId(userIdentifier);
+
+    this.logger.log(
+      `Submitting answer for question ${questionId} ` +
+        `from user ${userIdentifier}`,
+    );
+
+    const normalizedAnswer = answer?.trim();
+
+    if (!normalizedAnswer) {
       throw new BadRequestException('Answer cannot be empty.');
     }
 
-    // Check session
     const session = await this.prisma.conversationState.findUnique({
-      where: { userId },
+      where: {
+        userId: internalUserId,
+      },
     });
 
     if (!session || session.isCompleted) {
-      this.logger.warn(`Attempted to submit answer for user ${userId} but no active session exists.`);
-      return;
+      this.logger.warn(
+        `User ${userIdentifier} attempted to submit an answer ` +
+          'without an active conversation.',
+      );
+
+      throw new BadRequestException(
+        'No active conversation exists for this user.',
+      );
     }
 
     if (session.currentQuestionId !== questionId) {
-        this.logger.warn(`User ${userId} answered question ${questionId} but current question is ${session.currentQuestionId}`);
-        // Continuing anyway to handle edge case of duplicate answers. We can upsert.
+      this.logger.warn(
+        `User ${userIdentifier} answered question ${questionId}, ` +
+          `but the current question is ${session.currentQuestionId}.`,
+      );
     }
 
     const existingAnswer = await this.prisma.answer.findFirst({
-        where: { userId, questionId }
+      where: {
+        userId: internalUserId,
+        questionId,
+        createdAt: {
+          gte: session.startedAt,
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
     });
 
     if (existingAnswer) {
-        await this.prisma.answer.update({
-            where: { id: existingAnswer.id },
-            data: { text: answer }
-        });
-    } else {
-        await this.prisma.answer.create({
-            data: {
-                userId,
-                questionId,
-                text: answer,
-            },
-        });
+      await this.prisma.answer.update({
+        where: {
+          id: existingAnswer.id,
+        },
+        data: {
+          text: normalizedAnswer,
+        },
+      });
+
+      return;
     }
+
+    await this.prisma.answer.create({
+      data: {
+        userId: internalUserId,
+        questionId,
+        text: normalizedAnswer,
+      },
+    });
   }
 
-  async getNextQuestion(userId: string): Promise<QuestionPayloadDto | null> {
+  async getNextQuestion(
+    userIdentifier: string,
+  ): Promise<QuestionPayloadDto | null> {
+    const internalUserId =
+      await this.resolveInternalUserId(userIdentifier);
+
     const session = await this.prisma.conversationState.findUnique({
-      where: { userId },
+      where: {
+        userId: internalUserId,
+      },
     });
 
     if (!session || session.isCompleted) {
       return null;
     }
 
-    // Get all answered questions
     const answers = await this.prisma.answer.findMany({
       where: {
-        userId,
-        createdAt: { gte: session.startedAt },
+        userId: internalUserId,
+        createdAt: {
+          gte: session.startedAt,
+        },
       },
-      select: { questionId: true },
+      select: {
+        questionId: true,
+      },
     });
-    const answeredQuestionIds = answers.map((a) => a.questionId);
 
-    // Find first question not answered
+    const answeredQuestionIds = answers.map(
+      (answerItem) => answerItem.questionId,
+    );
+
     const nextQuestion = await this.prisma.question.findFirst({
       where: {
         isActive: true,
-        id: { notIn: answeredQuestionIds },
+        id: {
+          notIn: answeredQuestionIds,
+        },
       },
-      orderBy: { order: 'asc' },
+      orderBy: {
+        order: 'asc',
+      },
     });
 
-    if (nextQuestion) {
-      await this.prisma.conversationState.update({
-        where: { userId },
-        data: { currentQuestionId: nextQuestion.id },
-      });
-      return { questionId: nextQuestion.id, text: nextQuestion.question };
+    if (!nextQuestion) {
+      return null;
     }
 
-    return null;
+    await this.prisma.conversationState.update({
+      where: {
+        userId: internalUserId,
+      },
+      data: {
+        currentQuestionId: nextQuestion.id,
+      },
+    });
+
+    return {
+      questionId: nextQuestion.id,
+      text: nextQuestion.question,
+    };
   }
 
-  async finishConversation(userId: string): Promise<void> {
-    this.logger.log(`Finishing conversation for user ${userId}`);
+  async finishConversation(userIdentifier: string): Promise<void> {
+    const internalUserId =
+      await this.resolveInternalUserId(userIdentifier);
+
+    this.logger.log(
+      `Finishing conversation for user ${userIdentifier}`,
+    );
+
+    const session = await this.prisma.conversationState.findUnique({
+      where: {
+        userId: internalUserId,
+      },
+    });
+
+    if (!session) {
+      throw new BadRequestException(
+        'No conversation exists for this user.',
+      );
+    }
+
+    if (session.isCompleted) {
+      return;
+    }
+
     await this.prisma.conversationState.update({
-      where: { userId },
+      where: {
+        userId: internalUserId,
+      },
       data: {
         isCompleted: true,
         currentQuestionId: null,
@@ -181,19 +362,39 @@ export class CollectionService implements CollectionGateway {
     });
   }
 
-  async getCurrentQuestion(userId: string): Promise<QuestionPayloadDto | null> {
+  async getCurrentQuestion(
+    userIdentifier: string,
+  ): Promise<QuestionPayloadDto | null> {
+    const internalUserId =
+      await this.resolveInternalUserId(userIdentifier);
+
     const session = await this.prisma.conversationState.findUnique({
-      where: { userId },
+      where: {
+        userId: internalUserId,
+      },
     });
 
-    if (session && session.currentQuestionId && !session.isCompleted) {
-      const question = await this.prisma.question.findUnique({
-        where: { id: session.currentQuestionId },
-      });
-      if (question) {
-        return { questionId: question.id, text: question.question };
-      }
+    if (
+      !session ||
+      session.isCompleted ||
+      !session.currentQuestionId
+    ) {
+      return null;
     }
-    return null;
+
+    const question = await this.prisma.question.findUnique({
+      where: {
+        id: session.currentQuestionId,
+      },
+    });
+
+    if (!question || !question.isActive) {
+      return null;
+    }
+
+    return {
+      questionId: question.id,
+      text: question.question,
+    };
   }
 }

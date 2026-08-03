@@ -9,9 +9,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AppModule = void 0;
 const common_1 = require("@nestjs/common");
 const config_1 = require("@nestjs/config");
+const auth_module_1 = require("./auth/auth.module");
 const slack_module_1 = require("./slack/slack.module");
 const collection_module_1 = require("./collection/collection.module");
 const questions_module_1 = require("./questions/questions.module");
+const ai_module_1 = require("./ai/ai.module");
+const reports_module_1 = require("./reports/reports.module");
 let AppModule = class AppModule {
 };
 exports.AppModule = AppModule;
@@ -19,9 +22,12 @@ exports.AppModule = AppModule = __decorate([
     (0, common_1.Module)({
         imports: [
             config_1.ConfigModule.forRoot({ isGlobal: true }),
+            auth_module_1.AuthModule,
             slack_module_1.SlackModule,
             collection_module_1.CollectionModule,
             questions_module_1.QuestionsModule,
+            ai_module_1.AiModule,
+            reports_module_1.ReportsModule,
         ],
         controllers: [],
         providers: [],

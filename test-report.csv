@@ -1,0 +1,11 @@
+﻿Team ID,Run ID,Generated At,Source,Summary
+team-test-1,run-test-1,2026-08-02T11:40:55.418Z,ai,Sara completed the login page but is blocked on the signup flow due to an unavailable API endpoint. Karam is working on the database schema without any blockers.
+
+Blockers
+User ID,Question ID,Description,Severity,Dependency,Confidence
+sara,q1,Blocked on the signup flow because the API endpoint for validation isn't ready yet.,high,API endpoint for validation,0.9
+
+Themes
+Theme,Mention Count,Summary
+signup flow and API dependency,1,Sara is working on the signup flow but is blocked by an API dependency.
+database schema,1,Karam is working on the database schema.

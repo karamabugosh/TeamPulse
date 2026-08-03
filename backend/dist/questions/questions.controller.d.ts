@@ -3,52 +3,52 @@ export declare class QuestionsController {
     private readonly questionsService;
     constructor(questionsService: QuestionsService);
     findAll(): Promise<{
-        question: string;
         id: string;
+        createdAt: Date;
+        question: string;
+        updatedAt: Date;
         order: number;
         isActive: boolean;
-        createdAt: Date;
-        updatedAt: Date;
     }[]>;
     findOne(id: string): Promise<{
-        question: string;
         id: string;
+        createdAt: Date;
+        question: string;
+        updatedAt: Date;
         order: number;
         isActive: boolean;
-        createdAt: Date;
-        updatedAt: Date;
     }>;
     create(data: {
         question: string;
         order: number;
         isActive?: boolean;
     }): Promise<{
-        question: string;
         id: string;
+        createdAt: Date;
+        question: string;
+        updatedAt: Date;
         order: number;
         isActive: boolean;
-        createdAt: Date;
-        updatedAt: Date;
     }>;
     update(id: string, data: {
         question?: string;
         order?: number;
         isActive?: boolean;
     }): Promise<{
-        question: string;
         id: string;
+        createdAt: Date;
+        question: string;
+        updatedAt: Date;
         order: number;
         isActive: boolean;
-        createdAt: Date;
-        updatedAt: Date;
     }>;
     remove(id: string): Promise<{
-        question: string;
         id: string;
+        createdAt: Date;
+        question: string;
+        updatedAt: Date;
         order: number;
         isActive: boolean;
-        createdAt: Date;
-        updatedAt: Date;
     }>;
     reorder(data: {
         updates: {
@@ -56,19 +56,19 @@ export declare class QuestionsController {
             order: number;
         }[];
     }): Promise<{
-        question: string;
         id: string;
+        createdAt: Date;
+        question: string;
+        updatedAt: Date;
         order: number;
         isActive: boolean;
-        createdAt: Date;
-        updatedAt: Date;
     }[]>;
     toggleActive(id: string): Promise<{
-        question: string;
         id: string;
+        createdAt: Date;
+        question: string;
+        updatedAt: Date;
         order: number;
         isActive: boolean;
-        createdAt: Date;
-        updatedAt: Date;
     }>;
 }

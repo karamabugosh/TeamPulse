@@ -1,6 +1,6 @@
-import { CollectionGateway } from '../slack/interfaces/collection.gateway';
-import { QuestionPayloadDto } from '../slack/dto/question-payload.dto';
 import { PrismaService } from '../prisma/prisma.service';
+import { QuestionPayloadDto } from '../slack/dto/question-payload.dto';
+import { CollectionGateway } from '../slack/interfaces/collection.gateway';
 export type AppHomeSummary = {
     activeQuestionCount: number;
     status: 'not_started' | 'in_progress' | 'completed';
@@ -10,10 +10,11 @@ export declare class CollectionService implements CollectionGateway {
     private readonly prisma;
     private readonly logger;
     constructor(prisma: PrismaService);
-    getAppHomeSummary(userId: string): Promise<AppHomeSummary>;
-    startConversation(userId: string): Promise<QuestionPayloadDto | null>;
-    submitAnswer(userId: string, questionId: string, answer: string): Promise<void>;
-    getNextQuestion(userId: string): Promise<QuestionPayloadDto | null>;
-    finishConversation(userId: string): Promise<void>;
-    getCurrentQuestion(userId: string): Promise<QuestionPayloadDto | null>;
+    private resolveInternalUserId;
+    getAppHomeSummary(userIdentifier: string): Promise<AppHomeSummary>;
+    startConversation(userIdentifier: string): Promise<QuestionPayloadDto | null>;
+    submitAnswer(userIdentifier: string, questionId: string, answer: string): Promise<void>;
+    getNextQuestion(userIdentifier: string): Promise<QuestionPayloadDto | null>;
+    finishConversation(userIdentifier: string): Promise<void>;
+    getCurrentQuestion(userIdentifier: string): Promise<QuestionPayloadDto | null>;
 }

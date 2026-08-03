@@ -27,6 +27,17 @@ Rules you must follow, without exception:
   should reflect how explicitly the text describes something as a
   blocker (a person saying "I'm blocked on X" is high confidence; you
   inferring something might be blocking is lower confidence).
+- severity must reflect impact stated or clearly implied in the text,
+  using these concrete criteria:
+    - "high": the person explicitly says they cannot proceed, are fully
+      stopped, or the blocker affects a deadline/deliverable they mention.
+    - "medium": the person says they are slowed down, working around it,
+      or it affects part of their work but they can still make some
+      progress.
+    - "low": a minor annoyance or inconvenience mentioned in passing,
+      with no stated impact on their ability to progress.
+  If the text does not give enough information to distinguish between
+  these levels, default to "medium" rather than guessing "high".
 - If a field cannot be determined, use null. Do not guess to fill a field.
 - Do not invent blockers, dependencies, users, or themes not present in
   the data.

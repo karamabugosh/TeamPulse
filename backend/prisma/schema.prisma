@@ -1,86 +1,102 @@
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Workspace {
-  id                 String   @id @default(uuid())
-  slackWorkspaceId   String   @unique
-  slackWorkspaceName String
-  botToken           String
-  installedAt        DateTime @default(now())
-  users              User[]
-  teams              Team[]
+  id                 String   @id @default(uuid())
+  slackWorkspaceId   String   @unique
+  slackWorkspaceName String
+  botToken           String
+  installedAt        DateTime @default(now())
+  users              User[]
+  teams              Team[]
 }
 
 model User {
-  id                String             @id @default(uuid())
-  workspaceId       String
-  workspace         Workspace          @relation(fields: [workspaceId], references: [id])
-  slackUserId       String             @unique
-  slackDisplayName  String
-  email             String?
-  timezone          String?
-  createdAt         DateTime           @default(now())
-  teamMembers       TeamMember[]
-  answers           Answer[]
-  conversationState ConversationState?
+  id                String             @id @default(uuid())
+  workspaceId       String
+  workspace         Workspace          @relation(fields: [workspaceId], references: [id])
+  slackUserId       String             @unique
+  slackDisplayName  String
+  email             String?
+  timezone          String?
+  createdAt         DateTime           @default(now())
+  teamMembers       TeamMember[]
+  answers           Answer[]
+  conversationState ConversationState?
 }
 
 model Team {
-  id             String       @id @default(uuid())
-  workspaceId    String
-  workspace      Workspace    @relation(fields: [workspaceId], references: [id])
-  name           String
-  slackChannelId String?
-  scheduleCron   String?
-  timezone       String?
-  createdAt      DateTime     @default(now())
-  teamMembers    TeamMember[]
+  id             String       @id @default(uuid())
+  workspaceId    String
+  workspace      Workspace    @relation(fields: [workspaceId], references: [id])
+  name           String
+  slackChannelId String?
+  scheduleCron   String?
+  timezone       String?
+  createdAt      DateTime     @default(now())
+  teamMembers    TeamMember[]
+  aiDigests      AiDigest[]
 }
 
 model TeamMember {
-  id       String   @id @default(uuid())
-  teamId   String
-  team     Team     @relation(fields: [teamId], references: [id])
-  userId   String
-  user     User     @relation(fields: [userId], references: [id])
-  role     String   @default("member")
-  optedOut Boolean  @default(false)
-  joinedAt DateTime @default(now())
+  id       String   @id @default(uuid())
+  teamId   String
+  team     Team     @relation(fields: [teamId], references: [id])
+  userId   String
+  user     User     @relation(fields: [userId], references: [id])
+  role     String   @default("member")
+  optedOut Boolean  @default(false)
+  joinedAt DateTime @default(now())
 }
 
 model Question {
-  id        String   @id @default(uuid())
-  question  String
-  order     Int
-  isActive  Boolean  @default(true)
-  answers   Answer[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id        String   @id @default(uuid())
+  question  String
+  order     Int
+  isActive  Boolean  @default(true)
+  answers   Answer[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model Answer {
-  id         String   @id @default(uuid())
-  userId     String
-  user       User     @relation(fields: [userId], references: [id])
-  questionId String
-  question   Question @relation(fields: [questionId], references: [id])
-  text       String
-  createdAt  DateTime @default(now())
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id])
+  text       String
+  createdAt  DateTime @default(now())
 }
 
 model ConversationState {
-  id                String    @id @default(uuid())
-  userId            String    @unique
-  user              User      @relation(fields: [userId], references: [id])
-  currentQuestionId String?
-  isCompleted       Boolean   @default(false)
-  startedAt         DateTime  @default(now())
-  completedAt       DateTime?
-  updatedAt         DateTime  @updatedAt
+  id                String    @id @default(uuid())
+  userId            String    @unique
+  user              User      @relation(fields: [userId], references: [id])
+  currentQuestionId String?
+  isCompleted       Boolean   @default(false)
+  startedAt         DateTime  @default(now())
+  completedAt       DateTime?
+  updatedAt         DateTime  @updatedAt
+}
+
+model AiDigest {
+  id          String   @id @default(uuid())
+  teamId      String
+  team        Team     @relation(fields: [teamId], references: [id])
+  runId       String
+  generatedAt DateTime @default(now())
+  source      String
+  summary     String
+  blockers    Json
+  themes      Json
+  createdAt   DateTime @default(now())
+
+  @@index([teamId])
 }
