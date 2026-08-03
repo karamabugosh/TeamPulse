@@ -20,9 +20,49 @@ export class CollectionService implements CollectionGateway {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * CollectionGateway receives Slack user IDs.
+   * Prisma relations require the internal User.id.
+   */
+  private async getOrCreateUser(slackUserId: string) {
+    const existingUser = await this.prisma.user.findUnique({
+      where: { slackUserId },
+    });
+
+    if (existingUser) {
+      return existingUser;
+    }
+
+    const workspace = await this.prisma.workspace.findFirst({
+      orderBy: {
+        installedAt: 'desc',
+      },
+    });
+
+    if (!workspace) {
+      throw new Error(
+        'No Slack workspace exists in the database. Install the Slack app first.',
+      );
+    }
+
+    this.logger.log(
+      `Creating database user for Slack user ${slackUserId}`,
+    );
+
+    return this.prisma.user.create({
+      data: {
+        workspaceId: workspace.id,
+        slackUserId,
+        slackDisplayName: slackUserId,
+      },
+    });
+  }
+
   async getAppHomeSummary(
-    userId: string,
+    slackUserId: string,
   ): Promise<AppHomeSummary> {
+    const user = await this.getOrCreateUser(slackUserId);
+
     const activeQuestionCount =
       await this.prisma.question.count({
         where: { isActive: true },
@@ -30,7 +70,7 @@ export class CollectionService implements CollectionGateway {
 
     const session =
       await this.prisma.conversationState.findUnique({
-        where: { userId },
+        where: { userId: user.id },
       });
 
     let status: AppHomeSummary['status'] = 'not_started';
@@ -49,11 +89,14 @@ export class CollectionService implements CollectionGateway {
   }
 
   async startConversation(
-    userId: string,
+    slackUserId: string,
   ): Promise<QuestionPayloadDto | null> {
     this.logger.log(
-      `Starting conversation for user ${userId}`,
+      `Starting conversation for Slack user ${slackUserId}`,
     );
+
+    const user = await this.getOrCreateUser(slackUserId);
+    const userId = user.id;
 
     let session =
       await this.prisma.conversationState.findUnique({
@@ -61,16 +104,18 @@ export class CollectionService implements CollectionGateway {
       });
 
     if (session && !session.isCompleted) {
-      const current = await this.getCurrentQuestion(userId);
+      const current =
+        await this.getCurrentQuestion(slackUserId);
 
       if (current) {
         return current;
       }
 
-      return this.getNextQuestion(userId);
+      return this.getNextQuestion(slackUserId);
     }
 
-    if (session && session.isCompleted) {
+    if (session?.isCompleted) {
+      // Temporary behavior until answers are grouped by StandupRun.
       await this.prisma.answer.deleteMany({
         where: { userId },
       });
@@ -101,6 +146,7 @@ export class CollectionService implements CollectionGateway {
       });
 
     if (!firstQuestion) {
+      this.logger.warn('No active questions were found.');
       return null;
     }
 
@@ -118,12 +164,12 @@ export class CollectionService implements CollectionGateway {
   }
 
   async submitAnswer(
-    userId: string,
+    slackUserId: string,
     questionId: string,
     answer: string,
   ): Promise<void> {
     this.logger.log(
-      `Submitting answer for question ${questionId} from user ${userId}`,
+      `Submitting answer for question ${questionId} from Slack user ${slackUserId}`,
     );
 
     const trimmedAnswer = answer?.trim();
@@ -134,6 +180,9 @@ export class CollectionService implements CollectionGateway {
       );
     }
 
+    const user = await this.getOrCreateUser(slackUserId);
+    const userId = user.id;
+
     const session =
       await this.prisma.conversationState.findUnique({
         where: { userId },
@@ -141,14 +190,14 @@ export class CollectionService implements CollectionGateway {
 
     if (!session || session.isCompleted) {
       this.logger.warn(
-        `Attempted to submit answer for user ${userId} but no active session exists.`,
+        `User ${slackUserId} attempted to answer without an active conversation.`,
       );
       return;
     }
 
     if (session.currentQuestionId !== questionId) {
       this.logger.warn(
-        `User ${userId} answered question ${questionId} but current question is ${session.currentQuestionId}`,
+        `User ${slackUserId} answered question ${questionId}, but their current question is ${session.currentQuestionId}.`,
       );
     }
 
@@ -184,8 +233,11 @@ export class CollectionService implements CollectionGateway {
   }
 
   async getNextQuestion(
-    userId: string,
+    slackUserId: string,
   ): Promise<QuestionPayloadDto | null> {
+    const user = await this.getOrCreateUser(slackUserId);
+    const userId = user.id;
+
     const session =
       await this.prisma.conversationState.findUnique({
         where: { userId },
@@ -241,10 +293,15 @@ export class CollectionService implements CollectionGateway {
     };
   }
 
-  async finishConversation(userId: string): Promise<void> {
+  async finishConversation(
+    slackUserId: string,
+  ): Promise<void> {
     this.logger.log(
-      `Finishing conversation for user ${userId}`,
+      `Finishing conversation for Slack user ${slackUserId}`,
     );
+
+    const user = await this.getOrCreateUser(slackUserId);
+    const userId = user.id;
 
     const session =
       await this.prisma.conversationState.findUnique({
@@ -253,7 +310,7 @@ export class CollectionService implements CollectionGateway {
 
     if (!session) {
       this.logger.warn(
-        `No conversation exists for user ${userId}`,
+        `No conversation exists for Slack user ${slackUserId}`,
       );
       return;
     }
@@ -269,8 +326,11 @@ export class CollectionService implements CollectionGateway {
   }
 
   async getCurrentQuestion(
-    userId: string,
+    slackUserId: string,
   ): Promise<QuestionPayloadDto | null> {
+    const user = await this.getOrCreateUser(slackUserId);
+    const userId = user.id;
+
     const session =
       await this.prisma.conversationState.findUnique({
         where: { userId },
@@ -312,6 +372,9 @@ export class CollectionService implements CollectionGateway {
             not: null,
           },
         },
+        include: {
+          user: true,
+        },
         orderBy: {
           completedAt: 'desc',
         },
@@ -350,8 +413,10 @@ export class CollectionService implements CollectionGateway {
       );
 
       responses.push({
-        userId: session.userId,
-        name: session.userId,
+        userId: session.user.slackUserId,
+        name:
+          session.user.slackDisplayName ||
+          session.user.slackUserId,
         update: updateAnswers
           .map(
             (answer) =>
