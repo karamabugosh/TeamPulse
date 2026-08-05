@@ -12,3 +12,7 @@ backend/dist/
 # OS files
 .DS_Store
 Thumbs.db
+
+backend/dist/
+backend/node_modules/
+backend/.env
