@@ -10,7 +10,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { OutgoingMessageDto } from './dto/outgoing-message.dto';
 
 @Injectable()
-export class SlackService implements OnModuleInit, OnModuleDestroy {
+export class SlackService
+  implements OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(SlackService.name);
   private app?: App;
 
@@ -24,17 +26,22 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.logger.log('Slack service shutting down.');
+
     if (this.app) {
       await this.app.stop();
     }
-
-    this.logger.log('Slack service shutting down.');
   }
 
   private async initializeSlack(): Promise<void> {
-    const token = this.configService.get<string>('SLACK_BOT_TOKEN');
+    const token =
+      this.configService.get<string>('SLACK_BOT_TOKEN');
+
     const signingSecret =
-      this.configService.get<string>('SLACK_SIGNING_SECRET');
+      this.configService.get<string>(
+        'SLACK_SIGNING_SECRET',
+      );
+
     const appToken =
       this.configService.get<string>('SLACK_APP_TOKEN');
 
@@ -60,11 +67,15 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
       );
     } catch (error: unknown) {
       const message =
-        error instanceof Error ? error.message : 'Unknown error';
+        error instanceof Error
+          ? error.message
+          : String(error);
 
       this.logger.error(
         `Error initializing Slack app: ${message}`,
-        error instanceof Error ? error.stack : undefined,
+        error instanceof Error
+          ? error.stack
+          : undefined,
       );
     }
   }
@@ -88,14 +99,13 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
       this.configService.get<string>('SLACK_BOT_TOKEN');
 
     if (!botToken) {
-      throw new Error('SLACK_BOT_TOKEN is not configured.');
+      throw new Error(
+        'SLACK_BOT_TOKEN is not configured.',
+      );
     }
 
-    /*
-     * auth.test returns information about the workspace
-     * connected to the current bot token.
-     */
-    const authResult = await this.app.client.auth.test();
+    const authResult =
+      await this.app.client.auth.test();
 
     const slackWorkspaceId = authResult.team_id;
     const slackWorkspaceName = authResult.team;
@@ -106,30 +116,28 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const workspace = await this.prisma.workspace.upsert({
-      where: {
-        slackWorkspaceId,
-      },
-      update: {
-        slackWorkspaceName:
-          slackWorkspaceName ?? 'Slack Workspace',
-        botToken,
-      },
-      create: {
-        slackWorkspaceId,
-        slackWorkspaceName:
-          slackWorkspaceName ?? 'Slack Workspace',
-        botToken,
-      },
-    });
+    const workspace =
+      await this.prisma.workspace.upsert({
+        where: {
+          slackWorkspaceId,
+        },
+        update: {
+          slackWorkspaceName:
+            slackWorkspaceName ?? 'Slack Workspace',
+          botToken,
+        },
+        create: {
+          slackWorkspaceId,
+          slackWorkspaceName:
+            slackWorkspaceName ?? 'Slack Workspace',
+          botToken,
+        },
+      });
 
-    /*
-     * users.info returns profile information for the person
-     * who sent the Slack message.
-     */
-    const userResult = await this.app.client.users.info({
-      user: slackUserId,
-    });
+    const userResult =
+      await this.app.client.users.info({
+        user: slackUserId,
+      });
 
     const slackUser = userResult.user;
 
@@ -140,9 +148,10 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
     }
 
     const displayName =
-      slackUser.profile?.display_name ||
-      slackUser.profile?.real_name ||
-      slackUser.name ||
+      slackUser.profile?.display_name?.trim() ||
+      slackUser.profile?.real_name?.trim() ||
+      slackUser.real_name?.trim() ||
+      slackUser.name?.trim() ||
       slackUser.id;
 
     const user = await this.prisma.user.upsert({
@@ -171,25 +180,86 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
     return user.id;
   }
 
+  /**
+   * Gets a readable name for a Slack user.
+   * Falls back to the Slack user ID if lookup fails.
+   */
+  public async getUserDisplayName(
+    slackUserId: string,
+  ): Promise<string> {
+    if (!slackUserId) {
+      return 'Unknown user';
+    }
+
+    if (!this.app) {
+      this.logger.warn(
+        `Cannot look up Slack user ${slackUserId}: Slack app is not initialized.`,
+      );
+
+      return slackUserId;
+    }
+
+    try {
+      const result =
+        await this.app.client.users.info({
+          user: slackUserId,
+        });
+
+      const member = result.user;
+
+      return (
+        member?.profile?.display_name?.trim() ||
+        member?.profile?.real_name?.trim() ||
+        member?.real_name?.trim() ||
+        member?.name?.trim() ||
+        slackUserId
+      );
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      this.logger.warn(
+        `Could not retrieve the display name for Slack user ${slackUserId}: ${message}`,
+      );
+
+      return slackUserId;
+    }
+  }
+
+  /**
+   * Sends a message to a Slack channel or user.
+   * Returns true when Slack confirms delivery.
+   * Returns false if validation or all retry attempts fail.
+   */
   public async sendMessage(
     payload: OutgoingMessageDto,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!this.app) {
-      throw new Error(
+      this.logger.error(
         'Cannot send message: Slack app is not initialized.',
       );
+
+      return false;
     }
 
     if (!payload.channelId || !payload.text) {
-      throw new Error(
+      this.logger.error(
         'Cannot send message: channelId and text are required.',
       );
+
+      return false;
     }
 
     const maxAttempts = 3;
     let delay = 1000;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (
+      let attempt = 1;
+      attempt <= maxAttempts;
+      attempt += 1
+    ) {
       try {
         this.logger.log(
           `Sending message to channel ${payload.channelId} ` +
@@ -201,19 +271,27 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
           text: payload.text,
         });
 
-        return;
+        this.logger.log(
+          `Slack message delivered successfully to ${payload.channelId}.`,
+        );
+
+        return true;
       } catch (error: unknown) {
         const message =
           error instanceof Error
             ? error.message
-            : 'Unknown Slack error';
+            : String(error);
 
         this.logger.error(
-          `Failed to send Slack message: ${message}`,
+          `Failed to send Slack message to ${payload.channelId}: ${message}`,
         );
 
         if (attempt === maxAttempts) {
-          throw error;
+          this.logger.error(
+            `Exhausted retries for Slack channel ${payload.channelId}.`,
+          );
+
+          return false;
         }
 
         await new Promise<void>((resolve) => {
@@ -223,5 +301,7 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
         delay *= 2;
       }
     }
+
+    return false;
   }
 }

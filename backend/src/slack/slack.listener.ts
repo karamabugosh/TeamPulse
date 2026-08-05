@@ -1,4 +1,8 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
 import { CollectionService } from '../collection/collection.service';
 import { ReportsService } from '../reports/reports.service';
 import { IncomingMessageDto } from './dto/incoming-message.dto';
@@ -18,12 +22,17 @@ export class SlackListener implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
-    this.logger.log('SlackListener onModuleInit() is executing...');
+    this.logger.log(
+      'SlackListener onModuleInit() is executing...',
+    );
+
     this.registerListeners();
   }
 
   private registerListeners(): void {
-    this.logger.log('Attempting to register Slack listeners...');
+    this.logger.log(
+      'Attempting to register Slack listeners...',
+    );
 
     const app = this.slackService.getSlackApp();
 
@@ -34,6 +43,9 @@ export class SlackListener implements OnModuleInit {
       return;
     }
 
+    /*
+     * Handles normal Slack messages, including direct messages.
+     */
     app.event('message', async ({ event }) => {
       const msg = event as {
         user?: string;
@@ -45,9 +57,15 @@ export class SlackListener implements OnModuleInit {
       };
 
       this.logger.log(
-        `[SLACK EVENT TRIGGERED] message event received: ${JSON.stringify(event)}`,
+        `[SLACK EVENT TRIGGERED] message event received: ${JSON.stringify(
+          event,
+        )}`,
       );
 
+      /*
+       * Ignore bot messages and edited messages to prevent
+       * loops or processing the same message more than once.
+       */
       if (
         msg.bot_id ||
         msg.subtype === 'bot_message' ||
@@ -66,8 +84,18 @@ export class SlackListener implements OnModuleInit {
         return;
       }
 
+      this.logger.log(
+        `Processing incoming Slack message from user ${msg.user}`,
+      );
+
       try {
-        await this.slackService.ensureUserRegistered(msg.user);
+        /*
+         * Ensure that the Slack workspace and user exist
+         * in PostgreSQL before the Collection flow starts.
+         */
+        await this.slackService.ensureUserRegistered(
+          msg.user,
+        );
 
         const payload: IncomingMessageDto = {
           userId: msg.user,
@@ -80,181 +108,308 @@ export class SlackListener implements OnModuleInit {
           `Sending incoming message from user ${msg.user} to SlackGateway.`,
         );
 
-        await this.slackGateway.handleIncomingMessage(payload);
+        await this.slackGateway.handleIncomingMessage(
+          payload,
+        );
       } catch (error: unknown) {
         const message =
-          error instanceof Error ? error.message : 'Unknown error';
+          error instanceof Error
+            ? error.message
+            : String(error);
 
         this.logger.error(
           `Failed to process Slack message for user ${msg.user}: ${message}`,
-          error instanceof Error ? error.stack : undefined,
+          error instanceof Error
+            ? error.stack
+            : undefined,
         );
 
         await this.slackService.sendMessage({
           channelId: msg.channel,
-          text: '❌ An error occurred while preparing your standup. Please try again.',
+          text:
+            '❌ An error occurred while preparing your standup. ' +
+            'Please try again.',
         });
       }
     });
 
+    /*
+     * Handles mentions of the bot inside Slack channels.
+     */
     app.event('app_mention', async ({ event }) => {
       this.logger.log(
-        `[SLACK EVENT TRIGGERED] app_mention received: ${JSON.stringify(event)}`,
+        `[SLACK EVENT TRIGGERED] app_mention received: ${JSON.stringify(
+          event,
+        )}`,
       );
-    });
 
-    app.event('app_home_opened', async ({ event, client }) => {
       try {
-        await this.slackService.ensureUserRegistered(event.user);
+        await this.slackService.ensureUserRegistered(
+          event.user,
+        );
 
-        const summary =
-          await this.collectionService.getAppHomeSummary(event.user);
+        /*
+         * Removes the bot mention, for example:
+         * "<@BOT_ID> hello" becomes "hello".
+         */
+        const normalizedMessage = (
+          event.text ?? ''
+        )
+          .replace(/<@[^>]+>/g, '')
+          .trim();
 
-        await client.views.publish({
-          user_id: event.user,
-          view: {
-            type: 'home',
-            blocks: buildAppHomeBlocks(summary),
-          },
-        });
+        const payload: IncomingMessageDto = {
+          userId: event.user,
+          channelId: event.channel,
+          message: normalizedMessage,
+          timestamp: event.ts,
+        };
+
+        await this.slackGateway.handleIncomingMessage(
+          payload,
+        );
       } catch (error: unknown) {
         const message =
-          error instanceof Error ? error.message : 'Unknown error';
+          error instanceof Error
+            ? error.message
+            : String(error);
 
         this.logger.error(
-          `Failed to publish App Home: ${message}`,
-          error instanceof Error ? error.stack : undefined,
+          `Failed to process app mention from user ${event.user}: ${message}`,
+          error instanceof Error
+            ? error.stack
+            : undefined,
         );
+
+        await this.slackService.sendMessage({
+          channelId: event.channel,
+          text:
+            '❌ An error occurred while processing your request.',
+        });
       }
     });
 
-    app.action('start_standup', async ({ ack, body, client }) => {
-      await ack();
+    /*
+     * Publishes the current standup status in Slack App Home.
+     */
+    app.event(
+      'app_home_opened',
+      async ({ event, client }) => {
+        try {
+          await this.slackService.ensureUserRegistered(
+            event.user,
+          );
 
-      const userId = body.user.id;
+          const summary =
+            await this.collectionService.getAppHomeSummary(
+              event.user,
+            );
 
-      try {
-        await this.slackService.ensureUserRegistered(userId);
+          await client.views.publish({
+            user_id: event.user,
+            view: {
+              type: 'home',
+              blocks: buildAppHomeBlocks(summary),
+            },
+          });
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : String(error);
 
-        const openResult = await client.conversations.open({
-          users: userId,
-        });
-
-        const channelId = openResult.channel?.id;
-
-        if (!channelId) {
           this.logger.error(
-            'Could not open a DM channel for the standup.',
+            `Failed to publish App Home: ${message}`,
+            error instanceof Error
+              ? error.stack
+              : undefined,
           );
-          return;
         }
+      },
+    );
 
-        await this.slackGateway.startConversationFlow(
-          userId,
-          channelId,
-        );
+    /*
+     * Handles the Start Standup button from Slack App Home.
+     */
+    app.action(
+      'start_standup',
+      async ({ ack, body, client }) => {
+        await ack();
 
-        const summary =
-          await this.collectionService.getAppHomeSummary(userId);
+        const userId = body.user.id;
 
-        await client.views.publish({
-          user_id: userId,
-          view: {
-            type: 'home',
-            blocks: buildAppHomeBlocks(summary),
-          },
-        });
-      } catch (error: unknown) {
-        const message =
-          error instanceof Error ? error.message : 'Unknown error';
-
-        this.logger.error(
-          `Start standup action failed: ${message}`,
-          error instanceof Error ? error.stack : undefined,
-        );
-      }
-    });
-
-    app.command('/report', async ({ command, ack, respond }) => {
-      await ack();
-
-      try {
-        await this.slackService.ensureUserRegistered(command.user_id);
-
-        const teamSearch = command.text?.trim() || undefined;
-
-        const digest =
-          await this.reportsService.getLatestDigestForSlackUser(
-            command.user_id,
-            teamSearch,
+        try {
+          await this.slackService.ensureUserRegistered(
+            userId,
           );
 
-        await respond({
-          response_type: 'ephemeral',
-          text: this.reportsService.formatDigestForSlack(digest),
-        });
-      } catch (error: unknown) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : 'Could not load the latest report.';
+          const openResult =
+            await client.conversations.open({
+              users: userId,
+            });
 
-        this.logger.error(
-          `/report failed for user ${command.user_id}: ${message}`,
-          error instanceof Error ? error.stack : undefined,
-        );
+          const channelId = openResult.channel?.id;
 
-        await respond({
-          response_type: 'ephemeral',
-          text: `❌ ${message}`,
-        });
-      }
-    });
+          if (!channelId) {
+            this.logger.error(
+              'Could not open a DM channel for the standup.',
+            );
+            return;
+          }
 
-    app.command('/history', async ({ command, ack, respond }) => {
-      await ack();
-
-      try {
-        await this.slackService.ensureUserRegistered(command.user_id);
-
-        const teamSearch = command.text?.trim() || undefined;
-
-        const digests =
-          await this.reportsService.getDigestHistoryForSlackUser(
-            command.user_id,
-            5,
-            teamSearch,
+          await this.slackGateway.startConversationFlow(
+            userId,
+            channelId,
           );
 
-        await respond({
-          response_type: 'ephemeral',
-          text: this.reportsService.formatHistoryForSlack(digests),
-        });
-      } catch (error: unknown) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : 'Could not load report history.';
+          const summary =
+            await this.collectionService.getAppHomeSummary(
+              userId,
+            );
 
-        this.logger.error(
-          `/history failed for user ${command.user_id}: ${message}`,
-          error instanceof Error ? error.stack : undefined,
-        );
+          await client.views.publish({
+            user_id: userId,
+            view: {
+              type: 'home',
+              blocks: buildAppHomeBlocks(summary),
+            },
+          });
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : String(error);
 
-        await respond({
-          response_type: 'ephemeral',
-          text: `❌ ${message}`,
-        });
-      }
-    });
+          this.logger.error(
+            `Start standup action failed: ${message}`,
+            error instanceof Error
+              ? error.stack
+              : undefined,
+          );
+        }
+      },
+    );
 
-    app.error(async (error: Error) => {
+    /*
+     * Displays the latest saved AI report for the user's team.
+     */
+    app.command(
+      '/report',
+      async ({ command, ack, respond }) => {
+        await ack();
+
+        try {
+          await this.slackService.ensureUserRegistered(
+            command.user_id,
+          );
+
+          const teamSearch =
+            command.text?.trim() || undefined;
+
+          const digest =
+            await this.reportsService.getLatestDigestForSlackUser(
+              command.user_id,
+              teamSearch,
+            );
+
+          await respond({
+            response_type: 'ephemeral',
+            text:
+              this.reportsService.formatDigestForSlack(
+                digest,
+              ),
+          });
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : 'Could not load the latest report.';
+
+          this.logger.error(
+            `/report failed for user ${command.user_id}: ${message}`,
+            error instanceof Error
+              ? error.stack
+              : undefined,
+          );
+
+          await respond({
+            response_type: 'ephemeral',
+            text: `❌ ${message}`,
+          });
+        }
+      },
+    );
+
+    /*
+     * Displays the latest five AI reports for the user's team.
+     */
+    app.command(
+      '/history',
+      async ({ command, ack, respond }) => {
+        await ack();
+
+        try {
+          await this.slackService.ensureUserRegistered(
+            command.user_id,
+          );
+
+          const teamSearch =
+            command.text?.trim() || undefined;
+
+          const digests =
+            await this.reportsService.getDigestHistoryForSlackUser(
+              command.user_id,
+              5,
+              teamSearch,
+            );
+
+          await respond({
+            response_type: 'ephemeral',
+            text:
+              this.reportsService.formatHistoryForSlack(
+                digests,
+              ),
+          });
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : 'Could not load report history.';
+
+          this.logger.error(
+            `/history failed for user ${command.user_id}: ${message}`,
+            error instanceof Error
+              ? error.stack
+              : undefined,
+          );
+
+          await respond({
+            response_type: 'ephemeral',
+            text: `❌ ${message}`,
+          });
+        }
+      },
+    );
+
+    /*
+     * Global Slack Bolt error handler.
+     */
+    app.error(async (error: unknown) => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
       this.logger.error(
-        `[SLACK ERROR] Global error handler caught: ${error.message}`,
-        error.stack,
+        `[SLACK ERROR] Global error handler caught: ${message}`,
+        error instanceof Error
+          ? error.stack
+          : undefined,
       );
     });
 
-    this.logger.log('Slack listeners successfully registered.');
+    this.logger.log(
+      'Slack listeners successfully registered.',
+    );
   }
 }
