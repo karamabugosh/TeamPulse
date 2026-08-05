@@ -1,20 +1,33 @@
 import { Injectable } from '@nestjs/common';
-import { StandupResponse } from '../common/types/standup-response.type';
+import {
+  StandupNonResponder,
+  StandupResponse,
+} from '../common/types/standup-response.type';
 
 @Injectable()
 export class DigestService {
-  generateDailyDigest(responses: StandupResponse[]): string {
-    if (responses.length === 0) {
-      return [
-        '*Daily Standup Digest*',
-        '',
-        '_No completed standup responses were submitted._',
-      ].join('\n');
-    }
+  generateDailyDigest(
+    responses: StandupResponse[],
+    nonResponders: StandupNonResponder[] = [],
+  ): string {
+    const sections: string[] = [
+      '*Daily Standup Digest*',
+      '',
+    ];
 
-    const responseSections = responses
-      .map((response) => this.formatResponse(response))
-      .join('\n\n');
+    if (responses.length === 0) {
+      sections.push(
+        '_No completed standup responses were submitted._',
+      );
+    } else {
+      sections.push(
+        responses
+          .map((response) =>
+            this.formatResponse(response),
+          )
+          .join('\n\n'),
+      );
+    }
 
     const blockerResponses = responses.filter(
       (response) =>
@@ -22,26 +35,51 @@ export class DigestService {
         !this.isNoBlockerResponse(response.blocker),
     );
 
-    const blockerSection =
-      blockerResponses.length > 0
-        ? [
-            '*🚧 Blockers*',
-            ...blockerResponses.map(
-              (response) =>
-                `• *${response.name}:* ${response.blocker}`,
-            ),
-          ].join('\n')
-        : '*🚧 Blockers*\n• None reported.';
+    sections.push('');
 
-    return [
-      '*Daily Standup Digest*',
-      '',
-      responseSections,
-      '',
-      blockerSection,
-      '',
+    if (blockerResponses.length > 0) {
+      sections.push(
+        [
+          '*🚧 Blockers*',
+          ...blockerResponses.map(
+            (response) =>
+              `• *${response.name}:* ${response.blocker}`,
+          ),
+        ].join('\n'),
+      );
+    } else {
+      sections.push('*🚧 Blockers*\n• None reported.');
+    }
+
+    sections.push('');
+
+    if (nonResponders.length > 0) {
+      sections.push(
+        [
+          '*⏳ No Response*',
+          ...nonResponders.map(
+            (member) => `• ${member.name}`,
+          ),
+        ].join('\n'),
+      );
+    } else {
+      sections.push(
+        '*⏳ No Response*\n• Everyone submitted.',
+      );
+    }
+
+    sections.push('');
+    sections.push(
       `_Responses received: ${responses.length}_`,
-    ].join('\n');
+    );
+
+    if (nonResponders.length > 0) {
+      sections.push(
+        `_Missing responses: ${nonResponders.length}_`,
+      );
+    }
+
+    return sections.join('\n');
   }
 
   private formatResponse(
@@ -58,12 +96,15 @@ export class DigestService {
     ].join('\n');
   }
 
-  private isNoBlockerResponse(blocker: string): boolean {
+  private isNoBlockerResponse(
+    blocker: string,
+  ): boolean {
     const normalized = blocker.trim().toLowerCase();
 
     return [
       'no',
       'none',
+      'no blocker',
       'no blockers',
       'none reported',
       'n/a',

@@ -5,3 +5,8 @@ export type StandupResponse = {
   blocker?: string;
   submittedAt: string;
 };
+
+export type StandupNonResponder = {
+  userId: string;
+  name: string;
+};
