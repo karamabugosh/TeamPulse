@@ -5,16 +5,16 @@ export declare class QuestionsService {
     findAll(): Promise<{
         id: string;
         createdAt: Date;
-        question: string;
         updatedAt: Date;
+        question: string;
         order: number;
         isActive: boolean;
     }[]>;
     findOne(id: string): Promise<{
         id: string;
         createdAt: Date;
-        question: string;
         updatedAt: Date;
+        question: string;
         order: number;
         isActive: boolean;
     }>;
@@ -25,8 +25,8 @@ export declare class QuestionsService {
     }): Promise<{
         id: string;
         createdAt: Date;
-        question: string;
         updatedAt: Date;
+        question: string;
         order: number;
         isActive: boolean;
     }>;
@@ -37,24 +37,24 @@ export declare class QuestionsService {
     }): Promise<{
         id: string;
         createdAt: Date;
-        question: string;
         updatedAt: Date;
+        question: string;
         order: number;
         isActive: boolean;
     }>;
     toggleActive(id: string): Promise<{
         id: string;
         createdAt: Date;
-        question: string;
         updatedAt: Date;
+        question: string;
         order: number;
         isActive: boolean;
     }>;
     remove(id: string): Promise<{
         id: string;
         createdAt: Date;
-        question: string;
         updatedAt: Date;
+        question: string;
         order: number;
         isActive: boolean;
     }>;
@@ -64,8 +64,8 @@ export declare class QuestionsService {
     }[]): Promise<{
         id: string;
         createdAt: Date;
-        question: string;
         updatedAt: Date;
+        question: string;
         order: number;
         isActive: boolean;
     }[]>;

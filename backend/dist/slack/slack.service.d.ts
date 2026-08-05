@@ -14,5 +14,6 @@ export declare class SlackService implements OnModuleInit, OnModuleDestroy {
     private initializeSlack;
     getSlackApp(): App | undefined;
     ensureUserRegistered(slackUserId: string): Promise<string>;
-    sendMessage(payload: OutgoingMessageDto): Promise<void>;
+    getUserDisplayName(slackUserId: string): Promise<string>;
+    sendMessage(payload: OutgoingMessageDto): Promise<boolean>;
 }

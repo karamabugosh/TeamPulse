@@ -25,10 +25,10 @@ let SlackService = SlackService_1 = class SlackService {
         await this.initializeSlack();
     }
     async onModuleDestroy() {
+        this.logger.log('Slack service shutting down.');
         if (this.app) {
             await this.app.stop();
         }
-        this.logger.log('Slack service shutting down.');
     }
     async initializeSlack() {
         const token = this.configService.get('SLACK_BOT_TOKEN');
@@ -49,15 +49,19 @@ let SlackService = SlackService_1 = class SlackService {
             this.logger.log('⚡️ Slack Bolt app is running in Socket Mode!');
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : 'Unknown error';
-            this.logger.error(`Error initializing Slack app: ${message}`, error instanceof Error ? error.stack : undefined);
+            const message = error instanceof Error
+                ? error.message
+                : String(error);
+            this.logger.error(`Error initializing Slack app: ${message}`, error instanceof Error
+                ? error.stack
+                : undefined);
         }
     }
     getSlackApp() {
         return this.app;
     }
     async ensureUserRegistered(slackUserId) {
-        var _a, _b, _c, _d, _e, _f, _g, _h;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
         if (!this.app) {
             throw new Error('Slack app is not initialized.');
         }
@@ -92,9 +96,10 @@ let SlackService = SlackService_1 = class SlackService {
         if (!(slackUser === null || slackUser === void 0 ? void 0 : slackUser.id)) {
             throw new Error(`Slack user ${slackUserId} could not be loaded.`);
         }
-        const displayName = ((_a = slackUser.profile) === null || _a === void 0 ? void 0 : _a.display_name) ||
-            ((_b = slackUser.profile) === null || _b === void 0 ? void 0 : _b.real_name) ||
-            slackUser.name ||
+        const displayName = ((_b = (_a = slackUser.profile) === null || _a === void 0 ? void 0 : _a.display_name) === null || _b === void 0 ? void 0 : _b.trim()) ||
+            ((_d = (_c = slackUser.profile) === null || _c === void 0 ? void 0 : _c.real_name) === null || _d === void 0 ? void 0 : _d.trim()) ||
+            ((_e = slackUser.real_name) === null || _e === void 0 ? void 0 : _e.trim()) ||
+            ((_f = slackUser.name) === null || _f === void 0 ? void 0 : _f.trim()) ||
             slackUser.id;
         const user = await this.prisma.user.upsert({
             where: {
@@ -103,30 +108,60 @@ let SlackService = SlackService_1 = class SlackService {
             update: {
                 workspaceId: workspace.id,
                 slackDisplayName: displayName,
-                email: (_d = (_c = slackUser.profile) === null || _c === void 0 ? void 0 : _c.email) !== null && _d !== void 0 ? _d : null,
-                timezone: (_e = slackUser.tz) !== null && _e !== void 0 ? _e : null,
+                email: (_h = (_g = slackUser.profile) === null || _g === void 0 ? void 0 : _g.email) !== null && _h !== void 0 ? _h : null,
+                timezone: (_j = slackUser.tz) !== null && _j !== void 0 ? _j : null,
             },
             create: {
                 workspaceId: workspace.id,
                 slackUserId: slackUser.id,
                 slackDisplayName: displayName,
-                email: (_g = (_f = slackUser.profile) === null || _f === void 0 ? void 0 : _f.email) !== null && _g !== void 0 ? _g : null,
-                timezone: (_h = slackUser.tz) !== null && _h !== void 0 ? _h : null,
+                email: (_l = (_k = slackUser.profile) === null || _k === void 0 ? void 0 : _k.email) !== null && _l !== void 0 ? _l : null,
+                timezone: (_m = slackUser.tz) !== null && _m !== void 0 ? _m : null,
             },
         });
         this.logger.log(`Slack user ${slackUserId} registered as database user ${user.id}`);
         return user.id;
     }
+    async getUserDisplayName(slackUserId) {
+        var _a, _b, _c, _d, _e, _f;
+        if (!slackUserId) {
+            return 'Unknown user';
+        }
+        if (!this.app) {
+            this.logger.warn(`Cannot look up Slack user ${slackUserId}: Slack app is not initialized.`);
+            return slackUserId;
+        }
+        try {
+            const result = await this.app.client.users.info({
+                user: slackUserId,
+            });
+            const member = result.user;
+            return (((_b = (_a = member === null || member === void 0 ? void 0 : member.profile) === null || _a === void 0 ? void 0 : _a.display_name) === null || _b === void 0 ? void 0 : _b.trim()) ||
+                ((_d = (_c = member === null || member === void 0 ? void 0 : member.profile) === null || _c === void 0 ? void 0 : _c.real_name) === null || _d === void 0 ? void 0 : _d.trim()) ||
+                ((_e = member === null || member === void 0 ? void 0 : member.real_name) === null || _e === void 0 ? void 0 : _e.trim()) ||
+                ((_f = member === null || member === void 0 ? void 0 : member.name) === null || _f === void 0 ? void 0 : _f.trim()) ||
+                slackUserId);
+        }
+        catch (error) {
+            const message = error instanceof Error
+                ? error.message
+                : String(error);
+            this.logger.warn(`Could not retrieve the display name for Slack user ${slackUserId}: ${message}`);
+            return slackUserId;
+        }
+    }
     async sendMessage(payload) {
         if (!this.app) {
-            throw new Error('Cannot send message: Slack app is not initialized.');
+            this.logger.error('Cannot send message: Slack app is not initialized.');
+            return false;
         }
         if (!payload.channelId || !payload.text) {
-            throw new Error('Cannot send message: channelId and text are required.');
+            this.logger.error('Cannot send message: channelId and text are required.');
+            return false;
         }
         const maxAttempts = 3;
         let delay = 1000;
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             try {
                 this.logger.log(`Sending message to channel ${payload.channelId} ` +
                     `(attempt ${attempt}/${maxAttempts})`);
@@ -134,15 +169,17 @@ let SlackService = SlackService_1 = class SlackService {
                     channel: payload.channelId,
                     text: payload.text,
                 });
-                return;
+                this.logger.log(`Slack message delivered successfully to ${payload.channelId}.`);
+                return true;
             }
             catch (error) {
                 const message = error instanceof Error
                     ? error.message
-                    : 'Unknown Slack error';
-                this.logger.error(`Failed to send Slack message: ${message}`);
+                    : String(error);
+                this.logger.error(`Failed to send Slack message to ${payload.channelId}: ${message}`);
                 if (attempt === maxAttempts) {
-                    throw error;
+                    this.logger.error(`Exhausted retries for Slack channel ${payload.channelId}.`);
+                    return false;
                 }
                 await new Promise((resolve) => {
                     setTimeout(resolve, delay);
@@ -150,6 +187,7 @@ let SlackService = SlackService_1 = class SlackService {
                 delay *= 2;
             }
         }
+        return false;
     }
 };
 exports.SlackService = SlackService;

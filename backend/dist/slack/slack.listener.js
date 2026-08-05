@@ -50,6 +50,7 @@ let SlackListener = SlackListener_1 = class SlackListener {
                 this.logger.warn('Ignored Slack message because user or channel was missing.');
                 return;
             }
+            this.logger.log(`Processing incoming Slack message from user ${msg.user}`);
             try {
                 await this.slackService.ensureUserRegistered(msg.user);
                 const payload = {
@@ -62,16 +63,47 @@ let SlackListener = SlackListener_1 = class SlackListener {
                 await this.slackGateway.handleIncomingMessage(payload);
             }
             catch (error) {
-                const message = error instanceof Error ? error.message : 'Unknown error';
-                this.logger.error(`Failed to process Slack message for user ${msg.user}: ${message}`, error instanceof Error ? error.stack : undefined);
+                const message = error instanceof Error
+                    ? error.message
+                    : String(error);
+                this.logger.error(`Failed to process Slack message for user ${msg.user}: ${message}`, error instanceof Error
+                    ? error.stack
+                    : undefined);
                 await this.slackService.sendMessage({
                     channelId: msg.channel,
-                    text: '❌ An error occurred while preparing your standup. Please try again.',
+                    text: '❌ An error occurred while preparing your standup. ' +
+                        'Please try again.',
                 });
             }
         });
         app.event('app_mention', async ({ event }) => {
+            var _a;
             this.logger.log(`[SLACK EVENT TRIGGERED] app_mention received: ${JSON.stringify(event)}`);
+            try {
+                await this.slackService.ensureUserRegistered(event.user);
+                const normalizedMessage = ((_a = event.text) !== null && _a !== void 0 ? _a : '')
+                    .replace(/<@[^>]+>/g, '')
+                    .trim();
+                const payload = {
+                    userId: event.user,
+                    channelId: event.channel,
+                    message: normalizedMessage,
+                    timestamp: event.ts,
+                };
+                await this.slackGateway.handleIncomingMessage(payload);
+            }
+            catch (error) {
+                const message = error instanceof Error
+                    ? error.message
+                    : String(error);
+                this.logger.error(`Failed to process app mention from user ${event.user}: ${message}`, error instanceof Error
+                    ? error.stack
+                    : undefined);
+                await this.slackService.sendMessage({
+                    channelId: event.channel,
+                    text: '❌ An error occurred while processing your request.',
+                });
+            }
         });
         app.event('app_home_opened', async ({ event, client }) => {
             try {
@@ -86,8 +118,12 @@ let SlackListener = SlackListener_1 = class SlackListener {
                 });
             }
             catch (error) {
-                const message = error instanceof Error ? error.message : 'Unknown error';
-                this.logger.error(`Failed to publish App Home: ${message}`, error instanceof Error ? error.stack : undefined);
+                const message = error instanceof Error
+                    ? error.message
+                    : String(error);
+                this.logger.error(`Failed to publish App Home: ${message}`, error instanceof Error
+                    ? error.stack
+                    : undefined);
             }
         });
         app.action('start_standup', async ({ ack, body, client }) => {
@@ -115,8 +151,12 @@ let SlackListener = SlackListener_1 = class SlackListener {
                 });
             }
             catch (error) {
-                const message = error instanceof Error ? error.message : 'Unknown error';
-                this.logger.error(`Start standup action failed: ${message}`, error instanceof Error ? error.stack : undefined);
+                const message = error instanceof Error
+                    ? error.message
+                    : String(error);
+                this.logger.error(`Start standup action failed: ${message}`, error instanceof Error
+                    ? error.stack
+                    : undefined);
             }
         });
         app.command('/report', async ({ command, ack, respond }) => {
@@ -135,7 +175,9 @@ let SlackListener = SlackListener_1 = class SlackListener {
                 const message = error instanceof Error
                     ? error.message
                     : 'Could not load the latest report.';
-                this.logger.error(`/report failed for user ${command.user_id}: ${message}`, error instanceof Error ? error.stack : undefined);
+                this.logger.error(`/report failed for user ${command.user_id}: ${message}`, error instanceof Error
+                    ? error.stack
+                    : undefined);
                 await respond({
                     response_type: 'ephemeral',
                     text: `❌ ${message}`,
@@ -158,7 +200,9 @@ let SlackListener = SlackListener_1 = class SlackListener {
                 const message = error instanceof Error
                     ? error.message
                     : 'Could not load report history.';
-                this.logger.error(`/history failed for user ${command.user_id}: ${message}`, error instanceof Error ? error.stack : undefined);
+                this.logger.error(`/history failed for user ${command.user_id}: ${message}`, error instanceof Error
+                    ? error.stack
+                    : undefined);
                 await respond({
                     response_type: 'ephemeral',
                     text: `❌ ${message}`,
@@ -166,7 +210,12 @@ let SlackListener = SlackListener_1 = class SlackListener {
             }
         });
         app.error(async (error) => {
-            this.logger.error(`[SLACK ERROR] Global error handler caught: ${error.message}`, error.stack);
+            const message = error instanceof Error
+                ? error.message
+                : String(error);
+            this.logger.error(`[SLACK ERROR] Global error handler caught: ${message}`, error instanceof Error
+                ? error.stack
+                : undefined);
         });
         this.logger.log('Slack listeners successfully registered.');
     }

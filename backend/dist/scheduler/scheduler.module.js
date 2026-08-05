@@ -1,1 +1,35 @@
+"use strict";
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.SchedulerModule = void 0;
+const common_1 = require("@nestjs/common");
+const ai_module_1 = require("../ai/ai.module");
+const collection_module_1 = require("../collection/collection.module");
+const digest_module_1 = require("../digest/digest.module");
+const reports_module_1 = require("../reports/reports.module");
+const slack_module_1 = require("../slack/slack.module");
+const scheduler_controller_1 = require("./scheduler.controller");
+const scheduler_service_1 = require("./scheduler.service");
+let SchedulerModule = class SchedulerModule {
+};
+exports.SchedulerModule = SchedulerModule;
+exports.SchedulerModule = SchedulerModule = __decorate([
+    (0, common_1.Module)({
+        imports: [
+            collection_module_1.CollectionModule,
+            digest_module_1.DigestModule,
+            slack_module_1.SlackModule,
+            ai_module_1.AiModule,
+            reports_module_1.ReportsModule,
+        ],
+        controllers: [scheduler_controller_1.SchedulerController],
+        providers: [scheduler_service_1.SchedulerService],
+        exports: [scheduler_service_1.SchedulerService],
+    })
+], SchedulerModule);
 //# sourceMappingURL=scheduler.module.js.map

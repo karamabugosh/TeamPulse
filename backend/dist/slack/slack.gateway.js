@@ -23,52 +23,84 @@ let SlackGateway = SlackGateway_1 = class SlackGateway {
     async handleIncomingMessage(payload) {
         this.logger.log(`Received message from user ${payload.userId} in channel ${payload.channelId}`);
         try {
+            await this.syncUserDisplayName(payload.userId);
             const currentQuestion = await this.collectionService.getCurrentQuestion(payload.userId);
             if (currentQuestion) {
                 await this.processAnswer(payload, currentQuestion);
+                return;
             }
-            else {
-                if (['start', 'hi', 'hello'].includes(payload.message.trim().toLowerCase())) {
-                    await this.startConversationFlow(payload.userId, payload.channelId);
-                }
-                else {
-                    this.logger.debug(`No active conversation for user ${payload.userId}. Message ignored.`);
-                    await this.slackService.sendMessage({ channelId: payload.channelId, text: "I'm not sure what you mean. Type `hello` to start a standup." });
-                }
+            const normalizedMessage = payload.message
+                .trim()
+                .toLowerCase();
+            if (['start', 'hi', 'hello'].includes(normalizedMessage)) {
+                await this.startConversationFlow(payload.userId, payload.channelId);
+                return;
             }
+            this.logger.debug(`No active conversation for user ${payload.userId}.`);
+            await this.slackService.sendMessage({
+                channelId: payload.channelId,
+                text: "I'm not sure what you mean. Type `hello` to start a standup.",
+            });
         }
         catch (error) {
-            this.logger.error(`Error handling incoming message for user ${payload.userId}: ${error.message}`, error.stack);
-            await this.slackService.sendMessage({ channelId: payload.channelId, text: "❌ An error occurred processing your request." });
+            const message = error instanceof Error
+                ? error.message
+                : String(error);
+            const stack = error instanceof Error ? error.stack : undefined;
+            this.logger.error(`Error handling incoming message for user ${payload.userId}: ${message}`, stack);
+            await this.slackService.sendMessage({
+                channelId: payload.channelId,
+                text: '❌ An error occurred processing your request.',
+            });
         }
+    }
+    async syncUserDisplayName(slackUserId) {
+        const displayName = await this.slackService.getUserDisplayName(slackUserId);
+        await this.collectionService.syncSlackUserProfile(slackUserId, displayName);
     }
     async startConversationFlow(userId, channelId) {
         this.logger.log(`Starting conversation for user ${userId}`);
         const firstQuestion = await this.collectionService.startConversation(userId);
         if (firstQuestion) {
-            await this.slackService.sendMessage({ channelId, text: firstQuestion.text });
+            await this.slackService.sendMessage({
+                channelId,
+                text: firstQuestion.text,
+            });
+            return;
         }
-        else {
-            await this.slackService.sendMessage({ channelId, text: "✅ There are no questions for you right now." });
-        }
+        await this.slackService.sendMessage({
+            channelId,
+            text: '✅ There are no questions for you right now.',
+        });
     }
     async processAnswer(payload, currentQuestion) {
-        this.logger.log(`Submitted answer for question ${currentQuestion.questionId} from user ${payload.userId}`);
+        this.logger.log(`Submitting answer for question ${currentQuestion.questionId} from user ${payload.userId}`);
         try {
             await this.collectionService.submitAnswer(payload.userId, currentQuestion.questionId, payload.message);
         }
-        catch (err) {
-            await this.slackService.sendMessage({ channelId: payload.channelId, text: `❌ ${err.message}` });
+        catch (error) {
+            const message = error instanceof Error
+                ? error.message
+                : String(error);
+            await this.slackService.sendMessage({
+                channelId: payload.channelId,
+                text: `❌ ${message}`,
+            });
             return;
         }
         const nextQuestion = await this.collectionService.getNextQuestion(payload.userId);
         if (nextQuestion) {
-            await this.slackService.sendMessage({ channelId: payload.channelId, text: nextQuestion.text });
+            await this.slackService.sendMessage({
+                channelId: payload.channelId,
+                text: nextQuestion.text,
+            });
+            return;
         }
-        else {
-            await this.collectionService.finishConversation(payload.userId);
-            await this.slackService.sendMessage({ channelId: payload.channelId, text: "✅ Thank you! Your daily standup has been completed." });
-        }
+        await this.collectionService.finishConversation(payload.userId);
+        await this.slackService.sendMessage({
+            channelId: payload.channelId,
+            text: '✅ Thank you! Your daily standup has been completed.',
+        });
     }
 };
 exports.SlackGateway = SlackGateway;

@@ -7,6 +7,7 @@ export declare class SlackGateway {
     private readonly logger;
     constructor(slackService: SlackService, collectionService: CollectionService);
     handleIncomingMessage(payload: IncomingMessageDto): Promise<void>;
+    private syncUserDisplayName;
     startConversationFlow(userId: string, channelId: string): Promise<void>;
     private processAnswer;
 }
