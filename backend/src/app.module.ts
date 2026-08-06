@@ -9,6 +9,7 @@ import { AiModule } from './ai/ai.module';
 import { ReportsModule } from './reports/reports.module';
 import { DigestModule } from './digest/digest.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
+import { TeamModule } from './team/team.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { SchedulerModule } from './scheduler/scheduler.module';
     ReportsModule,
     DigestModule,
     SchedulerModule,
+    TeamModule,
   ],
   controllers: [],
   providers: [],
