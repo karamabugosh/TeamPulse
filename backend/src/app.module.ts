@@ -7,6 +7,7 @@ import { CollectionModule } from './collection/collection.module';
 import { QuestionsModule } from './questions/questions.module';
 import { DigestModule } from './digest/digest.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
+import { TeamModule } from './team/team.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { SchedulerModule } from './scheduler/scheduler.module';
     QuestionsModule,
     DigestModule,
     SchedulerModule,
+    TeamModule,
   ],
   controllers: [],
   providers: [],
