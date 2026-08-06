@@ -48,32 +48,30 @@ export class SchedulerService implements OnModuleInit {
   ) {}
 
   /**
-   * Registers automatic digest jobs for enabled teams
-   * when the backend starts.
+   * Registers automatic collection, reminder, and digest jobs
+   * for enabled teams when the backend starts.
    */
   async onModuleInit(): Promise<void> {
     if (process.env.DIGEST_SCHEDULER_ENABLED !== 'true') {
       this.logger.warn(
-        'Database-driven digest scheduling is disabled.',
+        'Database-driven scheduling is disabled.',
       );
 
       return;
     }
 
-    await this.registerTeamDigestJobs();
+    await this.registerTeamJobs();
   }
 
   /**
-   * Creates one cron job for each enabled team.
+   * Creates collection, reminder, and digest cron jobs
+   * for every enabled team.
    */
-  private async registerTeamDigestJobs(): Promise<void> {
+  private async registerTeamJobs(): Promise<void> {
     const teams = await this.prisma.team.findMany({
       where: {
         schedulerEnabled: true,
         scheduleCron: {
-          not: null,
-        },
-        slackChannelId: {
           not: null,
         },
       },
@@ -84,77 +82,354 @@ export class SchedulerService implements OnModuleInit {
 
     if (teams.length === 0) {
       this.logger.warn(
-        'No enabled teams with a schedule and Slack channel were found.',
+        'No enabled teams with a schedule were found.',
       );
 
       return;
     }
 
     for (const team of teams) {
-      const scheduleCron = team.scheduleCron?.trim();
+      const digestCron = team.scheduleCron?.trim();
+
+      const collectionCron =
+        process.env.DAILY_COLLECTION_CRON?.trim() ||
+        '0 0 8 * * 0-4';
+
+      const reminderCron =
+        process.env.DAILY_REMINDER_CRON?.trim() ||
+        '0 45 8 * * 0-4';
 
       const timezone =
         team.timezone?.trim() ||
         process.env.DAILY_DIGEST_TIMEZONE ||
         'Asia/Riyadh';
 
-      if (!scheduleCron) {
+      if (!digestCron) {
         this.logger.warn(
-          `Team "${team.name}" does not have a valid cron schedule.`,
+          `Team "${team.name}" does not have a valid digest cron schedule.`,
         );
 
         continue;
       }
 
-      const jobName = `daily-digest-${team.id}`;
+      this.registerCronJob({
+        jobName: `standup-collection-${team.id}`,
+        cronTime: collectionCron,
+        timezone,
+        teamName: team.name,
+        taskName: 'standup collection',
+        onTick: async () => {
+          await this.startTeamStandupCollection(team.id);
+        },
+      });
 
-      try {
-        if (
-          this.schedulerRegistry.doesExist(
-            'cron',
-            jobName,
-          )
-        ) {
-          this.schedulerRegistry.deleteCronJob(jobName);
-        }
+      this.registerCronJob({
+        jobName: `standup-reminder-${team.id}`,
+        cronTime: reminderCron,
+        timezone,
+        teamName: team.name,
+        taskName: 'standup reminder',
+        onTick: async () => {
+          await this.sendTeamStandupReminder(team.id);
+        },
+      });
 
-        const job = CronJob.from({
-          cronTime: scheduleCron,
-          timeZone: timezone,
-          waitForCompletion: true,
+      this.registerCronJob({
+        jobName: `daily-digest-${team.id}`,
+        cronTime: digestCron,
+        timezone,
+        teamName: team.name,
+        taskName: 'daily digest',
+        onTick: async () => {
+          await this.runTeamDigest(team.id);
+        },
+      });
+    }
+  }
 
-          onTick: async () => {
-            await this.runTeamDigest(team.id);
-          },
-
-          errorHandler: (error: unknown) => {
-            const message =
-              error instanceof Error
-                ? error.message
-                : String(error);
-
-            this.logger.error(
-              `Scheduled digest job failed for team "${team.name}": ${message}`,
-            );
-          },
-        });
-
-        this.schedulerRegistry.addCronJob(jobName, job);
-        job.start();
-
-        this.logger.log(
-          `Registered digest schedule for team "${team.name}" using "${scheduleCron}" in ${timezone}.`,
-        );
-      } catch (error: unknown) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : String(error);
-
-        this.logger.error(
-          `Could not register digest schedule for team "${team.name}": ${message}`,
+  private registerCronJob(input: {
+    jobName: string;
+    cronTime: string;
+    timezone: string;
+    teamName: string;
+    taskName: string;
+    onTick: () => Promise<void>;
+  }): void {
+    try {
+      if (
+        this.schedulerRegistry.doesExist(
+          'cron',
+          input.jobName,
+        )
+      ) {
+        this.schedulerRegistry.deleteCronJob(
+          input.jobName,
         );
       }
+
+      const job = CronJob.from({
+        cronTime: input.cronTime,
+        timeZone: input.timezone,
+        waitForCompletion: true,
+
+        onTick: input.onTick,
+
+        errorHandler: (error: unknown) => {
+          const message =
+            error instanceof Error
+              ? error.message
+              : String(error);
+
+          this.logger.error(
+            `${input.taskName} failed for team "${input.teamName}": ${message}`,
+          );
+        },
+      });
+
+      this.schedulerRegistry.addCronJob(
+        input.jobName,
+        job,
+      );
+
+      job.start();
+
+      this.logger.log(
+        `Registered ${input.taskName} for team "${input.teamName}" using "${input.cronTime}" in ${input.timezone}.`,
+      );
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      this.logger.error(
+        `Could not register ${input.taskName} for team "${input.teamName}": ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Starts one shared team standup and sends the first question
+   * directly to every active team member in Slack.
+   */
+  async startTeamStandupCollection(teamId: string) {
+    const team = await this.prisma.team.findUnique({
+      where: {
+        id: teamId,
+      },
+    });
+
+    if (!team) {
+      return {
+        status: 'failed',
+        teamId,
+        teamName: teamId,
+        memberCount: 0,
+        deliveredCount: 0,
+        failedUserIds: [],
+        error: `Team ${teamId} was not found.`,
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    if (!team.schedulerEnabled) {
+      return {
+        status: 'skipped',
+        teamId: team.id,
+        teamName: team.name,
+        memberCount: 0,
+        deliveredCount: 0,
+        failedUserIds: [],
+        error: 'Team scheduling is disabled.',
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    try {
+      const prompts =
+        await this.collectionService.startTeamStandup(
+          team.id,
+        );
+
+      if (prompts.length === 0) {
+        return {
+          status: 'skipped',
+          teamId: team.id,
+          teamName: team.name,
+          memberCount: 0,
+          deliveredCount: 0,
+          failedUserIds: [],
+          error: 'No active team members were found.',
+          generatedAt: new Date().toISOString(),
+        };
+      }
+
+      let deliveredCount = 0;
+      const failedUserIds: string[] = [];
+
+      for (const prompt of prompts) {
+        const delivered =
+          await this.slackService.sendMessage({
+            channelId: prompt.userId,
+            text:
+              `*Daily standup — ${team.name}*\n` +
+              `${prompt.question.text}\n\n` +
+              '_Reply directly to this message to continue._',
+          });
+
+        if (delivered) {
+          deliveredCount += 1;
+        } else {
+          failedUserIds.push(prompt.userId);
+        }
+      }
+
+      return {
+        status:
+          deliveredCount === prompts.length
+            ? 'success'
+            : deliveredCount > 0
+              ? 'partial_success'
+              : 'failed',
+        teamId: team.id,
+        teamName: team.name,
+        memberCount: prompts.length,
+        deliveredCount,
+        failedUserIds,
+        error:
+          failedUserIds.length > 0
+            ? 'One or more Slack messages could not be delivered.'
+            : null,
+        generatedAt: new Date().toISOString(),
+      };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      this.logger.error(
+        `Could not start standup collection for team "${team.name}": ${message}`,
+      );
+
+      return {
+        status: 'failed',
+        teamId: team.id,
+        teamName: team.name,
+        memberCount: 0,
+        deliveredCount: 0,
+        failedUserIds: [],
+        error: message,
+        generatedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  /**
+   * Sends one reminder to members who have not completed
+   * the latest collecting standup run.
+   */
+  async sendTeamStandupReminder(teamId: string) {
+    const team = await this.prisma.team.findUnique({
+      where: {
+        id: teamId,
+      },
+    });
+
+    if (!team) {
+      return {
+        status: 'failed',
+        teamId,
+        teamName: teamId,
+        pendingCount: 0,
+        deliveredCount: 0,
+        failedUserIds: [],
+        error: `Team ${teamId} was not found.`,
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    try {
+      const pendingMembers =
+        await this.collectionService.getPendingTeamStandupMembers(
+          team.id,
+        );
+
+      if (pendingMembers.length === 0) {
+        return {
+          status: 'skipped',
+          teamId: team.id,
+          teamName: team.name,
+          pendingCount: 0,
+          deliveredCount: 0,
+          failedUserIds: [],
+          error: 'No pending standup responses were found.',
+          generatedAt: new Date().toISOString(),
+        };
+      }
+
+      let deliveredCount = 0;
+      const failedUserIds: string[] = [];
+
+      for (const member of pendingMembers) {
+        const questionText =
+          member.currentQuestion?.text ||
+          'Please complete your daily standup.';
+
+        const delivered =
+          await this.slackService.sendMessage({
+            channelId: member.userId,
+            text:
+              `*Standup reminder — ${team.name}*\n` +
+              `${questionText}\n\n` +
+              '_Reply directly to continue your standup._',
+          });
+
+        if (delivered) {
+          deliveredCount += 1;
+        } else {
+          failedUserIds.push(member.userId);
+        }
+      }
+
+      return {
+        status:
+          deliveredCount === pendingMembers.length
+            ? 'success'
+            : deliveredCount > 0
+              ? 'partial_success'
+              : 'failed',
+        teamId: team.id,
+        teamName: team.name,
+        pendingCount: pendingMembers.length,
+        deliveredCount,
+        failedUserIds,
+        error:
+          failedUserIds.length > 0
+            ? 'One or more reminders could not be delivered.'
+            : null,
+        generatedAt: new Date().toISOString(),
+      };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      this.logger.error(
+        `Could not send standup reminders for team "${team.name}": ${message}`,
+      );
+
+      return {
+        status: 'failed',
+        teamId: team.id,
+        teamName: team.name,
+        pendingCount: 0,
+        deliveredCount: 0,
+        failedUserIds: [],
+        error: message,
+        generatedAt: new Date().toISOString(),
+      };
     }
   }
 

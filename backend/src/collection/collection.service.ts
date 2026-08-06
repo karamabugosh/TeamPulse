@@ -1,6 +1,3 @@
-
-
-
 import {
   BadRequestException,
   Injectable,
@@ -819,4 +816,222 @@ export class CollectionService implements CollectionGateway {
         member.user.slackUserId,
     }));
   }
+
+  /**
+   * Starts one shared standup run for every active member of a team.
+   */
+  async startTeamStandup(teamId: string): Promise<
+    Array<{
+      userId: string;
+      name: string;
+      question: QuestionPayloadDto;
+    }>
+  > {
+    const team = await this.prisma.team.findUnique({
+      where: {
+        id: teamId,
+      },
+      include: {
+        teamMembers: {
+          where: {
+            optedOut: false,
+          },
+          include: {
+            user: true,
+          },
+          orderBy: {
+            joinedAt: 'asc',
+          },
+        },
+      },
+    });
+
+    if (!team) {
+      throw new NotFoundException(
+        `Team ${teamId} was not found.`,
+      );
+    }
+
+    if (!team.schedulerEnabled) {
+      throw new BadRequestException(
+        `Scheduling is disabled for team ${team.name}.`,
+      );
+    }
+
+    if (team.teamMembers.length === 0) {
+      this.logger.warn(
+        `Team "${team.name}" has no active members.`,
+      );
+
+      return [];
+    }
+
+    const firstQuestion =
+      await this.prisma.question.findFirst({
+        where: {
+          isActive: true,
+        },
+        orderBy: {
+          order: 'asc',
+        },
+      });
+
+    if (!firstQuestion) {
+      throw new NotFoundException(
+        'No active standup questions were found.',
+      );
+    }
+
+    const now = new Date();
+
+    const run = await this.prisma.standupRun.create({
+      data: {
+        teamId: team.id,
+        scheduledFor: now,
+        status: 'collecting',
+        startedAt: now,
+      },
+    });
+
+    const prompts: Array<{
+      userId: string;
+      name: string;
+      question: QuestionPayloadDto;
+    }> = [];
+
+    for (const member of team.teamMembers) {
+      const submission =
+        await this.prisma.standupSubmission.create({
+          data: {
+            runId: run.id,
+            userId: member.user.id,
+            status: 'in_progress',
+            startedAt: now,
+          },
+        });
+
+      await this.prisma.conversationState.upsert({
+        where: {
+          userId: member.user.id,
+        },
+        update: {
+          submissionId: submission.id,
+          currentQuestionId: firstQuestion.id,
+          isCompleted: false,
+          startedAt: now,
+          completedAt: null,
+        },
+        create: {
+          userId: member.user.id,
+          submissionId: submission.id,
+          currentQuestionId: firstQuestion.id,
+          isCompleted: false,
+          startedAt: now,
+        },
+      });
+
+      prompts.push({
+        userId: member.user.slackUserId,
+        name:
+          member.user.slackDisplayName ||
+          member.user.slackUserId,
+        question: {
+          questionId: firstQuestion.id,
+          text: firstQuestion.question,
+        },
+      });
+    }
+
+    this.logger.log(
+      `Started standup run ${run.id} for team "${team.name}" with ${prompts.length} member(s).`,
+    );
+
+    return prompts;
+  }
+
+  /**
+   * Returns members who have not completed the latest team standup.
+   */
+  async getPendingTeamStandupMembers(
+    teamId: string,
+  ): Promise<
+    Array<{
+      userId: string;
+      name: string;
+      currentQuestion: QuestionPayloadDto | null;
+    }>
+  > {
+    const latestRun =
+      await this.prisma.standupRun.findFirst({
+        where: {
+          teamId,
+          status: 'collecting',
+        },
+        orderBy: {
+          startedAt: 'desc',
+        },
+        include: {
+          submissions: {
+            where: {
+              status: {
+                not: 'completed',
+              },
+            },
+            include: {
+              user: {
+                include: {
+                  conversationState: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+    if (!latestRun) {
+      return [];
+    }
+
+    const pendingMembers: Array<{
+      userId: string;
+      name: string;
+      currentQuestion: QuestionPayloadDto | null;
+    }> = [];
+
+    for (const submission of latestRun.submissions) {
+      const session = submission.user.conversationState;
+
+      let currentQuestion: QuestionPayloadDto | null = null;
+
+      if (
+        session?.submissionId === submission.id &&
+        session.currentQuestionId
+      ) {
+        const question =
+          await this.prisma.question.findUnique({
+            where: {
+              id: session.currentQuestionId,
+            },
+          });
+
+        if (question?.isActive) {
+          currentQuestion = {
+            questionId: question.id,
+            text: question.question,
+          };
+        }
+      }
+
+      pendingMembers.push({
+        userId: submission.user.slackUserId,
+        name:
+          submission.user.slackDisplayName ||
+          submission.user.slackUserId,
+        currentQuestion,
+      });
+    }
+
+    return pendingMembers;
+  }
+
 }

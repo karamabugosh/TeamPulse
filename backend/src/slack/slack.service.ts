@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { App } from '@slack/bolt';
+import { WebClient } from '@slack/web-api';
 import { PrismaService } from '../prisma/prisma.service';
 import { OutgoingMessageDto } from './dto/outgoing-message.dto';
 
@@ -13,8 +14,12 @@ import { OutgoingMessageDto } from './dto/outgoing-message.dto';
 export class SlackService
   implements OnModuleInit, OnModuleDestroy
 {
-  private readonly logger = new Logger(SlackService.name);
+  private readonly logger = new Logger(
+    SlackService.name,
+  );
+
   private app?: App;
+  private webClient?: WebClient;
 
   constructor(
     private readonly configService: ConfigService,
@@ -29,13 +34,26 @@ export class SlackService
     this.logger.log('Slack service shutting down.');
 
     if (this.app) {
-      await this.app.stop();
+      try {
+        await this.app.stop();
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
+
+        this.logger.warn(
+          `Slack app shutdown warning: ${message}`,
+        );
+      }
     }
   }
 
   private async initializeSlack(): Promise<void> {
     const token =
-      this.configService.get<string>('SLACK_BOT_TOKEN');
+      this.configService.get<string>(
+        'SLACK_BOT_TOKEN',
+      );
 
     const signingSecret =
       this.configService.get<string>(
@@ -43,12 +61,42 @@ export class SlackService
       );
 
     const appToken =
-      this.configService.get<string>('SLACK_APP_TOKEN');
-
-    if (!token || !signingSecret || !appToken) {
-      this.logger.warn(
-        'Slack tokens are missing. Slack App will not be initialized.',
+      this.configService.get<string>(
+        'SLACK_APP_TOKEN',
       );
+
+    if (!token) {
+      this.logger.warn(
+        'SLACK_BOT_TOKEN is missing. Slack messaging is disabled.',
+      );
+
+      return;
+    }
+
+    /*
+     * WebClient handles outbound messages even when
+     * Socket Mode is disabled.
+     */
+    this.webClient = new WebClient(token);
+
+    const socketModeEnabled =
+      this.configService.get<string>(
+        'SLACK_SOCKET_MODE_ENABLED',
+      ) === 'true';
+
+    if (!socketModeEnabled) {
+      this.logger.warn(
+        'Slack Socket Mode is disabled. Outbound Slack messaging remains available.',
+      );
+
+      return;
+    }
+
+    if (!signingSecret || !appToken) {
+      this.logger.warn(
+        'Slack signing secret or app token is missing. Socket Mode will not start.',
+      );
+
       return;
     }
 
@@ -63,7 +111,7 @@ export class SlackService
       await this.app.start();
 
       this.logger.log(
-        '⚡️ Slack Bolt app is running in Socket Mode!',
+        'Slack Bolt app is running in Socket Mode.',
       );
     } catch (error: unknown) {
       const message =
@@ -71,12 +119,15 @@ export class SlackService
           ? error.message
           : String(error);
 
+      /*
+       * Do not crash the backend when Socket Mode fails.
+       * Outbound Web API messaging can still work.
+       */
       this.logger.error(
-        `Error initializing Slack app: ${message}`,
-        error instanceof Error
-          ? error.stack
-          : undefined,
+        `Could not start Slack Socket Mode: ${message}`,
       );
+
+      this.app = undefined;
     }
   }
 
@@ -84,19 +135,19 @@ export class SlackService
     return this.app;
   }
 
-  /**
-   * Ensures the Slack workspace and user exist in PostgreSQL.
-   * Returns the internal database User.id.
-   */
   public async ensureUserRegistered(
     slackUserId: string,
   ): Promise<string> {
-    if (!this.app) {
-      throw new Error('Slack app is not initialized.');
+    if (!this.webClient) {
+      throw new Error(
+        'Slack Web API is not initialized.',
+      );
     }
 
     const botToken =
-      this.configService.get<string>('SLACK_BOT_TOKEN');
+      this.configService.get<string>(
+        'SLACK_BOT_TOKEN',
+      );
 
     if (!botToken) {
       throw new Error(
@@ -105,7 +156,7 @@ export class SlackService
     }
 
     const authResult =
-      await this.app.client.auth.test();
+      await this.webClient.auth.test();
 
     const slackWorkspaceId = authResult.team_id;
     const slackWorkspaceName = authResult.team;
@@ -123,19 +174,21 @@ export class SlackService
         },
         update: {
           slackWorkspaceName:
-            slackWorkspaceName ?? 'Slack Workspace',
+            slackWorkspaceName ??
+            'Slack Workspace',
           botToken,
         },
         create: {
           slackWorkspaceId,
           slackWorkspaceName:
-            slackWorkspaceName ?? 'Slack Workspace',
+            slackWorkspaceName ??
+            'Slack Workspace',
           botToken,
         },
       });
 
     const userResult =
-      await this.app.client.users.info({
+      await this.webClient.users.info({
         user: slackUserId,
       });
 
@@ -154,24 +207,27 @@ export class SlackService
       slackUser.name?.trim() ||
       slackUser.id;
 
-    const user = await this.prisma.user.upsert({
-      where: {
-        slackUserId: slackUser.id,
-      },
-      update: {
-        workspaceId: workspace.id,
-        slackDisplayName: displayName,
-        email: slackUser.profile?.email ?? null,
-        timezone: slackUser.tz ?? null,
-      },
-      create: {
-        workspaceId: workspace.id,
-        slackUserId: slackUser.id,
-        slackDisplayName: displayName,
-        email: slackUser.profile?.email ?? null,
-        timezone: slackUser.tz ?? null,
-      },
-    });
+    const user =
+      await this.prisma.user.upsert({
+        where: {
+          slackUserId: slackUser.id,
+        },
+        update: {
+          workspaceId: workspace.id,
+          slackDisplayName: displayName,
+          email:
+            slackUser.profile?.email ?? null,
+          timezone: slackUser.tz ?? null,
+        },
+        create: {
+          workspaceId: workspace.id,
+          slackUserId: slackUser.id,
+          slackDisplayName: displayName,
+          email:
+            slackUser.profile?.email ?? null,
+          timezone: slackUser.tz ?? null,
+        },
+      });
 
     this.logger.log(
       `Slack user ${slackUserId} registered as database user ${user.id}`,
@@ -180,10 +236,6 @@ export class SlackService
     return user.id;
   }
 
-  /**
-   * Gets a readable name for a Slack user.
-   * Falls back to the Slack user ID if lookup fails.
-   */
   public async getUserDisplayName(
     slackUserId: string,
   ): Promise<string> {
@@ -191,17 +243,13 @@ export class SlackService
       return 'Unknown user';
     }
 
-    if (!this.app) {
-      this.logger.warn(
-        `Cannot look up Slack user ${slackUserId}: Slack app is not initialized.`,
-      );
-
+    if (!this.webClient) {
       return slackUserId;
     }
 
     try {
       const result =
-        await this.app.client.users.info({
+        await this.webClient.users.info({
           user: slackUserId,
         });
 
@@ -221,30 +269,28 @@ export class SlackService
           : String(error);
 
       this.logger.warn(
-        `Could not retrieve the display name for Slack user ${slackUserId}: ${message}`,
+        `Could not retrieve Slack user ${slackUserId}: ${message}`,
       );
 
       return slackUserId;
     }
   }
 
-  /**
-   * Sends a message to a Slack channel or user.
-   * Returns true when Slack confirms delivery.
-   * Returns false if validation or all retry attempts fail.
-   */
   public async sendMessage(
     payload: OutgoingMessageDto,
   ): Promise<boolean> {
-    if (!this.app) {
+    if (!this.webClient) {
       this.logger.error(
-        'Cannot send message: Slack app is not initialized.',
+        'Cannot send message: Slack Web API is not initialized.',
       );
 
       return false;
     }
 
-    if (!payload.channelId || !payload.text) {
+    const channelId = payload.channelId?.trim();
+    const text = payload.text?.trim();
+
+    if (!channelId || !text) {
       this.logger.error(
         'Cannot send message: channelId and text are required.',
       );
@@ -261,18 +307,13 @@ export class SlackService
       attempt += 1
     ) {
       try {
-        this.logger.log(
-          `Sending message to channel ${payload.channelId} ` +
-            `(attempt ${attempt}/${maxAttempts})`,
-        );
-
-        await this.app.client.chat.postMessage({
-          channel: payload.channelId,
-          text: payload.text,
+        await this.webClient.chat.postMessage({
+          channel: channelId,
+          text,
         });
 
         this.logger.log(
-          `Slack message delivered successfully to ${payload.channelId}.`,
+          `Slack message delivered to ${channelId}.`,
         );
 
         return true;
@@ -283,14 +324,10 @@ export class SlackService
             : String(error);
 
         this.logger.error(
-          `Failed to send Slack message to ${payload.channelId}: ${message}`,
+          `Slack message attempt ${attempt}/${maxAttempts} failed: ${message}`,
         );
 
         if (attempt === maxAttempts) {
-          this.logger.error(
-            `Exhausted retries for Slack channel ${payload.channelId}.`,
-          );
-
           return false;
         }
 
