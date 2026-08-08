@@ -10,24 +10,43 @@ export interface AiBaseline {
 }
 
 /**
- * Measured from a real evaluation run (backend/src/ai/evaluation/,
- * 8 hand-labeled cases, model: gpt-4o-mini) — not a placeholder.
- * See run-evaluation.ts output for the raw pass/fail breakdown.
+ * Latest recorded AI evaluation baseline.
  *
- * Caveat: 8 cases is a small sample. Revisit with a larger evaluation
- * set before treating this number as fully reliable (tracked for
- * week 3 — "Improve AI").
+ * These values are informational and should be updated after
+ * running the evaluation suite.
+ *
+ * They must not be used as the runtime feature flag because
+ * evaluation results may become stale as the dataset grows.
  */
 export const AI_BASELINE: AiBaseline = {
-  measuredAccuracy: 1.0,
-  measuredCostPerRun: 0.00018,
+  measuredAccuracy: 0.90,
+  measuredCostPerRun: 0.000373,
   requiredAccuracy: REQUIRED_AI_ACCURACY,
-  lastMeasuredAt: '2026-07-30T10:05:10.000Z',
+  lastMeasuredAt: '2026-08-08T10:53:30.000Z',
 };
 
+/**
+ * Controls whether the AI layer is allowed to run.
+ *
+ * Runtime enablement is intentionally controlled only through
+ * the environment flag. Evaluation quality is checked separately.
+ */
 export function isAiFeatureEnabled(): boolean {
-  if (process.env.PULSE_AI_ENABLED !== 'true') return false;
+  return process.env.PULSE_AI_ENABLED === 'true';
+}
 
-  if (AI_BASELINE.measuredAccuracy === null) return false;
-  return AI_BASELINE.measuredAccuracy >= AI_BASELINE.requiredAccuracy;
+/**
+ * Returns whether the latest measured evaluation accuracy
+ * meets the project's required AI quality threshold.
+ *
+ * Returns false when no evaluation measurement exists.
+ */
+export function doesAiMeetQualityThreshold(): boolean {
+  const accuracy = AI_BASELINE.measuredAccuracy;
+
+  if (accuracy === null) {
+    return false;
+  }
+
+  return accuracy >= AI_BASELINE.requiredAccuracy;
 }

@@ -1,7 +1,16 @@
 // backend/src/ai/cost-tracker.ts
 
-const PRICING_PER_MILLION_TOKENS: Record<string, { input: number; output: number }> = {
-  'gpt-4o-mini': { input: 0.15, output: 0.6 },
+const PRICING_PER_MILLION_TOKENS: Record<
+  string,
+  {
+    input: number;
+    output: number;
+  }
+> = {
+  'gpt-4o-mini': {
+    input: 0.15,
+    output: 0.6,
+  },
 };
 
 export interface TokenUsage {
@@ -9,12 +18,24 @@ export interface TokenUsage {
   completionTokens: number;
 }
 
-export function calculateCallCost(model: string, usage: TokenUsage): number | null {
-  const pricing = PRICING_PER_MILLION_TOKENS[model];
-  if (!pricing) return null;
+export function calculateCallCost(
+  model: string,
+  usage: TokenUsage,
+): number | null {
+  const pricing =
+    PRICING_PER_MILLION_TOKENS[model];
 
-  const inputCost = (usage.promptTokens / 1_000_000) * pricing.input;
-  const outputCost = (usage.completionTokens / 1_000_000) * pricing.output;
+  if (!pricing) {
+    return null;
+  }
+
+  const inputCost =
+    (usage.promptTokens / 1_000_000) *
+    pricing.input;
+
+  const outputCost =
+    (usage.completionTokens / 1_000_000) *
+    pricing.output;
 
   return inputCost + outputCost;
 }
@@ -22,13 +43,22 @@ export function calculateCallCost(model: string, usage: TokenUsage): number | nu
 export class CostAccumulator {
   private totalCost = 0;
   private callCount = 0;
+  private pricedCallCount = 0;
 
-  record(model: string, usage: TokenUsage): number | null {
-    const cost = calculateCallCost(model, usage);
+  record(
+    model: string,
+    usage: TokenUsage,
+  ): number | null {
+    this.callCount += 1;
+
+    const cost =
+      calculateCallCost(model, usage);
+
     if (cost !== null) {
       this.totalCost += cost;
-      this.callCount += 1;
+      this.pricedCallCount += 1;
     }
+
     return cost;
   }
 
@@ -37,11 +67,28 @@ export class CostAccumulator {
   }
 
   getAverageCostPerCall(): number | null {
-    if (this.callCount === 0) return null;
-    return this.totalCost / this.callCount;
+    if (this.pricedCallCount === 0) {
+      return null;
+    }
+
+    return (
+      this.totalCost /
+      this.pricedCallCount
+    );
   }
 
   getCallCount(): number {
     return this.callCount;
+  }
+
+  getPricedCallCount(): number {
+    return this.pricedCallCount;
+  }
+
+  getUnknownPricingCallCount(): number {
+    return (
+      this.callCount -
+      this.pricedCallCount
+    );
   }
 }

@@ -1,71 +1,47 @@
 // backend/src/reports/reports.service.ts
 
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   AiDigestResult,
+  BlockerSeverity,
   ExtractedBlocker,
   ThemeSummary,
 } from '../ai/dto/ai-result.dto';
 
 @Injectable()
 export class ReportsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+  ) {}
 
   async getLatestDigestForSlackUser(
     slackUserId: string,
     teamSearch?: string,
   ): Promise<AiDigestResult> {
-    const user = await this.prisma.user.findUnique({
-      where: { slackUserId },
-      include: {
-        teamMembers: {
-          include: {
-            team: true,
-          },
+    const membership =
+      await this.resolveTeamMembership(
+        slackUserId,
+        teamSearch,
+      );
+
+    const digest =
+      await this.prisma.aiDigest.findFirst({
+        where: {
+          teamId: membership.teamId,
         },
-      },
-    });
-
-    if (!user) {
-      throw new NotFoundException('User is not registered.');
-    }
-
-    if (user.teamMembers.length === 0) {
-      throw new NotFoundException(
-        'You are not assigned to any team.',
-      );
-    }
-
-    const selectedMembership = teamSearch
-      ? user.teamMembers.find((membership) => {
-          const search = teamSearch.trim().toLowerCase();
-
-          return (
-            membership.team.id.toLowerCase() === search ||
-            membership.team.name.toLowerCase() === search
-          );
-        })
-      : user.teamMembers[0];
-
-    if (!selectedMembership) {
-      throw new NotFoundException(
-        `No team matching "${teamSearch}" was found.`,
-      );
-    }
-
-    const digest = await this.prisma.aiDigest.findFirst({
-      where: {
-        teamId: selectedMembership.teamId,
-      },
-      orderBy: {
-        generatedAt: 'desc',
-      },
-    });
+        orderBy: {
+          generatedAt: 'desc',
+        },
+      });
 
     if (!digest) {
       throw new NotFoundException(
-        `No reports exist yet for ${selectedMembership.team.name}.`,
+        `No reports exist yet for ${membership.team.name}.`,
       );
     }
 
@@ -77,71 +53,49 @@ export class ReportsService {
     limit = 5,
     teamSearch?: string,
   ): Promise<AiDigestResult[]> {
-    const user = await this.prisma.user.findUnique({
-      where: { slackUserId },
-      include: {
-        teamMembers: {
-          include: {
-            team: true,
-          },
+    const membership =
+      await this.resolveTeamMembership(
+        slackUserId,
+        teamSearch,
+      );
+
+    const safeLimit =
+      this.normaliseHistoryLimit(limit);
+
+    const digests =
+      await this.prisma.aiDigest.findMany({
+        where: {
+          teamId: membership.teamId,
         },
-      },
-    });
+        orderBy: {
+          generatedAt: 'desc',
+        },
+        take: safeLimit,
+      });
 
-    if (!user) {
-      throw new NotFoundException('User is not registered.');
-    }
-
-    if (user.teamMembers.length === 0) {
-      throw new NotFoundException(
-        'You are not assigned to any team.',
-      );
-    }
-
-    const selectedMembership = teamSearch
-      ? user.teamMembers.find((membership) => {
-          const search = teamSearch.trim().toLowerCase();
-
-          return (
-            membership.team.id.toLowerCase() === search ||
-            membership.team.name.toLowerCase() === search
-          );
-        })
-      : user.teamMembers[0];
-
-    if (!selectedMembership) {
-      throw new NotFoundException(
-        `No team matching "${teamSearch}" was found.`,
-      );
-    }
-
-    const safeLimit = Math.min(Math.max(limit, 1), 10);
-
-    const digests = await this.prisma.aiDigest.findMany({
-      where: {
-        teamId: selectedMembership.teamId,
-      },
-      orderBy: {
-        generatedAt: 'desc',
-      },
-      take: safeLimit,
-    });
-
-    return digests.map((digest) => this.mapDigest(digest));
+    return digests.map((digest) =>
+      this.mapDigest(digest),
+    );
   }
 
-  formatDigestForSlack(digest: AiDigestResult): string {
+  formatDigestForSlack(
+    digest: AiDigestResult,
+  ): string {
     const blockerText =
       digest.blockers.length > 0
         ? digest.blockers
-            .map(
-              (blocker) =>
+            .map((blocker) => {
+              const dependency =
+                blocker.dependency
+                  ? ` | Dependency: ${blocker.dependency}`
+                  : '';
+
+              return (
                 `• <@${blocker.userId}> — ${blocker.description}` +
                 `\n  Severity: ${blocker.severity}` +
-                (blocker.dependency
-                  ? ` | Dependency: ${blocker.dependency}`
-                  : ''),
-            )
+                dependency
+              );
+            })
             .join('\n')
         : 'No blockers reported.';
 
@@ -158,7 +112,9 @@ export class ReportsService {
     return [
       '*📊 Pulse Standup Report*',
       `*Run:* ${digest.runId}`,
-      `*Generated:* ${this.formatDate(digest.generatedAt)}`,
+      `*Generated:* ${this.formatDate(
+        digest.generatedAt,
+      )}`,
       `*Source:* ${digest.source}`,
       '',
       '*Summary*',
@@ -172,86 +128,239 @@ export class ReportsService {
     ].join('\n');
   }
 
-  formatHistoryForSlack(digests: AiDigestResult[]): string {
+  formatHistoryForSlack(
+    digests: AiDigestResult[],
+  ): string {
     if (digests.length === 0) {
       return '📭 No previous reports were found.';
     }
 
-    const reportLines = digests.map((digest, index) => {
-      const summary = this.truncate(digest.summary, 180);
+    const reportLines = digests.map(
+      (digest, index) => {
+        const summary = this.truncate(
+          digest.summary,
+          180,
+        );
 
-      return [
-        `*${index + 1}. ${this.formatDate(digest.generatedAt)}*`,
-        `Run: \`${digest.runId}\` | Source: ${digest.source}`,
-        summary,
-      ].join('\n');
-    });
+        return [
+          `*${index + 1}. ${this.formatDate(
+            digest.generatedAt,
+          )}*`,
+          `Run: \`${digest.runId}\` | Source: ${digest.source}`,
+          summary,
+        ].join('\n');
+      },
+    );
 
     return [
       '*🕘 Pulse Report History*',
       '',
-      ...reportLines.map((line) => `${line}\n`),
+      ...reportLines.map(
+        (line) => `${line}\n`,
+      ),
     ].join('\n');
   }
 
-  generateCsvFromDigest(digest: AiDigestResult): string {
-    const blockers = digest.blockers ?? [];
-    const themes = digest.themes ?? [];
+  generateCsvFromDigest(
+    digest: AiDigestResult,
+  ): string {
     const lines: string[] = [];
 
-    lines.push('Team ID,Run ID,Generated At,Source,Summary');
+    /*
+     * Report overview
+     */
+    lines.push(
+      'Team ID,Run ID,Generated At,Source,Summary',
+    );
+
     lines.push(
       [
-        this.escapeCsvField(digest.teamId),
-        this.escapeCsvField(digest.runId),
-        this.escapeCsvField(digest.generatedAt),
-        this.escapeCsvField(digest.source),
-        this.escapeCsvField(digest.summary),
+        this.escapeCsvField(
+          digest.teamId,
+        ),
+        this.escapeCsvField(
+          digest.runId,
+        ),
+        this.escapeCsvField(
+          digest.generatedAt,
+        ),
+        this.escapeCsvField(
+          digest.source,
+        ),
+        this.escapeCsvField(
+          digest.summary,
+        ),
       ].join(','),
     );
 
+    /*
+     * Blockers
+     */
     lines.push('');
     lines.push('Blockers');
+
     lines.push(
       'User ID,Question ID,Description,Severity,Dependency,Confidence',
     );
 
-    if (blockers.length === 0) {
-      lines.push('No blockers reported');
+    if (digest.blockers.length === 0) {
+      lines.push(
+        this.escapeCsvField(
+          'No blockers reported',
+        ),
+      );
     } else {
-      for (const blocker of blockers) {
+      for (const blocker of digest.blockers) {
         lines.push(
           [
-            this.escapeCsvField(blocker.userId),
-            this.escapeCsvField(blocker.questionId),
-            this.escapeCsvField(blocker.description),
-            this.escapeCsvField(blocker.severity),
-            this.escapeCsvField(blocker.dependency ?? ''),
-            String(blocker.confidence ?? ''),
+            this.escapeCsvField(
+              blocker.userId,
+            ),
+            this.escapeCsvField(
+              blocker.questionId,
+            ),
+            this.escapeCsvField(
+              blocker.description,
+            ),
+            this.escapeCsvField(
+              blocker.severity,
+            ),
+            this.escapeCsvField(
+              blocker.dependency ?? '',
+            ),
+            this.escapeCsvField(
+              String(
+                blocker.confidence,
+              ),
+            ),
           ].join(','),
         );
       }
     }
 
+    /*
+     * Themes
+     */
     lines.push('');
     lines.push('Themes');
-    lines.push('Theme,Mention Count,Summary');
 
-    if (themes.length === 0) {
-      lines.push('No themes reported');
+    lines.push(
+      'Theme,Mention Count,Summary',
+    );
+
+    if (digest.themes.length === 0) {
+      lines.push(
+        this.escapeCsvField(
+          'No themes reported',
+        ),
+      );
     } else {
-      for (const theme of themes) {
+      for (const theme of digest.themes) {
         lines.push(
           [
-            this.escapeCsvField(theme.theme),
-            String(theme.mentionCount ?? ''),
-            this.escapeCsvField(theme.summary),
+            this.escapeCsvField(
+              theme.theme,
+            ),
+            this.escapeCsvField(
+              String(
+                theme.mentionCount,
+              ),
+            ),
+            this.escapeCsvField(
+              theme.summary,
+            ),
           ].join(','),
         );
       }
     }
 
     return lines.join('\r\n');
+  }
+
+  private async resolveTeamMembership(
+    slackUserId: string,
+    teamSearch?: string,
+  ) {
+    const normalizedSlackUserId =
+      slackUserId?.trim();
+
+    if (!normalizedSlackUserId) {
+      throw new BadRequestException(
+        'slackUserId is required.',
+      );
+    }
+
+    const user =
+      await this.prisma.user.findUnique({
+        where: {
+          slackUserId:
+            normalizedSlackUserId,
+        },
+        include: {
+          teamMembers: {
+            include: {
+              team: true,
+            },
+          },
+        },
+      });
+
+    if (!user) {
+      throw new NotFoundException(
+        'User is not registered.',
+      );
+    }
+
+    if (
+      user.teamMembers.length === 0
+    ) {
+      throw new NotFoundException(
+        'You are not assigned to any team.',
+      );
+    }
+
+    if (!teamSearch?.trim()) {
+      return user.teamMembers[0];
+    }
+
+    const search =
+      teamSearch.trim().toLowerCase();
+
+    const membership =
+      user.teamMembers.find(
+        (item) =>
+          item.team.id.toLowerCase() ===
+            search ||
+          item.team.name
+            .trim()
+            .toLowerCase() === search,
+      );
+
+    if (!membership) {
+      throw new NotFoundException(
+        `No team matching "${teamSearch}" was found.`,
+      );
+    }
+
+    return membership;
+  }
+
+  private normaliseHistoryLimit(
+    limit: number,
+  ): number {
+    if (
+      !Number.isFinite(limit)
+    ) {
+      return 5;
+    }
+
+    const integerLimit =
+      Math.floor(limit);
+
+    return Math.min(
+      Math.max(integerLimit, 1),
+      10,
+    );
   }
 
   private mapDigest(digest: {
@@ -263,47 +372,175 @@ export class ReportsService {
     blockers: unknown;
     themes: unknown;
   }): AiDigestResult {
-    const source: AiDigestResult['source'] =
-      digest.source === 'ai' ? 'ai' : 'rules_fallback';
-
     return {
       teamId: digest.teamId,
       runId: digest.runId,
-      generatedAt: digest.generatedAt.toISOString(),
-      source,
+      generatedAt:
+        digest.generatedAt.toISOString(),
+      source:
+        digest.source === 'ai'
+          ? 'ai'
+          : 'rules_fallback',
       summary: digest.summary,
-      blockers: Array.isArray(digest.blockers)
-        ? (digest.blockers as ExtractedBlocker[])
-        : [],
-      themes: Array.isArray(digest.themes)
-        ? (digest.themes as ThemeSummary[])
-        : [],
+      blockers:
+        this.parseStoredBlockers(
+          digest.blockers,
+        ),
+      themes:
+        this.parseStoredThemes(
+          digest.themes,
+        ),
     };
   }
 
-  private formatDate(value: string): string {
+  private parseStoredBlockers(
+    value: unknown,
+  ): ExtractedBlocker[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value.filter(
+      (
+        blocker,
+      ): blocker is ExtractedBlocker => {
+        if (
+          typeof blocker !==
+            'object' ||
+          blocker === null
+        ) {
+          return false;
+        }
+
+        const item =
+          blocker as Record<
+            string,
+            unknown
+          >;
+
+        return (
+          typeof item.userId ===
+            'string' &&
+          typeof item.questionId ===
+            'string' &&
+          typeof item.description ===
+            'string' &&
+          Object.values(
+            BlockerSeverity,
+          ).includes(
+            item.severity as BlockerSeverity,
+          ) &&
+          (item.dependency === null ||
+            typeof item.dependency ===
+              'string') &&
+          typeof item.confidence ===
+            'number' &&
+          Number.isFinite(
+            item.confidence,
+          ) &&
+          item.confidence >= 0 &&
+          item.confidence <= 1
+        );
+      },
+    );
+  }
+
+  private parseStoredThemes(
+    value: unknown,
+  ): ThemeSummary[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value.filter(
+      (
+        theme,
+      ): theme is ThemeSummary => {
+        if (
+          typeof theme !==
+            'object' ||
+          theme === null
+        ) {
+          return false;
+        }
+
+        const item =
+          theme as Record<
+            string,
+            unknown
+          >;
+
+        return (
+          typeof item.theme ===
+            'string' &&
+          item.theme.trim().length > 0 &&
+          typeof item.mentionCount ===
+            'number' &&
+          Number.isInteger(
+            item.mentionCount,
+          ) &&
+          item.mentionCount > 0 &&
+          typeof item.summary ===
+            'string' &&
+          item.summary.trim().length > 0
+        );
+      },
+    );
+  }
+
+  private formatDate(
+    value: string,
+  ): string {
     const date = new Date(value);
 
-    if (Number.isNaN(date.getTime())) {
+    if (
+      Number.isNaN(date.getTime())
+    ) {
       return value;
     }
 
-    return date.toLocaleString('en-GB', {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    });
+    return date.toLocaleString(
+      'en-GB',
+      {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      },
+    );
   }
 
-  private truncate(value: string, maxLength: number): string {
-    if (value.length <= maxLength) {
+  private truncate(
+    value: string,
+    maxLength: number,
+  ): string {
+    if (
+      value.length <= maxLength
+    ) {
       return value;
     }
 
-    return `${value.slice(0, maxLength - 3)}...`;
+    return `${value.slice(
+      0,
+      maxLength - 3,
+    )}...`;
   }
 
-  private escapeCsvField(value?: string | null): string {
-    const text = value ?? '';
+  private escapeCsvField(
+    value?: string | null,
+  ): string {
+    let text = value ?? '';
+
+    /*
+     * Prevent spreadsheet formula injection.
+     *
+     * CSV files may be opened in Excel or similar tools.
+     * User/AI-generated text beginning with =, +, -, or @
+     * must be treated as text rather than a formula.
+     */
+    if (
+      /^[=+\-@]/.test(text)
+    ) {
+      text = `'${text}`;
+    }
 
     if (
       text.includes(',') ||
@@ -311,7 +548,10 @@ export class ReportsService {
       text.includes('\n') ||
       text.includes('\r')
     ) {
-      return `"${text.replace(/"/g, '""')}"`;
+      return `"${text.replace(
+        /"/g,
+        '""',
+      )}"`;
     }
 
     return text;

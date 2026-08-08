@@ -12,117 +12,322 @@ export interface ParsedAiResponse {
   themes: ThemeSummary[];
 }
 
-const VALID_SEVERITIES = Object.values(BlockerSeverity) as string[];
+const VALID_SEVERITIES = Object.values(
+  BlockerSeverity,
+) as string[];
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+const ROOT_KEYS = new Set([
+  'summary',
+  'blockers',
+  'themes',
+]);
+
+const BLOCKER_KEYS = new Set([
+  'userId',
+  'questionId',
+  'description',
+  'severity',
+  'dependency',
+  'confidence',
+]);
+
+const THEME_KEYS = new Set([
+  'theme',
+  'mentionCount',
+  'summary',
+]);
+
+function isRecord(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value)
+  );
 }
 
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim() !== '';
+function isNonEmptyString(
+  value: unknown,
+): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0
+  );
 }
 
-/**
- * Parses and validates the raw text OpenAI returns. Throws a descriptive
- * error on any mismatch — the caller (AiService) already falls back to
- * rules-based extraction on any thrown error, so failing loudly here is
- * safe and preferred over silently accepting malformed data.
- *
- * Policy: "dependency" is always required in the shape (non-empty string
- * or null), never omitted — this matches the JSON schema given to the
- * model in the prompt (pulse-ai.prompts.ts).
- */
-export function parseAndValidateAiResponse(raw: string): ParsedAiResponse {
+function hasOnlyAllowedKeys(
+  value: Record<string, unknown>,
+  allowedKeys: Set<string>,
+): boolean {
+  return Object.keys(value).every((key) =>
+    allowedKeys.has(key),
+  );
+}
+
+function normaliseForComparison(
+  value: string,
+): string {
+  return value
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+export function parseAndValidateAiResponse(
+  raw: string,
+): ParsedAiResponse {
   let parsed: unknown;
+
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error('AI response is not valid JSON');
+    throw new Error(
+      'AI response is not valid JSON',
+    );
   }
 
   if (!isRecord(parsed)) {
-    throw new Error('AI response must be a JSON object');
+    throw new Error(
+      'AI response must be a JSON object',
+    );
   }
 
-  const data = parsed;
-
-  if (!isNonEmptyString(data.summary)) {
-    throw new Error('AI response missing a valid non-empty "summary" string');
+  if (!hasOnlyAllowedKeys(parsed, ROOT_KEYS)) {
+    throw new Error(
+      'AI response contains unexpected top-level fields',
+    );
   }
 
-  if (!Array.isArray(data.blockers)) {
-    throw new Error('AI response missing a "blockers" array');
+  if (!isNonEmptyString(parsed.summary)) {
+    throw new Error(
+      'AI response missing a valid non-empty "summary" string',
+    );
   }
 
-  if (!Array.isArray(data.themes)) {
-    throw new Error('AI response missing a "themes" array');
+  if (!Array.isArray(parsed.blockers)) {
+    throw new Error(
+      'AI response missing a "blockers" array',
+    );
   }
 
-  const blockers: ExtractedBlocker[] = data.blockers.map(
-    (raw: unknown, i: number) => {
-      if (!isRecord(raw)) {
-        throw new Error(`blockers[${i}] is not a valid object`);
-      }
-      if (!isNonEmptyString(raw.userId)) {
-        throw new Error(`blockers[${i}].userId must be a non-empty string`);
-      }
-      if (!isNonEmptyString(raw.questionId)) {
-        throw new Error(`blockers[${i}].questionId must be a non-empty string`);
-      }
-      if (!isNonEmptyString(raw.description)) {
-        throw new Error(`blockers[${i}].description must be a non-empty string`);
-      }
-      if (typeof raw.severity !== 'string' || !VALID_SEVERITIES.includes(raw.severity)) {
-        throw new Error(`blockers[${i}].severity is not a valid severity`);
-      }
-      if (
-        typeof raw.confidence !== 'number' ||
-        raw.confidence < 0 ||
-        raw.confidence > 1
-      ) {
-        throw new Error(`blockers[${i}].confidence must be a number between 0 and 1`);
-      }
-      if (raw.dependency !== null && !isNonEmptyString(raw.dependency)) {
-        throw new Error(
-          `blockers[${i}].dependency must be a non-empty string or null`,
-        );
-      }
+  if (!Array.isArray(parsed.themes)) {
+    throw new Error(
+      'AI response missing a "themes" array',
+    );
+  }
 
-      return {
-        userId: raw.userId.trim(),
-        questionId: raw.questionId.trim(),
-        description: raw.description.trim(),
-        severity: raw.severity as BlockerSeverity,
-        dependency: typeof raw.dependency === 'string' ? raw.dependency.trim() : null,
-        confidence: raw.confidence,
-      };
-    },
-  );
+  const blockerKeys = new Set<string>();
 
-  const themes: ThemeSummary[] = data.themes.map((raw: unknown, i: number) => {
-    if (!isRecord(raw)) {
-      throw new Error(`themes[${i}] is not a valid object`);
-    }
-    if (!isNonEmptyString(raw.theme)) {
-      throw new Error(`themes[${i}].theme must be a non-empty string`);
-    }
-    if (
-      typeof raw.mentionCount !== 'number' ||
-      !Number.isInteger(raw.mentionCount) ||
-      raw.mentionCount < 0
-    ) {
-      throw new Error(`themes[${i}].mentionCount must be a non-negative integer`);
-    }
-    if (!isNonEmptyString(raw.summary)) {
-      throw new Error(`themes[${i}].summary must be a non-empty string`);
-    }
+  const blockers: ExtractedBlocker[] =
+    parsed.blockers.map(
+      (rawBlocker: unknown, index: number) => {
+        if (!isRecord(rawBlocker)) {
+          throw new Error(
+            `blockers[${index}] is not a valid object`,
+          );
+        }
 
-    return {
-      theme: raw.theme.trim(),
-      mentionCount: raw.mentionCount,
-      summary: raw.summary.trim(),
-    };
-  });
+        if (
+          !hasOnlyAllowedKeys(
+            rawBlocker,
+            BLOCKER_KEYS,
+          )
+        ) {
+          throw new Error(
+            `blockers[${index}] contains unexpected fields`,
+          );
+        }
 
-  return { summary: data.summary.trim(), blockers, themes };
+        if (
+          !isNonEmptyString(rawBlocker.userId)
+        ) {
+          throw new Error(
+            `blockers[${index}].userId must be a non-empty string`,
+          );
+        }
+
+        if (
+          !isNonEmptyString(
+            rawBlocker.questionId,
+          )
+        ) {
+          throw new Error(
+            `blockers[${index}].questionId must be a non-empty string`,
+          );
+        }
+
+        if (
+          !isNonEmptyString(
+            rawBlocker.description,
+          )
+        ) {
+          throw new Error(
+            `blockers[${index}].description must be a non-empty string`,
+          );
+        }
+
+        if (
+          typeof rawBlocker.severity !==
+            'string' ||
+          !VALID_SEVERITIES.includes(
+            rawBlocker.severity,
+          )
+        ) {
+          throw new Error(
+            `blockers[${index}].severity is not a valid severity`,
+          );
+        }
+
+        if (
+          typeof rawBlocker.confidence !==
+            'number' ||
+          !Number.isFinite(
+            rawBlocker.confidence,
+          ) ||
+          rawBlocker.confidence < 0 ||
+          rawBlocker.confidence > 1
+        ) {
+          throw new Error(
+            `blockers[${index}].confidence must be a finite number between 0 and 1`,
+          );
+        }
+
+        if (
+          rawBlocker.dependency !== null &&
+          !isNonEmptyString(
+            rawBlocker.dependency,
+          )
+        ) {
+          throw new Error(
+            `blockers[${index}].dependency must be a non-empty string or null`,
+          );
+        }
+
+        const userId =
+          rawBlocker.userId.trim();
+
+        const questionId =
+          rawBlocker.questionId.trim();
+
+        const description =
+          rawBlocker.description.trim();
+
+        const dependency =
+          typeof rawBlocker.dependency ===
+          'string'
+            ? rawBlocker.dependency.trim()
+            : null;
+
+        const duplicateKey = [
+          normaliseForComparison(userId),
+          normaliseForComparison(questionId),
+          normaliseForComparison(
+            description,
+          ),
+        ].join('|');
+
+        if (blockerKeys.has(duplicateKey)) {
+          throw new Error(
+            `blockers[${index}] duplicates an existing blocker`,
+          );
+        }
+
+        blockerKeys.add(duplicateKey);
+
+        return {
+          userId,
+          questionId,
+          description,
+          severity:
+            rawBlocker.severity as BlockerSeverity,
+          dependency,
+          confidence:
+            rawBlocker.confidence,
+        };
+      },
+    );
+
+  const themeNames = new Set<string>();
+
+  const themes: ThemeSummary[] =
+    parsed.themes.map(
+      (rawTheme: unknown, index: number) => {
+        if (!isRecord(rawTheme)) {
+          throw new Error(
+            `themes[${index}] is not a valid object`,
+          );
+        }
+
+        if (
+          !hasOnlyAllowedKeys(
+            rawTheme,
+            THEME_KEYS,
+          )
+        ) {
+          throw new Error(
+            `themes[${index}] contains unexpected fields`,
+          );
+        }
+
+        if (
+          !isNonEmptyString(rawTheme.theme)
+        ) {
+          throw new Error(
+            `themes[${index}].theme must be a non-empty string`,
+          );
+        }
+
+        if (
+          typeof rawTheme.mentionCount !==
+            'number' ||
+          !Number.isInteger(
+            rawTheme.mentionCount,
+          ) ||
+          rawTheme.mentionCount < 1
+        ) {
+          throw new Error(
+            `themes[${index}].mentionCount must be a positive integer`,
+          );
+        }
+
+        if (
+          !isNonEmptyString(rawTheme.summary)
+        ) {
+          throw new Error(
+            `themes[${index}].summary must be a non-empty string`,
+          );
+        }
+
+        const theme =
+          rawTheme.theme.trim();
+
+        const normalisedTheme =
+          normaliseForComparison(theme);
+
+        if (
+          themeNames.has(normalisedTheme)
+        ) {
+          throw new Error(
+            `themes[${index}] duplicates an existing theme`,
+          );
+        }
+
+        themeNames.add(normalisedTheme);
+
+        return {
+          theme,
+          mentionCount:
+            rawTheme.mentionCount,
+          summary:
+            rawTheme.summary.trim(),
+        };
+      },
+    );
+
+  return {
+    summary: parsed.summary.trim(),
+    blockers,
+    themes,
+  };
 }

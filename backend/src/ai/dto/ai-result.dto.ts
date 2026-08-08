@@ -20,7 +20,7 @@ export interface ThemeSummary {
   mentionCount: number;
   summary: string;
 }
- 
+
 export interface RawResponseForAnalysis {
   userId: string;
   answers: {

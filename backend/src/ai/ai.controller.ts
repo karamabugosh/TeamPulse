@@ -1,23 +1,46 @@
 // backend/src/ai/ai.controller.ts
-//
-// Not part of the main workflow (Ghassan calls AiService directly via
-// dependency injection). Kept as a manual entry point for testing via
-// Postman and as a ready-made API surface if we need one later.
 
-import { Body, Controller, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Post,
+} from '@nestjs/common';
 import { AiService } from './ai.service';
-import { AiDigestResult, RawResponseForAnalysis } from './dto/ai-result.dto';
+import {
+  AiDigestResult,
+  RawResponseForAnalysis,
+} from './dto/ai-result.dto';
+
+interface AnalyzeAiRequestDto {
+  teamId: string;
+  runId: string;
+  responses: RawResponseForAnalysis[];
+}
 
 @Controller('internal/ai')
 export class AiController {
-  constructor(private readonly aiService: AiService) {}
+  constructor(
+    private readonly aiService: AiService,
+  ) {}
 
   @Post('analyze')
-  analyze(
-    @Body('teamId') teamId: string,
-    @Body('runId') runId: string,
-    @Body('responses') responses: RawResponseForAnalysis[],
+  async analyze(
+    @Body() body: AnalyzeAiRequestDto,
   ): Promise<AiDigestResult> {
-    return this.aiService.analyzeRun(teamId, runId, responses);
+    if (
+      !body?.teamId?.trim() ||
+      !body?.runId?.trim() ||
+      !Array.isArray(body.responses)
+    ) {
+      throw new Error(
+        'teamId, runId, and responses are required',
+      );
+    }
+
+    return this.aiService.analyzeRun(
+      body.teamId.trim(),
+      body.runId.trim(),
+      body.responses,
+    );
   }
 }
