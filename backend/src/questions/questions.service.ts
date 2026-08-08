@@ -3,7 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class QuestionsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   async findAll() {
     return this.prisma.question.findMany({
@@ -63,6 +63,29 @@ export class QuestionsService {
         })
       )
     );
+  }
+
+  async swapOrder(id: string, direction: 'up' | 'down') {
+    const questions = await this.findAll();
+    const currentIndex = questions.findIndex((q) => q.id === id);
+    if (currentIndex === -1) throw new NotFoundException('Question not found');
+
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (targetIndex < 0 || targetIndex >= questions.length) return; // Cannot move further
+
+    const currentQuestion = questions[currentIndex];
+    const targetQuestion = questions[targetIndex];
+
+    await this.prisma.$transaction([
+      this.prisma.question.update({
+        where: { id: currentQuestion.id },
+        data: { order: targetQuestion.order },
+      }),
+      this.prisma.question.update({
+        where: { id: targetQuestion.id },
+        data: { order: currentQuestion.order },
+      }),
+    ]);
   }
 
   private validateQuestion(question: string) {

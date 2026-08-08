@@ -26,7 +26,9 @@ export class CollectionService implements CollectionGateway {
 
   /**
    * Resolves either a Slack user ID or an internal database User.id.
-   * If a Slack user does not exist yet, it is created in the latest workspace.
+   * CollectionGateway normally receives Slack user IDs, while Prisma
+   * relations require the internal User.id.
+   * If the user does not exist yet, it is created in the latest workspace.
    */
   private async getOrCreateUser(userIdentifier: string) {
     const userBySlackId = await this.prisma.user.findUnique({
@@ -72,6 +74,11 @@ export class CollectionService implements CollectionGateway {
         slackDisplayName: userIdentifier,
       },
     });
+  }
+
+  private async getInternalUserId(slackUserId: string): Promise<string> {
+    const user = await this.getOrCreateUser(slackUserId);
+    return user.id;
   }
 
   /**
@@ -205,12 +212,12 @@ export class CollectionService implements CollectionGateway {
   async startConversation(
     userIdentifier: string,
   ): Promise<QuestionPayloadDto | null> {
-    this.logger.log(
-      `Starting conversation for user ${userIdentifier}`,
-    );
-
     const user = await this.getOrCreateUser(userIdentifier);
     const userId = user.id;
+
+    this.logger.log(
+      `Starting conversation for user ${userId} (identifier: ${userIdentifier})`,
+    );
 
     let session =
       await this.prisma.conversationState.findUnique({
@@ -313,10 +320,6 @@ export class CollectionService implements CollectionGateway {
     questionId: string,
     answer: string,
   ): Promise<void> {
-    this.logger.log(
-      `Submitting answer for question ${questionId} from user ${userIdentifier}`,
-    );
-
     const normalizedAnswer = answer?.trim();
 
     if (!normalizedAnswer) {
@@ -327,6 +330,9 @@ export class CollectionService implements CollectionGateway {
 
     const user = await this.getOrCreateUser(userIdentifier);
     const userId = user.id;
+    this.logger.log(
+      `Submitting answer for question ${questionId} from user ${userId} (identifier: ${userIdentifier})`,
+    );
 
     const session =
       await this.prisma.conversationState.findUnique({
@@ -411,6 +417,16 @@ export class CollectionService implements CollectionGateway {
       return null;
     }
 
+    const activeQuestions = await this.prisma.question.findMany({
+      where: { isActive: true },
+      orderBy: { order: 'asc' },
+    });
+
+    if (activeQuestions.length === 0) {
+      await this.finishConversation(userIdentifier);
+      return null;
+    }
+
     const answers = await this.prisma.answer.findMany({
       where: {
         submissionId: session.submissionId,
@@ -420,26 +436,18 @@ export class CollectionService implements CollectionGateway {
       },
     });
 
-    const answeredQuestionIds = answers.map(
-      (answer) => answer.questionId,
+    const answeredQuestionIds = new Set(answers.map((answer) => answer.questionId));
+
+    const nextIndex = activeQuestions.findIndex(
+      (q) => !answeredQuestionIds.has(q.id),
     );
 
-    const nextQuestion =
-      await this.prisma.question.findFirst({
-        where: {
-          isActive: true,
-          id: {
-            notIn: answeredQuestionIds,
-          },
-        },
-        orderBy: {
-          order: 'asc',
-        },
-      });
-
-    if (!nextQuestion) {
+    if (nextIndex === -1) {
+      await this.finishConversation(userIdentifier);
       return null;
     }
+
+    const nextQuestion = activeQuestions[nextIndex];
 
     await this.prisma.conversationState.update({
       where: {
@@ -453,18 +461,20 @@ export class CollectionService implements CollectionGateway {
     return {
       questionId: nextQuestion.id,
       text: nextQuestion.question,
+      questionNumber: nextIndex + 1,
+      totalQuestions: activeQuestions.length,
     };
   }
 
   async finishConversation(
     userIdentifier: string,
   ): Promise<void> {
-    this.logger.log(
-      `Finishing conversation for user ${userIdentifier}`,
-    );
-
     const user = await this.getOrCreateUser(userIdentifier);
     const userId = user.id;
+
+    this.logger.log(
+      `Finishing conversation for user ${userId} (identifier: ${userIdentifier})`,
+    );
 
     const session =
       await this.prisma.conversationState.findUnique({
@@ -565,20 +575,26 @@ export class CollectionService implements CollectionGateway {
       return null;
     }
 
-    const question =
-      await this.prisma.question.findUnique({
-        where: {
-          id: session.currentQuestionId,
-        },
-      });
+    const activeQuestions = await this.prisma.question.findMany({
+      where: { isActive: true },
+      orderBy: { order: 'asc' },
+    });
 
-    if (!question || !question.isActive) {
-      return null;
+    const questionIndex = activeQuestions.findIndex(
+      (q) => q.id === session.currentQuestionId,
+    );
+
+    if (questionIndex === -1) {
+      return this.getNextQuestion(userIdentifier);
     }
+
+    const question = activeQuestions[questionIndex];
 
     return {
       questionId: question.id,
       text: question.question,
+      questionNumber: questionIndex + 1,
+      totalQuestions: activeQuestions.length,
     };
   }
 
@@ -1032,6 +1048,61 @@ export class CollectionService implements CollectionGateway {
     }
 
     return pendingMembers;
+  }
+
+  async isStandupCompletedToday(slackUserId: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { slackUserId },
+    });
+
+    if (!user) {
+      return false;
+    }
+
+    const session = await this.prisma.conversationState.findUnique({
+      where: { userId: user.id },
+    });
+
+    if (!session || !session.isCompleted || !session.completedAt) {
+      return false;
+    }
+
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    return session.completedAt >= startOfToday;
+  }
+
+  async startDailyStandupForUser(
+    slackUserId: string,
+  ): Promise<QuestionPayloadDto | null> {
+    /*
+     * Reuse the submission-aware flow so previous answers/history are preserved.
+     * startConversation resumes an unfinished standup or creates a fresh
+     * StandupRun + StandupSubmission when the previous one is complete.
+     */
+    return this.startConversation(slackUserId);
+  }
+
+  async getDailyDigestData(
+    workspaceMembers: { id: string; name: string }[],
+  ): Promise<{
+    completedResponses: StandupResponse[];
+    noUpdateUsers: string[];
+  }> {
+    const completedResponses = await this.getCompletedStandupResponses();
+    const completedSlackUserIds = new Set(
+      completedResponses.map((r) => r.userId),
+    );
+
+    const noUpdateUsers = workspaceMembers
+      .filter((member) => !completedSlackUserIds.has(member.id))
+      .map((member) => member.name);
+
+    return {
+      completedResponses,
+      noUpdateUsers,
+    };
   }
 
 }

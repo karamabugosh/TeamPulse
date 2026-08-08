@@ -58,7 +58,7 @@ export class SlackGateway {
 
       await this.slackService.sendMessage({
         channelId: payload.channelId,
-        text: "I'm not sure what you mean. Type `hello` to start a standup.",
+        text: "You don't have an active standup right now. Daily standups start automatically every weekday at 9:00 AM.",
       });
     } catch (error: unknown) {
       const message =
@@ -100,7 +100,61 @@ export class SlackGateway {
   }
 
   /**
-   * Starts a new standup conversation.
+   * Triggers the automatic daily standup flow for a user in DM.
+   */
+  async triggerAutomaticStandupForUser(
+    userId: string,
+    channelId: string,
+  ): Promise<void> {
+    this.logger.log(
+      `Triggering automatic daily standup for user ${userId}`,
+    );
+
+    const firstQuestion =
+      await this.collectionService.startDailyStandupForUser(userId);
+
+    if (firstQuestion) {
+      // Send greeting message first
+      await this.slackService.sendMessage({
+        channelId,
+        text: "👋 *Good morning!*\n\nIt's time for today's Daily Standup.\n\nLet's begin.",
+      });
+
+      // Send Question 1 message immediately after in DM history
+      const qNum = firstQuestion.questionNumber || 1;
+      await this.slackService.sendMessage({
+        channelId,
+        text: `*Question ${qNum}*\n${firstQuestion.text}`,
+      });
+
+      return;
+    }
+
+    await this.slackService.sendMessage({
+      channelId,
+      text: '✅ There are no active standup questions right now.',
+    });
+  }
+
+  /**
+   * Sends a single gentle reminder to a user who has not completed their standup.
+   */
+  async sendStandupReminder(
+    userId: string,
+    channelId: string,
+  ): Promise<void> {
+    this.logger.log(
+      `Sending standup reminder to user ${userId} in channel ${channelId}`,
+    );
+
+    await this.slackService.sendMessage({
+      channelId,
+      text: "⏰ *Reminder:* You have an active daily standup waiting. Reply here with your updates when you get a chance!",
+    });
+  }
+
+  /**
+   * Starts a new standup conversation manually or via interactive triggers.
    */
   async startConversationFlow(
     userId: string,
@@ -114,9 +168,10 @@ export class SlackGateway {
       await this.collectionService.startConversation(userId);
 
     if (firstQuestion) {
+      const qNum = firstQuestion.questionNumber || 1;
       await this.slackService.sendMessage({
         channelId,
-        text: firstQuestion.text,
+        text: `*Question ${qNum}*\n${firstQuestion.text}`,
       });
 
       return;
@@ -165,9 +220,10 @@ export class SlackGateway {
       );
 
     if (nextQuestion) {
+      const qNum = nextQuestion.questionNumber || 1;
       await this.slackService.sendMessage({
         channelId: payload.channelId,
-        text: nextQuestion.text,
+        text: `*Question ${qNum}*\n${nextQuestion.text}`,
       });
 
       return;

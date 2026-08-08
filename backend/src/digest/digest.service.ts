@@ -8,16 +8,47 @@ import {
 export class DigestService {
   generateDailyDigest(
     responses: StandupResponse[],
-    nonResponders: StandupNonResponder[] = [],
+    nonResponders: Array<StandupNonResponder | string> = [],
   ): string {
     const sections: string[] = [
       '*Daily Standup Digest*',
       '',
     ];
 
+    /*
+     * Support both integrations:
+     *
+     * - Feature flow that provides StandupNonResponder objects.
+     * - Existing scheduling flow that provides participant names as strings.
+     */
+    const nonResponderNames = nonResponders
+      .map((member) =>
+        typeof member === 'string'
+          ? member.trim()
+          : member.name?.trim(),
+      )
+      .filter(
+        (name): name is string =>
+          Boolean(name),
+      );
+
+    if (
+      responses.length === 0 &&
+      nonResponderNames.length === 0
+    ) {
+      return [
+        '*Daily Standup Digest*',
+        '',
+        '_No standup participants found._',
+      ].join('\n');
+    }
+
+    /*
+     * Completed responses
+     */
     if (responses.length === 0) {
       sections.push(
-        '_No completed standup responses were submitted._',
+        '_No completed standup responses were submitted today._',
       );
     } else {
       sections.push(
@@ -29,10 +60,15 @@ export class DigestService {
       );
     }
 
+    /*
+     * Blockers
+     */
     const blockerResponses = responses.filter(
       (response) =>
         response.blocker &&
-        !this.isNoBlockerResponse(response.blocker),
+        !this.isNoBlockerResponse(
+          response.blocker,
+        ),
     );
 
     sections.push('');
@@ -48,34 +84,42 @@ export class DigestService {
         ].join('\n'),
       );
     } else {
-      sections.push('*🚧 Blockers*\n• None reported.');
+      sections.push(
+        '*🚧 Blockers*\n• None reported.',
+      );
     }
 
+    /*
+     * Missing responses
+     */
     sections.push('');
 
-    if (nonResponders.length > 0) {
+    if (nonResponderNames.length > 0) {
       sections.push(
         [
-          '*⏳ No Response*',
-          ...nonResponders.map(
-            (member) => `• ${member.name}`,
+          '*⏳ No Update Submitted*',
+          ...nonResponderNames.map(
+            (name) => `• ${name}`,
           ),
         ].join('\n'),
       );
     } else {
       sections.push(
-        '*⏳ No Response*\n• Everyone submitted.',
+        '*⏳ No Update Submitted*\n• Everyone submitted.',
       );
     }
 
+    /*
+     * Totals
+     */
     sections.push('');
     sections.push(
       `_Responses received: ${responses.length}_`,
     );
 
-    if (nonResponders.length > 0) {
+    if (nonResponderNames.length > 0) {
       sections.push(
-        `_Missing responses: ${nonResponders.length}_`,
+        `_Missing responses: ${nonResponderNames.length}_`,
       );
     }
 
@@ -85,9 +129,10 @@ export class DigestService {
   private formatResponse(
     response: StandupResponse,
   ): string {
-    const submittedTime = this.formatSubmittedTime(
-      response.submittedAt,
-    );
+    const submittedTime =
+      this.formatSubmittedTime(
+        response.submittedAt,
+      );
 
     return [
       `*👤 ${response.name}*`,
@@ -99,7 +144,9 @@ export class DigestService {
   private isNoBlockerResponse(
     blocker: string,
   ): boolean {
-    const normalized = blocker.trim().toLowerCase();
+    const normalized = blocker
+      .trim()
+      .toLowerCase();
 
     return [
       'no',
@@ -109,22 +156,30 @@ export class DigestService {
       'none reported',
       'n/a',
       'na',
+      'nothing',
     ].includes(normalized);
   }
 
   private formatSubmittedTime(
     submittedAt: string,
   ): string {
-    const date = new Date(submittedAt);
+    const date = new Date(
+      submittedAt,
+    );
 
-    if (Number.isNaN(date.getTime())) {
+    if (
+      Number.isNaN(date.getTime())
+    ) {
       return 'Unknown time';
     }
 
-    return date.toLocaleString('en-US', {
-      timeZone: 'Asia/Riyadh',
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    });
+    return date.toLocaleString(
+      'en-US',
+      {
+        timeZone: 'Asia/Riyadh',
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      },
+    );
   }
 }

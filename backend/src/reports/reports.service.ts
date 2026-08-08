@@ -78,7 +78,7 @@ export class ReportsService {
     );
   }
 
-  formatDigestForSlack(
+    formatDigestForSlack(
     digest: AiDigestResult,
   ): string {
     const blockerText =
@@ -128,6 +128,141 @@ export class ReportsService {
     ].join('\n');
   }
 
+  buildDigestBlocks(
+    digest: AiDigestResult,
+    nonResponderNames: string[] = [],
+  ): unknown[] {
+    const blocks: unknown[] = [
+      {
+        type: 'header',
+        text: {
+          type: 'plain_text',
+          text: '📊 Pulse Standup Report',
+          emoji: true,
+        },
+      },
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text:
+              `Generated: ${this.formatDate(
+                digest.generatedAt,
+              )}  •  Source: ${digest.source}`,
+          },
+        ],
+      },
+      {
+        type: 'divider',
+      },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*Summary*\n${digest.summary}`,
+        },
+      },
+      {
+        type: 'divider',
+      },
+    ];
+
+    if (digest.blockers.length > 0) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '*🚧 Blockers*',
+        },
+      });
+
+      for (const blocker of digest.blockers) {
+        const dependency =
+          blocker.dependency
+            ? `\n*Dependency:* ${blocker.dependency}`
+            : '';
+
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text:
+              `<@${blocker.userId}> — ${blocker.description}` +
+              `\n*Severity:* ${blocker.severity}` +
+              dependency,
+          },
+        });
+      }
+    } else {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text:
+            '*🚧 Blockers*\n✅ No blockers reported.',
+        },
+      });
+    }
+
+    blocks.push({
+      type: 'divider',
+    });
+
+    if (digest.themes.length > 0) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '*🧭 Themes*',
+        },
+      });
+
+      for (const theme of digest.themes) {
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text:
+              `*${theme.theme}* (${theme.mentionCount})\n` +
+              `${theme.summary}`,
+          },
+        });
+      }
+    } else {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text:
+            '*🧭 Themes*\nNo common themes reported.',
+        },
+      });
+    }
+
+    blocks.push({
+      type: 'divider',
+    });
+
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          nonResponderNames.length > 0
+            ? [
+                '*⏳ No Response*',
+                ...nonResponderNames.map(
+                  (name) => `• ${name}`,
+                ),
+              ].join('\n')
+            : '*⏳ No Response*\n✅ Everyone submitted.',
+      },
+    });
+
+    return blocks;
+  }
+ 
   formatHistoryForSlack(
     digests: AiDigestResult[],
   ): string {

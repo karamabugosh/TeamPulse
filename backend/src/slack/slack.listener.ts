@@ -3,6 +3,7 @@ import {
   Logger,
   OnModuleInit,
 } from '@nestjs/common';
+import { AuthService } from '../auth/auth.service';
 import { CollectionService } from '../collection/collection.service';
 import { ReportsService } from '../reports/reports.service';
 import { IncomingMessageDto } from './dto/incoming-message.dto';
@@ -13,10 +14,12 @@ import { SlackService } from './slack.service';
 @Injectable()
 export class SlackListener implements OnModuleInit {
   private readonly logger = new Logger(SlackListener.name);
+  private readonly processedMessageIds = new Set<string>();
 
   constructor(
     private readonly slackService: SlackService,
     private readonly slackGateway: SlackGateway,
+    private readonly authService: AuthService,
     private readonly collectionService: CollectionService,
     private readonly reportsService: ReportsService,
   ) {}
@@ -27,6 +30,22 @@ export class SlackListener implements OnModuleInit {
     );
 
     this.registerListeners();
+  }
+
+  private isDuplicateMessage(msgId: string): boolean {
+    if (!msgId) return false;
+
+    if (this.processedMessageIds.has(msgId)) {
+      return true;
+    }
+
+    this.processedMessageIds.add(msgId);
+
+    setTimeout(() => {
+      this.processedMessageIds.delete(msgId);
+    }, 10000);
+
+    return false;
   }
 
   private registerListeners(): void {
@@ -43,59 +62,74 @@ export class SlackListener implements OnModuleInit {
       return;
     }
 
-    /*
-     * Handles normal Slack messages, including direct messages.
-     */
-    app.event('message', async ({ event }) => {
-      const msg = event as {
-        user?: string;
-        channel?: string;
-        text?: string;
-        ts?: string;
-        bot_id?: string;
-        subtype?: string;
-      };
+    const handleIncomingSlackMessage = async (
+      msg: any,
+      client: any,
+    ) => {
+      const msgIdentifier =
+        msg.client_msg_id ||
+        `${msg.user}-${msg.ts}`;
 
-      this.logger.log(
-        `[SLACK EVENT TRIGGERED] message event received: ${JSON.stringify(
-          event,
-        )}`,
-      );
+      if (this.isDuplicateMessage(msgIdentifier)) {
+        this.logger.debug(
+          `Ignoring duplicate message event ${msgIdentifier}`,
+        );
+        return;
+      }
 
-      /*
-       * Ignore bot messages and edited messages to prevent
-       * loops or processing the same message more than once.
-       */
       if (
         msg.bot_id ||
         msg.subtype === 'bot_message' ||
-        msg.subtype === 'message_changed'
+        msg.subtype === 'message_changed' ||
+        msg.subtype === 'message_deleted'
       ) {
         this.logger.debug(
-          'Ignored bot message or edited message event.',
+          'Ignored bot message or message modification event.',
         );
         return;
       }
 
       if (!msg.user || !msg.channel) {
         this.logger.warn(
-          'Ignored Slack message because user or channel was missing.',
+          'Ignored Slack message without a user or channel.',
         );
         return;
       }
 
       this.logger.log(
-        `Processing incoming Slack message from user ${msg.user}`,
+        `Processing incoming Slack message from user ${msg.user} in channel ${msg.channel}: "${msg.text}"`,
       );
 
       try {
-        /*
-         * Ensure that the Slack workspace and user exist
-         * in PostgreSQL before the Collection flow starts.
-         */
         await this.slackService.ensureUserRegistered(
           msg.user,
         );
+
+        try {
+          const userInfo =
+            await client.users.info({
+              user: msg.user,
+            });
+
+          const teamId =
+            userInfo.user?.team_id ||
+            'unknown_team';
+
+          await this.authService.syncSlackUser(
+            msg.user,
+            teamId,
+            'TeamPulse Workspace',
+          );
+        } catch (syncError: unknown) {
+          const message =
+            syncError instanceof Error
+              ? syncError.message
+              : String(syncError);
+
+          this.logger.warn(
+            `Could not sync Slack auth profile for ${msg.user}: ${message}`,
+          );
+        }
 
         const payload: IncomingMessageDto = {
           userId: msg.user,
@@ -131,67 +165,79 @@ export class SlackListener implements OnModuleInit {
             'Please try again.',
         });
       }
-    });
+    };
 
-    /*
-     * Handles mentions of the bot inside Slack channels.
-     */
-    app.event('app_mention', async ({ event }) => {
-      this.logger.log(
-        `[SLACK EVENT TRIGGERED] app_mention received: ${JSON.stringify(
+    app.message(
+      async ({ message, client }) => {
+        await handleIncomingSlackMessage(
+          message,
+          client,
+        );
+      },
+    );
+
+    app.event(
+      'message',
+      async ({ event, client }) => {
+        await handleIncomingSlackMessage(
           event,
-        )}`,
-      );
+          client,
+        );
+      },
+    );
 
-      try {
-        await this.slackService.ensureUserRegistered(
-          event.user,
+    app.event(
+      'app_mention',
+      async ({ event }) => {
+        this.logger.log(
+          `[SLACK EVENT TRIGGERED] app_mention received: ${JSON.stringify(
+            event,
+          )}`,
         );
 
-        /*
-         * Removes the bot mention, for example:
-         * "<@BOT_ID> hello" becomes "hello".
-         */
-        const normalizedMessage = (
-          event.text ?? ''
-        )
-          .replace(/<@[^>]+>/g, '')
-          .trim();
+        try {
+          await this.slackService.ensureUserRegistered(
+            event.user,
+          );
 
-        const payload: IncomingMessageDto = {
-          userId: event.user,
-          channelId: event.channel,
-          message: normalizedMessage,
-          timestamp: event.ts,
-        };
+          const normalizedMessage = (
+            event.text ?? ''
+          )
+            .replace(/<@[^>]+>/g, '')
+            .trim();
 
-        await this.slackGateway.handleIncomingMessage(
-          payload,
-        );
-      } catch (error: unknown) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : String(error);
+          const payload: IncomingMessageDto = {
+            userId: event.user,
+            channelId: event.channel,
+            message: normalizedMessage,
+            timestamp: event.ts,
+          };
 
-        this.logger.error(
-          `Failed to process app mention from user ${event.user}: ${message}`,
-          error instanceof Error
-            ? error.stack
-            : undefined,
-        );
+          await this.slackGateway.handleIncomingMessage(
+            payload,
+          );
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : String(error);
 
-        await this.slackService.sendMessage({
-          channelId: event.channel,
-          text:
-            '❌ An error occurred while processing your request.',
-        });
-      }
-    });
+          this.logger.error(
+            `Failed to process app mention from user ${event.user}: ${message}`,
+            error instanceof Error
+              ? error.stack
+              : undefined,
+          );
 
-    /*
-     * Publishes the current standup status in Slack App Home.
-     */
+          await this.slackService.sendMessage({
+            channelId: event.channel,
+            text:
+              '❌ An error occurred while processing your request.',
+          });
+        }
+      },
+    );
+
     app.event(
       'app_home_opened',
       async ({ event, client }) => {
@@ -199,6 +245,32 @@ export class SlackListener implements OnModuleInit {
           await this.slackService.ensureUserRegistered(
             event.user,
           );
+
+          try {
+            const userInfo =
+              await client.users.info({
+                user: event.user,
+              });
+
+            const teamId =
+              userInfo.user?.team_id ||
+              'unknown_team';
+
+            await this.authService.syncSlackUser(
+              event.user,
+              teamId,
+              'TeamPulse Workspace',
+            );
+          } catch (syncError: unknown) {
+            const message =
+              syncError instanceof Error
+                ? syncError.message
+                : String(syncError);
+
+            this.logger.warn(
+              `Could not sync Slack auth profile on App Home open for ${event.user}: ${message}`,
+            );
+          }
 
           const summary =
             await this.collectionService.getAppHomeSummary(
@@ -209,7 +281,9 @@ export class SlackListener implements OnModuleInit {
             user_id: event.user,
             view: {
               type: 'home',
-              blocks: buildAppHomeBlocks(summary),
+              blocks: buildAppHomeBlocks(
+                summary,
+              ),
             },
           });
         } catch (error: unknown) {
@@ -228,9 +302,6 @@ export class SlackListener implements OnModuleInit {
       },
     );
 
-    /*
-     * Handles the Start Standup button from Slack App Home.
-     */
     app.action(
       'start_standup',
       async ({ ack, body, client }) => {
@@ -248,7 +319,8 @@ export class SlackListener implements OnModuleInit {
               users: userId,
             });
 
-          const channelId = openResult.channel?.id;
+          const channelId =
+            openResult.channel?.id;
 
           if (!channelId) {
             this.logger.error(
@@ -271,7 +343,9 @@ export class SlackListener implements OnModuleInit {
             user_id: userId,
             view: {
               type: 'home',
-              blocks: buildAppHomeBlocks(summary),
+              blocks: buildAppHomeBlocks(
+                summary,
+              ),
             },
           });
         } catch (error: unknown) {
@@ -290,12 +364,13 @@ export class SlackListener implements OnModuleInit {
       },
     );
 
-    /*
-     * Displays the latest saved AI report for the user's team.
-     */
     app.command(
       '/report',
-      async ({ command, ack, respond }) => {
+      async ({
+        command,
+        ack,
+        respond,
+      }) => {
         await ack();
 
         try {
@@ -304,7 +379,8 @@ export class SlackListener implements OnModuleInit {
           );
 
           const teamSearch =
-            command.text?.trim() || undefined;
+            command.text?.trim() ||
+            undefined;
 
           const digest =
             await this.reportsService.getLatestDigestForSlackUser(
@@ -312,12 +388,20 @@ export class SlackListener implements OnModuleInit {
               teamSearch,
             );
 
+          const reportText =
+            this.reportsService.formatDigestForSlack(
+              digest,
+            );
+
+          const reportBlocks =
+            this.reportsService.buildDigestBlocks(
+              digest,
+            );
+
           await respond({
             response_type: 'ephemeral',
-            text:
-              this.reportsService.formatDigestForSlack(
-                digest,
-              ),
+            text: reportText,
+            blocks: reportBlocks as any,
           });
         } catch (error: unknown) {
           const message =
@@ -340,12 +424,13 @@ export class SlackListener implements OnModuleInit {
       },
     );
 
-    /*
-     * Displays the latest five AI reports for the user's team.
-     */
     app.command(
       '/history',
-      async ({ command, ack, respond }) => {
+      async ({
+        command,
+        ack,
+        respond,
+      }) => {
         await ack();
 
         try {
@@ -354,7 +439,8 @@ export class SlackListener implements OnModuleInit {
           );
 
           const teamSearch =
-            command.text?.trim() || undefined;
+            command.text?.trim() ||
+            undefined;
 
           const digests =
             await this.reportsService.getDigestHistoryForSlackUser(
@@ -391,22 +477,21 @@ export class SlackListener implements OnModuleInit {
       },
     );
 
-    /*
-     * Global Slack Bolt error handler.
-     */
-    app.error(async (error: unknown) => {
-      const message =
-        error instanceof Error
-          ? error.message
-          : String(error);
+    app.error(
+      async (error: unknown) => {
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
 
-      this.logger.error(
-        `[SLACK ERROR] Global error handler caught: ${message}`,
-        error instanceof Error
-          ? error.stack
-          : undefined,
-      );
-    });
+        this.logger.error(
+          `[SLACK ERROR] Global error handler caught: ${message}`,
+          error instanceof Error
+            ? error.stack
+            : undefined,
+        );
+      },
+    );
 
     this.logger.log(
       'Slack listeners successfully registered.',

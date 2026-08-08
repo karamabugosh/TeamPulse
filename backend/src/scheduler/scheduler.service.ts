@@ -15,6 +15,7 @@ import { CollectionService } from '../collection/collection.service';
 import { DigestService } from '../digest/digest.service';
 import { ReportsService } from '../reports/reports.service';
 import { SlackService } from '../slack/slack.service';
+import { SlackGateway } from '../slack/slack.gateway';
 
 type TeamDigestResult = {
   teamId: string | null;
@@ -35,7 +36,11 @@ type TeamDigestResult = {
 export class SchedulerService implements OnModuleInit {
   private readonly logger = new Logger(SchedulerService.name);
 
+
   private readonly runningTeamIds = new Set<string>();
+  private isStandupRunning = false;
+  private isReminderRunning = false;
+
 
   constructor(
     private readonly prisma: PrismaService,
@@ -43,6 +48,8 @@ export class SchedulerService implements OnModuleInit {
     private readonly collectionService: CollectionService,
     private readonly digestService: DigestService,
     private readonly slackService: SlackService,
+
+    private readonly slackGateway: SlackGateway,
     private readonly aiService: AiService,
     private readonly reportsService: ReportsService,
   ) {}
@@ -205,13 +212,130 @@ export class SchedulerService implements OnModuleInit {
       this.logger.error(
         `Could not register ${input.taskName} for team "${input.teamName}": ${message}`,
       );
+
     }
   }
 
   /**
+
    * Starts one shared team standup and sends the first question
    * directly to every active team member in Slack.
    */
+  async triggerDailyStandup() {
+    const startedAt = new Date();
+
+    if (process.env.STANDUP_SCHEDULER_ENABLED === 'false') {
+      this.logger.warn('Daily standup scheduler is disabled via env.');
+      return { status: 'disabled', generatedAt: startedAt.toISOString() };
+    }
+
+    if (this.isStandupRunning) {
+      this.logger.warn('Daily standup trigger is already running. Skipping.');
+      return { status: 'skipped', reason: 'Standup trigger in progress' };
+    }
+
+    this.isStandupRunning = true;
+
+    try {
+      const members = await this.slackService.getWorkspaceMembers();
+      let initiatedCount = 0;
+
+      for (const member of members) {
+        try {
+          const dmChannelId = await this.slackService.openDirectMessage(member.id);
+
+          if (!dmChannelId) {
+            continue;
+          }
+
+          await this.slackGateway.triggerAutomaticStandupForUser(
+            member.id,
+            dmChannelId,
+          );
+
+          initiatedCount += 1;
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+
+          this.logger.error(
+            `Failed to trigger standup for user ${member.id}: ${message}`,
+          );
+        }
+      }
+
+      return {
+        status: 'success',
+        totalMembers: members.length,
+        initiatedCount,
+        startedAt: startedAt.toISOString(),
+      };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+
+      this.logger.error(`Daily standup trigger failed: ${message}`);
+
+      return { status: 'failed', error: message };
+    } finally {
+      this.isStandupRunning = false;
+    }
+  }
+
+  async triggerDailyReminder() {
+    const startedAt = new Date();
+
+    if (process.env.REMINDER_SCHEDULER_ENABLED === 'false') {
+      this.logger.log('Standup reminder scheduler is disabled.');
+      return { status: 'disabled' };
+    }
+
+    if (this.isReminderRunning) {
+      return { status: 'skipped', reason: 'Reminder run in progress' };
+    }
+
+    this.isReminderRunning = true;
+
+    try {
+      const members = await this.slackService.getWorkspaceMembers();
+      let reminderCount = 0;
+
+      for (const member of members) {
+        const isCompleted =
+          await this.collectionService.isStandupCompletedToday(member.id);
+
+        if (isCompleted) {
+          continue;
+        }
+
+        const dmChannelId =
+          await this.slackService.openDirectMessage(member.id);
+
+        if (!dmChannelId) {
+          continue;
+        }
+
+        await this.slackGateway.sendStandupReminder(
+          member.id,
+          dmChannelId,
+        );
+
+        reminderCount += 1;
+      }
+
+      return { status: 'success', reminderCount };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+
+      this.logger.error(`Standup reminder run failed: ${message}`);
+
+      return { status: 'failed', error: message };
+    } finally {
+      this.isReminderRunning = false;
+    }
+  }
+
   async startTeamStandupCollection(teamId: string) {
     const team = await this.prisma.team.findUnique({
       where: {
@@ -322,10 +446,12 @@ export class SchedulerService implements OnModuleInit {
         error: message,
         generatedAt: new Date().toISOString(),
       };
+
     }
   }
 
   /**
+
    * Sends one reminder to members who have not completed
    * the latest collecting standup run.
    */
@@ -439,17 +565,15 @@ export class SchedulerService implements OnModuleInit {
    * Runs a digest for every enabled team.
    * If no Team rows exist, it uses the environment fallback.
    */
+
   async runDailyDigest() {
     const startedAt = new Date();
 
-    if (process.env.DIGEST_SCHEDULER_ENABLED !== 'true') {
-      this.logger.warn('Daily digest scheduler is disabled.');
-
-      return {
-        status: 'disabled',
-        generatedAt: startedAt.toISOString(),
-      };
+    if (process.env.DIGEST_SCHEDULER_ENABLED === 'false') {
+      this.logger.warn('Daily digest scheduler is disabled via env.');
+      return { status: 'disabled', generatedAt: startedAt.toISOString() };
     }
+
 
     const teams = await this.prisma.team.findMany({
       where: {
@@ -515,6 +639,7 @@ export class SchedulerService implements OnModuleInit {
         `Digest generation is already running for team ${teamId}. Duplicate run skipped.`,
       );
 
+
       return {
         teamId,
         teamName: teamId,
@@ -526,6 +651,7 @@ export class SchedulerService implements OnModuleInit {
         generatedAt: startedAt.toISOString(),
       };
     }
+
 
     this.runningTeamIds.add(teamId);
 
@@ -572,6 +698,8 @@ export class SchedulerService implements OnModuleInit {
           responses,
           nonResponders,
         );
+
+      let aiDigestForBlocks: AiDigestResult | null = null;
 
       if (responses.length > 0) {
         try {
@@ -644,6 +772,8 @@ export class SchedulerService implements OnModuleInit {
                   aiResponses,
                 );
 
+              aiDigestForBlocks = aiResult;
+
               digest =
                 this.reportsService.formatDigestForSlack(
                   aiResult,
@@ -680,6 +810,7 @@ export class SchedulerService implements OnModuleInit {
               ? error.stack
               : undefined,
           );
+
         }
       }
 
@@ -736,13 +867,27 @@ export class SchedulerService implements OnModuleInit {
         };
       }
 
+      const digestBlocks =
+        aiDigestForBlocks
+          ? this.reportsService.buildDigestBlocks(
+              aiDigestForBlocks,
+              nonResponders.map(
+                (member) => member.name,
+              ),
+            )
+          : undefined;
+
       const slackDelivered =
         await this.slackService.sendMessage({
           channelId,
           text: digest,
+          ...(digestBlocks
+            ? { blocks: digestBlocks }
+            : {}),
         });
 
       const completedAt = new Date();
+
 
       if (!slackDelivered) {
         return {
@@ -769,12 +914,14 @@ export class SchedulerService implements OnModuleInit {
         teamName: team.name,
         status: 'success',
         responseCount: responses.length,
+
         digest,
         slackDelivered: true,
         slackError: null,
         generatedAt: completedAt.toISOString(),
       };
     } catch (error: unknown) {
+
       const message =
         error instanceof Error
           ? error.message
@@ -796,6 +943,7 @@ export class SchedulerService implements OnModuleInit {
         slackError: message,
         generatedAt: new Date().toISOString(),
       };
+
     } finally {
       this.runningTeamIds.delete(teamId);
     }
