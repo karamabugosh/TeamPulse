@@ -394,6 +394,8 @@ export class CollectionService implements CollectionGateway {
         text: normalizedAnswer,
       },
     });
+
+    this.logger.log(`[Answer Saved] Answer saved for question ${questionId} by user ${userId}`);
   }
 
   async getNextQuestion(
@@ -530,6 +532,8 @@ export class CollectionService implements CollectionGateway {
         completedAt,
       },
     });
+
+    this.logger.log(`[Submission Completed] Standup submission ${session.submissionId} completed for user ${userId}.`);
 
     const incompleteSubmissionCount =
       await this.prisma.standupSubmission.count({
@@ -881,6 +885,10 @@ export class CollectionService implements CollectionGateway {
 
       return [];
     }
+
+    this.logger.log(
+      `[Members Loaded] Loaded ${team.teamMembers.length} active member(s) for team "${team.name}".`,
+    );
 
     const firstQuestion =
       await this.prisma.question.findFirst({

@@ -221,6 +221,7 @@ export class SlackGateway {
 
     if (nextQuestion) {
       const qNum = nextQuestion.questionNumber || 1;
+      this.logger.log(`[Question Sent] Question ${qNum} sent to user ${payload.userId}`);
       await this.slackService.sendMessage({
         channelId: payload.channelId,
         text: `*Question ${qNum}*\n${nextQuestion.text}`,

@@ -337,6 +337,8 @@ export class SchedulerService implements OnModuleInit {
   }
 
   async startTeamStandupCollection(teamId: string) {
+    this.logger.log('[Scheduler Started] Standup collection triggered.');
+
     const team = await this.prisma.team.findUnique({
       where: {
         id: teamId,
@@ -355,6 +357,8 @@ export class SchedulerService implements OnModuleInit {
         generatedAt: new Date().toISOString(),
       };
     }
+
+    this.logger.log(`[Team Loaded] Team '${team.name}' (${team.id}) loaded.`);
 
     if (!team.schedulerEnabled) {
       return {
@@ -392,6 +396,7 @@ export class SchedulerService implements OnModuleInit {
       const failedUserIds: string[] = [];
 
       for (const prompt of prompts) {
+        this.logger.log(`[Sending DM] Sending standup DM to user ${prompt.userId}`);
         const delivered =
           await this.slackService.sendMessage({
             channelId: prompt.userId,
@@ -794,7 +799,7 @@ export class SchedulerService implements OnModuleInit {
                 `${digest}\n\n${nonResponderSection}`;
 
               this.logger.log(
-                `AI digest prepared for team "${team.name}" using standup run ${latestCompletedRun.id}.`,
+                `[Digest Generated] AI digest prepared for team "${team.name}" using standup run ${latestCompletedRun.id}.`,
               );
             }
           }

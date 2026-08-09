@@ -30,6 +30,46 @@ export class AuthService {
       },
     });
 
+    // 3. Ensure User belongs to a Team
+    const existingMembership = await this.prisma.teamMember.findFirst({
+      where: { userId: user.id },
+    });
+
+    if (!existingMembership) {
+      let team = await this.prisma.team.findFirst({
+        where: { workspaceId: workspace.id },
+        orderBy: { createdAt: 'asc' },
+      });
+
+      if (!team) {
+        team = await this.prisma.team.create({
+          data: {
+            workspaceId: workspace.id,
+            name: 'General',
+            scheduleCron: '0 0 9 * * 0-4',
+            timezone: 'Asia/Riyadh',
+            schedulerEnabled: true,
+          },
+        });
+      }
+
+      await this.prisma.teamMember.upsert({
+        where: {
+          teamId_userId: {
+            teamId: team.id,
+            userId: user.id,
+          },
+        },
+        update: { optedOut: false },
+        create: {
+          teamId: team.id,
+          userId: user.id,
+          role: 'member',
+          optedOut: false,
+        },
+      });
+    }
+
     return user;
   }
-}
+}

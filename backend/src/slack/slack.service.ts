@@ -229,6 +229,63 @@ export class SlackService
         },
       });
 
+    const existingMembership =
+      await this.prisma.teamMember.findFirst({
+        where: {
+          userId: user.id,
+        },
+      });
+
+    if (!existingMembership) {
+      let team =
+        await this.prisma.team.findFirst({
+          where: {
+            workspaceId: workspace.id,
+          },
+          orderBy: {
+            createdAt: 'asc',
+          },
+        });
+
+      if (!team) {
+        team = await this.prisma.team.create({
+          data: {
+            workspaceId: workspace.id,
+            name: 'General',
+            scheduleCron: '0 0 9 * * 0-4',
+            timezone: 'Asia/Riyadh',
+            schedulerEnabled: true,
+          },
+        });
+
+        this.logger.log(
+          `Created default team '${team.name}' for workspace ${workspace.id}`,
+        );
+      }
+
+      await this.prisma.teamMember.upsert({
+        where: {
+          teamId_userId: {
+            teamId: team.id,
+            userId: user.id,
+          },
+        },
+        update: {
+          optedOut: false,
+        },
+        create: {
+          teamId: team.id,
+          userId: user.id,
+          role: 'member',
+          optedOut: false,
+        },
+      });
+
+      this.logger.log(
+        `Assigned user ${user.id} to team ${team.id} (${team.name})`,
+      );
+    }
+
     this.logger.log(
       `Slack user ${slackUserId} registered as database user ${user.id}`,
     );
@@ -297,7 +354,7 @@ export class SlackService
 
     try {
       const result =
-        await this.webClient.users.list();
+        await this.webClient.users.list({});
 
       if (!result.members) {
         return [];

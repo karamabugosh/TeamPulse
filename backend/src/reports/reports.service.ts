@@ -13,8 +13,12 @@ import {
   ThemeSummary,
 } from '../ai/dto/ai-result.dto';
 
+import { Logger } from '@nestjs/common';
+
 @Injectable()
 export class ReportsService {
+  private readonly logger = new Logger(ReportsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
   ) {}
@@ -45,6 +49,7 @@ export class ReportsService {
       );
     }
 
+    this.logger.log(`[Report Available] Retrieved latest digest for team ${membership.team.name}`);
     return this.mapDigest(digest);
   }
 
@@ -72,6 +77,8 @@ export class ReportsService {
         },
         take: safeLimit,
       });
+
+    this.logger.log(`[History Updated] Retrieved ${digests.length} digest history items for team ${membership.team.name}`);
 
     return digests.map((digest) =>
       this.mapDigest(digest),
@@ -425,7 +432,7 @@ export class ReportsService {
       );
     }
 
-    const user =
+    let user =
       await this.prisma.user.findUnique({
         where: {
           slackUserId:
@@ -446,9 +453,63 @@ export class ReportsService {
       );
     }
 
-    if (
-      user.teamMembers.length === 0
-    ) {
+    if (user.teamMembers.length === 0) {
+      let team = await this.prisma.team.findFirst({
+        where: {
+          workspaceId: user.workspaceId,
+        },
+        orderBy: {
+          createdAt: 'asc',
+        },
+      });
+
+      if (!team) {
+        team = await this.prisma.team.create({
+          data: {
+            workspaceId: user.workspaceId,
+            name: 'General',
+            scheduleCron: '0 0 9 * * 0-4',
+            timezone: 'Asia/Riyadh',
+            schedulerEnabled: true,
+          },
+        });
+      }
+
+      await this.prisma.teamMember.upsert({
+        where: {
+          teamId_userId: {
+            teamId: team.id,
+            userId: user.id,
+          },
+        },
+        update: {
+          optedOut: false,
+        },
+        create: {
+          teamId: team.id,
+          userId: user.id,
+          role: 'member',
+          optedOut: false,
+        },
+      });
+
+      const updatedUser = await this.prisma.user.findUnique({
+        where: { id: user.id },
+        include: {
+          teamMembers: {
+            include: {
+              team: true,
+            },
+          },
+        },
+      });
+
+      if (updatedUser) {
+        user = updatedUser;
+      }
+    }
+
+    if (user.teamMembers.length === 0) {
       throw new NotFoundException(
         'You are not assigned to any team.',
       );
