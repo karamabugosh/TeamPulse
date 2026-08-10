@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AiModule } from '../ai/ai.module';
+import { CheckInModule } from '../check-in/check-in.module';
 import { CollectionModule } from '../collection/collection.module';
 import { DigestModule } from '../digest/digest.module';
 import { ReportsModule } from '../reports/reports.module';
@@ -14,6 +15,7 @@ import { SchedulerService } from './scheduler.service';
     SlackModule,
     AiModule,
     ReportsModule,
+    CheckInModule,
   ],
   controllers: [SchedulerController],
   providers: [SchedulerService],

@@ -188,9 +188,12 @@ export class CollectionService implements CollectionGateway {
       });
 
     const session =
-      await this.prisma.conversationState.findUnique({
+      await this.prisma.conversationState.findFirst({
         where: {
           userId: user.id,
+        },
+        orderBy: {
+          updatedAt: 'desc',
         },
       });
 
@@ -219,17 +222,21 @@ export class CollectionService implements CollectionGateway {
       `Starting conversation for user ${userId} (identifier: ${userIdentifier})`,
     );
 
-    let session =
-      await this.prisma.conversationState.findUnique({
+    const existingSession =
+      await this.prisma.conversationState.findFirst({
         where: {
           userId,
+          isCompleted: false,
+        },
+        orderBy: {
+          updatedAt: 'desc',
         },
       });
 
     /*
      * Resume an unfinished standup.
      */
-    if (session && !session.isCompleted) {
+    if (existingSession) {
       const currentQuestion =
         await this.getCurrentQuestion(userIdentifier);
 
@@ -241,38 +248,23 @@ export class CollectionService implements CollectionGateway {
     }
 
     /*
-     * Create a fresh run and submission.
-     * Previous answers are preserved.
+     * Create a fresh run, submission, and conversation state.
+     * Previous history is preserved.
      */
     const { submission } =
       await this.createStandupSubmission(userId);
 
     const startedAt = new Date();
 
-    if (session) {
-      session =
-        await this.prisma.conversationState.update({
-          where: {
-            userId,
-          },
-          data: {
-            submissionId: submission.id,
-            isCompleted: false,
-            currentQuestionId: null,
-            completedAt: null,
-            startedAt,
-          },
-        });
-    } else {
-      session =
-        await this.prisma.conversationState.create({
-          data: {
-            userId,
-            submissionId: submission.id,
-            startedAt,
-          },
-        });
-    }
+    const session =
+      await this.prisma.conversationState.create({
+        data: {
+          userId,
+          submissionId: submission.id,
+          startedAt,
+          isCompleted: false,
+        },
+      });
 
     const firstQuestion =
       await this.prisma.question.findFirst({
@@ -287,13 +279,25 @@ export class CollectionService implements CollectionGateway {
     if (!firstQuestion) {
       this.logger.warn('No active questions were found.');
 
+      const cancelledAt = new Date();
+
       await this.prisma.standupSubmission.update({
         where: {
           id: submission.id,
         },
         data: {
           status: 'cancelled',
-          completedAt: new Date(),
+          completedAt: cancelledAt,
+        },
+      });
+
+      await this.prisma.conversationState.update({
+        where: {
+          id: session.id,
+        },
+        data: {
+          isCompleted: true,
+          completedAt: cancelledAt,
         },
       });
 
@@ -302,7 +306,7 @@ export class CollectionService implements CollectionGateway {
 
     await this.prisma.conversationState.update({
       where: {
-        userId,
+        id: session.id,
       },
       data: {
         currentQuestionId: firstQuestion.id,
@@ -335,9 +339,13 @@ export class CollectionService implements CollectionGateway {
     );
 
     const session =
-      await this.prisma.conversationState.findUnique({
+      await this.prisma.conversationState.findFirst({
         where: {
           userId,
+          isCompleted: false,
+        },
+        orderBy: {
+          updatedAt: 'desc',
         },
       });
 
@@ -405,9 +413,13 @@ export class CollectionService implements CollectionGateway {
     const userId = user.id;
 
     const session =
-      await this.prisma.conversationState.findUnique({
+      await this.prisma.conversationState.findFirst({
         where: {
           userId,
+          isCompleted: false,
+        },
+        orderBy: {
+          updatedAt: 'desc',
         },
       });
 
@@ -453,7 +465,7 @@ export class CollectionService implements CollectionGateway {
 
     await this.prisma.conversationState.update({
       where: {
-        userId,
+        id: session.id,
       },
       data: {
         currentQuestionId: nextQuestion.id,
@@ -479,9 +491,13 @@ export class CollectionService implements CollectionGateway {
     );
 
     const session =
-      await this.prisma.conversationState.findUnique({
+      await this.prisma.conversationState.findFirst({
         where: {
           userId,
+          isCompleted: false,
+        },
+        orderBy: {
+          updatedAt: 'desc',
         },
         include: {
           submission: true,
@@ -506,7 +522,7 @@ export class CollectionService implements CollectionGateway {
 
     await this.prisma.conversationState.update({
       where: {
-        userId,
+        id: session.id,
       },
       data: {
         isCompleted: true,
@@ -565,9 +581,13 @@ export class CollectionService implements CollectionGateway {
     const userId = user.id;
 
     const session =
-      await this.prisma.conversationState.findUnique({
+      await this.prisma.conversationState.findFirst({
         where: {
           userId,
+          isCompleted: false,
+        },
+        orderBy: {
+          updatedAt: 'desc',
         },
       });
 
@@ -934,18 +954,8 @@ export class CollectionService implements CollectionGateway {
           },
         });
 
-      await this.prisma.conversationState.upsert({
-        where: {
-          userId: member.user.id,
-        },
-        update: {
-          submissionId: submission.id,
-          currentQuestionId: firstQuestion.id,
-          isCompleted: false,
-          startedAt: now,
-          completedAt: null,
-        },
-        create: {
+      await this.prisma.conversationState.create({
+        data: {
           userId: member.user.id,
           submissionId: submission.id,
           currentQuestionId: firstQuestion.id,
@@ -1002,11 +1012,8 @@ export class CollectionService implements CollectionGateway {
               },
             },
             include: {
-              user: {
-                include: {
-                  conversationState: true,
-                },
-              },
+              user: true,
+              conversationState: true,
             },
           },
         },
@@ -1023,7 +1030,7 @@ export class CollectionService implements CollectionGateway {
     }> = [];
 
     for (const submission of latestRun.submissions) {
-      const session = submission.user.conversationState;
+      const session = submission.conversationState;
 
       let currentQuestion: QuestionPayloadDto | null = null;
 
@@ -1067,8 +1074,17 @@ export class CollectionService implements CollectionGateway {
       return false;
     }
 
-    const session = await this.prisma.conversationState.findUnique({
-      where: { userId: user.id },
+    const session = await this.prisma.conversationState.findFirst({
+      where: {
+        userId: user.id,
+        isCompleted: true,
+        completedAt: {
+          not: null,
+        },
+      },
+      orderBy: {
+        completedAt: 'desc',
+      },
     });
 
     if (!session || !session.isCompleted || !session.completedAt) {

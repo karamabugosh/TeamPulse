@@ -5,6 +5,7 @@ import { AuthModule } from './auth/auth.module';
 import { QuestionsModule } from './questions/questions.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { TeamModule } from './team/team.module';
+import { CheckInModule } from './check-in/check-in.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { TeamModule } from './team/team.module';
     QuestionsModule,
     SchedulerModule,
     TeamModule,
+    CheckInModule,
   ],
   controllers: [],
   providers: [],

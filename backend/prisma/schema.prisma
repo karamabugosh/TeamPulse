@@ -7,6 +7,14 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum QuestionType {
+  FREE_TEXT
+  YES_NO
+  YES_NO_MAYBE
+  MULTIPLE_CHOICE
+  SCALE_1_5
+}
+
 model Workspace {
   id                 String   @id @default(uuid())
   slackWorkspaceId   String   @unique
@@ -14,8 +22,9 @@ model Workspace {
   botToken           String
   installedAt        DateTime @default(now())
 
-  users User[]
-  teams Team[]
+  users         User[]
+  teams         Team[]
+  inboundEvents InboundEvent[]
 }
 
 model User {
@@ -27,11 +36,11 @@ model User {
   timezone         String?
   createdAt        DateTime @default(now())
 
-  workspace         Workspace          @relation(fields: [workspaceId], references: [id])
-  teamMembers       TeamMember[]
-  answers           Answer[]
-  submissions       StandupSubmission[]
-  conversationState ConversationState?
+  workspace          Workspace           @relation(fields: [workspaceId], references: [id])
+  teamMembers        TeamMember[]
+  answers            Answer[]
+  submissions        StandupSubmission[]
+  conversationStates ConversationState[]
 }
 
 model Team {
@@ -49,6 +58,9 @@ model Team {
   teamMembers TeamMember[]
   standupRuns StandupRun[]
   aiDigests   AiDigest[]
+  checkIns    CheckIn[]
+
+  @@index([workspaceId])
 }
 
 model TeamMember {
@@ -59,44 +71,130 @@ model TeamMember {
   optedOut Boolean  @default(false)
   joinedAt DateTime @default(now())
 
-  team Team @relation(fields: [teamId], references: [id])
-  user User @relation(fields: [userId], references: [id])
+  team                Team                 @relation(fields: [teamId], references: [id])
+  user                User                 @relation(fields: [userId], references: [id])
+  checkInParticipants CheckInParticipant[]
 
   @@unique([teamId, userId])
   @@index([teamId])
   @@index([userId])
 }
 
-model Question {
-  id        String   @id @default(uuid())
-  question  String
-  order     Int
-  isActive  Boolean  @default(true)
+//
+// V2 CONFIGURATION
+//
+
+model CheckIn {
+  id          String  @id @default(uuid())
+  teamId      String
+  name        String
+  description String?
+  enabled     Boolean @default(true)
+
+  timezone       String
+  collectionCron String
+
+  reminderEnabled      Boolean @default(true)
+  reminderMinutesAfter Int     @default(30)
+
+  reportCron      String?
+  reportChannelId String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  answers Answer[]
+  team         Team                 @relation(fields: [teamId], references: [id])
+  questions    Question[]
+  participants CheckInParticipant[]
+  runs         StandupRun[]
+
+  @@index([teamId])
+  @@index([enabled])
 }
 
+model CheckInParticipant {
+  id           String   @id @default(uuid())
+  checkInId    String
+  teamMemberId String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  checkIn    CheckIn    @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+  teamMember TeamMember @relation(fields: [teamMemberId], references: [id], onDelete: Cascade)
+
+  @@unique([checkInId, teamMemberId])
+  @@index([checkInId])
+  @@index([teamMemberId])
+}
+
+//
+// QUESTIONS
+//
+// Kept as "Question" for V1 compatibility.
+// In V2 this is effectively CheckInQuestion.
+//
+
+model Question {
+  id         String       @id @default(uuid())
+  checkInId  String?
+  question   String
+  order      Int
+  type       QuestionType @default(FREE_TEXT)
+  options    Json?
+  isRequired Boolean      @default(true)
+  isActive   Boolean      @default(true)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  checkIn            CheckIn?            @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+  answers            Answer[]
+  conversationStates ConversationState[]
+
+  @@index([checkInId])
+  @@index([isActive])
+}
+
+//
+// EXECUTION
+//
+// StandupRun is effectively a CheckInRun.
+// Keeping the existing model name avoids breaking all V1 code.
+//
+
 model StandupRun {
-  id           String    @id @default(uuid())
-  teamId       String
-  scheduledFor DateTime
-  status       String    @default("collecting")
-  startedAt    DateTime  @default(now())
-  completedAt  DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id            String   @id @default(uuid())
+  teamId        String
+  checkInId     String?
+  scheduledFor  DateTime
+  status        String   @default("collecting")
+  triggerSource String   @default("scheduler")
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   team        Team                @relation(fields: [teamId], references: [id])
+  checkIn     CheckIn?            @relation(fields: [checkInId], references: [id])
   submissions StandupSubmission[]
   aiDigests   AiDigest[]
 
-  @@unique([teamId, scheduledFor])
+  //
+  // This is one of our main duplicate-run protections.
+  // Two scheduler executions for the same CheckIn/time
+  // cannot create two V2 runs.
+  //
+  @@unique([checkInId, scheduledFor])
   @@index([teamId])
+  @@index([checkInId])
   @@index([status])
   @@index([scheduledFor])
 }
+
+//
+// One user's state inside one run.
+// Effectively ParticipantSubmission.
+//
 
 model StandupSubmission {
   id          String    @id @default(uuid())
@@ -113,6 +211,10 @@ model StandupSubmission {
   answers           Answer[]
   conversationState ConversationState?
 
+  //
+  // Same engineer can have only ONE submission
+  // for a particular run.
+  //
   @@unique([runId, userId])
   @@index([runId])
   @@index([userId])
@@ -120,13 +222,20 @@ model StandupSubmission {
 }
 
 model Answer {
-  id           String             @id @default(uuid())
+  id           String  @id @default(uuid())
   userId       String
   questionId   String
   submissionId String?
   text         String
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
+
+  //
+  // Allows structured question types while retaining
+  // text compatibility with the existing implementation.
+  //
+  structuredValue Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   user       User               @relation(fields: [userId], references: [id])
   question   Question           @relation(fields: [questionId], references: [id])
@@ -137,18 +246,30 @@ model Answer {
   @@index([submissionId])
 }
 
+//
+// Tracks which question a user is currently answering.
+//
+// userId is intentionally NOT unique anymore.
+// A user may eventually participate in more than one
+// CheckIn at the same time.
+//
+
 model ConversationState {
   id                String    @id @default(uuid())
-  userId            String    @unique
-  submissionId      String?   @unique
+  userId            String
+  submissionId      String    @unique
   currentQuestionId String?
   isCompleted       Boolean   @default(false)
   startedAt         DateTime  @default(now())
   completedAt       DateTime?
   updatedAt         DateTime  @updatedAt
 
-  user       User               @relation(fields: [userId], references: [id])
-  submission StandupSubmission? @relation(fields: [submissionId], references: [id])
+  user            User              @relation(fields: [userId], references: [id])
+  submission      StandupSubmission @relation(fields: [submissionId], references: [id])
+  currentQuestion Question?         @relation(fields: [currentQuestionId], references: [id])
+
+  @@index([userId])
+  @@index([currentQuestionId])
 }
 
 model AiDigest {
@@ -167,4 +288,36 @@ model AiDigest {
 
   @@index([teamId])
   @@index([runId])
+}
+
+//
+// IDEMPOTENCY / EVENT RELIABILITY
+//
+// Every Slack event or interaction gets a deterministic
+// idempotency key before processing.
+//
+// If Slack retries the same event, the unique constraint
+// prevents us from processing it twice.
+//
+
+model InboundEvent {
+  id              String  @id @default(uuid())
+  workspaceId     String
+  provider        String  @default("slack")
+  idempotencyKey  String  @unique
+  externalEventId String?
+  eventType       String
+  payloadHash     String?
+  status          String  @default("received")
+  errorMessage    String?
+
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+
+  @@index([workspaceId])
+  @@index([externalEventId])
+  @@index([status])
+  @@index([receivedAt])
 }

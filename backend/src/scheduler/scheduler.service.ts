@@ -16,6 +16,7 @@ import { DigestService } from '../digest/digest.service';
 import { ReportsService } from '../reports/reports.service';
 import { SlackService } from '../slack/slack.service';
 import { SlackGateway } from '../slack/slack.gateway';
+import { CheckInRunService } from '../check-in/check-in-run/check-in-run.service';
 
 type TeamDigestResult = {
   teamId: string | null;
@@ -52,11 +53,12 @@ export class SchedulerService implements OnModuleInit {
     private readonly slackGateway: SlackGateway,
     private readonly aiService: AiService,
     private readonly reportsService: ReportsService,
+    private readonly checkInRunService: CheckInRunService,
   ) {}
 
   /**
-   * Registers automatic collection, reminder, and digest jobs
-   * for enabled teams when the backend starts.
+   * Registers automatic CheckIn collection jobs
+   * when the backend starts.
    */
   async onModuleInit(): Promise<void> {
     if (process.env.DIGEST_SCHEDULER_ENABLED !== 'true') {
@@ -67,19 +69,23 @@ export class SchedulerService implements OnModuleInit {
       return;
     }
 
-    await this.registerTeamJobs();
+    await this.registerCheckInJobs();
   }
 
   /**
-   * Creates collection, reminder, and digest cron jobs
-   * for every enabled team.
+   * Creates one collection cron job for every enabled CheckIn.
    */
-  private async registerTeamJobs(): Promise<void> {
-    const teams = await this.prisma.team.findMany({
+  private async registerCheckInJobs(): Promise<void> {
+    const checkIns = await this.prisma.checkIn.findMany({
       where: {
-        schedulerEnabled: true,
-        scheduleCron: {
-          not: null,
+        enabled: true,
+      },
+      include: {
+        team: {
+          select: {
+            id: true,
+            name: true,
+          },
         },
       },
       orderBy: {
@@ -87,68 +93,38 @@ export class SchedulerService implements OnModuleInit {
       },
     });
 
-    if (teams.length === 0) {
+    if (checkIns.length === 0) {
       this.logger.warn(
-        'No enabled teams with a schedule were found.',
+        'No enabled CheckIns were found.',
       );
 
       return;
     }
 
-    for (const team of teams) {
-      const digestCron = team.scheduleCron?.trim();
+    for (const checkIn of checkIns) {
+      const collectionCron = checkIn.collectionCron.trim();
+      const timezone = checkIn.timezone.trim();
 
-      const collectionCron =
-        process.env.DAILY_COLLECTION_CRON?.trim() ||
-        '0 0 8 * * 0-4';
-
-      const reminderCron =
-        process.env.DAILY_REMINDER_CRON?.trim() ||
-        '0 45 8 * * 0-4';
-
-      const timezone =
-        team.timezone?.trim() ||
-        process.env.DAILY_DIGEST_TIMEZONE ||
-        'Asia/Riyadh';
-
-      if (!digestCron) {
+      if (!collectionCron) {
         this.logger.warn(
-          `Team "${team.name}" does not have a valid digest cron schedule.`,
+          `CheckIn "${checkIn.name}" does not have a collection schedule.`,
         );
 
         continue;
       }
 
       this.registerCronJob({
-        jobName: `standup-collection-${team.id}`,
+        jobName: `checkin-collection-${checkIn.id}`,
         cronTime: collectionCron,
         timezone,
-        teamName: team.name,
-        taskName: 'standup collection',
+        teamName: `${checkIn.team.name} / ${checkIn.name}`,
+        taskName: 'check-in collection',
         onTick: async () => {
-          await this.startTeamStandupCollection(team.id);
-        },
-      });
-
-      this.registerCronJob({
-        jobName: `standup-reminder-${team.id}`,
-        cronTime: reminderCron,
-        timezone,
-        teamName: team.name,
-        taskName: 'standup reminder',
-        onTick: async () => {
-          await this.sendTeamStandupReminder(team.id);
-        },
-      });
-
-      this.registerCronJob({
-        jobName: `daily-digest-${team.id}`,
-        cronTime: digestCron,
-        timezone,
-        teamName: team.name,
-        taskName: 'daily digest',
-        onTick: async () => {
-          await this.runTeamDigest(team.id);
+          await this.checkInRunService.startCheckInRun(
+            checkIn.id,
+            new Date(),
+            'scheduler',
+          );
         },
       });
     }
