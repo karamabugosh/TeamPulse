@@ -23,7 +23,35 @@ type AddTeamMemberInput = {
 
 @Injectable()
 export class TeamService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+  ) {}
+
+  private readonly safeTeamInclude = {
+    workspace: {
+      select: {
+        id: true,
+        slackWorkspaceId: true,
+        slackWorkspaceName: true,
+        installedAt: true,
+      },
+    },
+    teamMembers: {
+      include: {
+        user: {
+          select: {
+            id: true,
+            workspaceId: true,
+            slackUserId: true,
+            slackDisplayName: true,
+            email: true,
+            timezone: true,
+            createdAt: true,
+          },
+        },
+      },
+    },
+  };
 
   async createTeam(input: CreateTeamInput) {
     const workspaceId = input.workspaceId?.trim();
@@ -64,25 +92,20 @@ export class TeamService {
           input.scheduleCron?.trim() ||
           '0 0 9 * * 0-4',
         timezone:
-          input.timezone?.trim() || 'Asia/Riyadh',
+          input.timezone?.trim() ||
+          'Asia/Riyadh',
         schedulerEnabled:
           input.schedulerEnabled ?? true,
       },
-      include: {
-        workspace: true,
-        teamMembers: {
-          include: {
-            user: true,
-          },
-        },
-      },
+      include: this.safeTeamInclude,
     });
   }
 
   async addMember(input: AddTeamMemberInput) {
     const teamId = input.teamId?.trim();
     const userId = input.userId?.trim();
-    const slackUserId = input.slackUserId?.trim();
+    const slackUserId =
+      input.slackUserId?.trim();
 
     if (!teamId) {
       throw new BadRequestException(
@@ -96,11 +119,12 @@ export class TeamService {
       );
     }
 
-    const team = await this.prisma.team.findUnique({
-      where: {
-        id: teamId,
-      },
-    });
+    const team =
+      await this.prisma.team.findUnique({
+        where: {
+          id: teamId,
+        },
+      });
 
     if (!team) {
       throw new NotFoundException(
@@ -151,8 +175,30 @@ export class TeamService {
         role: input.role?.trim() || 'member',
       },
       include: {
-        team: true,
-        user: true,
+        team: {
+          select: {
+            id: true,
+            workspaceId: true,
+            name: true,
+            slackChannelId: true,
+            scheduleCron: true,
+            timezone: true,
+            schedulerEnabled: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        },
+        user: {
+          select: {
+            id: true,
+            workspaceId: true,
+            slackUserId: true,
+            slackDisplayName: true,
+            email: true,
+            timezone: true,
+            createdAt: true,
+          },
+        },
       },
     });
   }
@@ -162,31 +208,18 @@ export class TeamService {
       orderBy: {
         createdAt: 'asc',
       },
-      include: {
-        workspace: true,
-        teamMembers: {
-          include: {
-            user: true,
-          },
-        },
-      },
+      include: this.safeTeamInclude,
     });
   }
 
   async getTeam(teamId: string) {
-    const team = await this.prisma.team.findUnique({
-      where: {
-        id: teamId,
-      },
-      include: {
-        workspace: true,
-        teamMembers: {
-          include: {
-            user: true,
-          },
+    const team =
+      await this.prisma.team.findUnique({
+        where: {
+          id: teamId,
         },
-      },
-    });
+        include: this.safeTeamInclude,
+      });
 
     if (!team) {
       throw new NotFoundException(

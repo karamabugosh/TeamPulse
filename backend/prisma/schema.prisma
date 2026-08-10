@@ -80,10 +80,6 @@ model TeamMember {
   @@index([userId])
 }
 
-//
-// V2 CONFIGURATION
-//
-
 model CheckIn {
   id          String  @id @default(uuid())
   teamId      String
@@ -127,39 +123,27 @@ model CheckInParticipant {
   @@index([teamMemberId])
 }
 
-//
-// QUESTIONS
-//
-// Kept as "Question" for V1 compatibility.
-// In V2 this is effectively CheckInQuestion.
-//
-
 model Question {
-  id         String       @id @default(uuid())
-  checkInId  String?
-  question   String
-  order      Int
+  id        String @id @default(uuid())
+  checkInId String?
+  question  String
+  order     Int
+
   type       QuestionType @default(FREE_TEXT)
   options    Json?
   isRequired Boolean      @default(true)
   isActive   Boolean      @default(true)
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
 
-  checkIn            CheckIn?            @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  checkIn            CheckIn?             @relation(fields: [checkInId], references: [id], onDelete: Cascade)
   answers            Answer[]
   conversationStates ConversationState[]
 
   @@index([checkInId])
   @@index([isActive])
 }
-
-//
-// EXECUTION
-//
-// StandupRun is effectively a CheckInRun.
-// Keeping the existing model name avoids breaking all V1 code.
-//
 
 model StandupRun {
   id            String   @id @default(uuid())
@@ -168,53 +152,44 @@ model StandupRun {
   scheduledFor  DateTime
   status        String   @default("collecting")
   triggerSource String   @default("scheduler")
+  startedAt     DateTime @default(now())
+  completedAt   DateTime?
 
-  startedAt   DateTime  @default(now())
-  completedAt DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  reminderDueAt  DateTime?
+  reminderSentAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   team        Team                @relation(fields: [teamId], references: [id])
   checkIn     CheckIn?            @relation(fields: [checkInId], references: [id])
   submissions StandupSubmission[]
   aiDigests   AiDigest[]
 
-  //
-  // This is one of our main duplicate-run protections.
-  // Two scheduler executions for the same CheckIn/time
-  // cannot create two V2 runs.
-  //
   @@unique([checkInId, scheduledFor])
   @@index([teamId])
   @@index([checkInId])
   @@index([status])
   @@index([scheduledFor])
+  @@index([reminderDueAt])
+  @@index([reminderSentAt])
 }
 
-//
-// One user's state inside one run.
-// Effectively ParticipantSubmission.
-//
-
 model StandupSubmission {
-  id          String    @id @default(uuid())
+  id          String   @id @default(uuid())
   runId       String
   userId      String
-  status      String    @default("pending")
+  status      String   @default("pending")
   startedAt   DateTime?
   completedAt DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   run               StandupRun         @relation(fields: [runId], references: [id])
   user              User               @relation(fields: [userId], references: [id])
   answers           Answer[]
   conversationState ConversationState?
 
-  //
-  // Same engineer can have only ONE submission
-  // for a particular run.
-  //
   @@unique([runId, userId])
   @@index([runId])
   @@index([userId])
@@ -222,37 +197,24 @@ model StandupSubmission {
 }
 
 model Answer {
-  id           String  @id @default(uuid())
-  userId       String
-  questionId   String
-  submissionId String?
-  text         String
-
-  //
-  // Allows structured question types while retaining
-  // text compatibility with the existing implementation.
-  //
+  id              String   @id @default(uuid())
+  userId          String
+  questionId      String
+  submissionId    String?
+  text            String
   structuredValue Json?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   user       User               @relation(fields: [userId], references: [id])
   question   Question           @relation(fields: [questionId], references: [id])
   submission StandupSubmission? @relation(fields: [submissionId], references: [id])
 
+  @@unique([submissionId, questionId])
   @@index([userId])
   @@index([questionId])
   @@index([submissionId])
 }
-
-//
-// Tracks which question a user is currently answering.
-//
-// userId is intentionally NOT unique anymore.
-// A user may eventually participate in more than one
-// CheckIn at the same time.
-//
 
 model ConversationState {
   id                String    @id @default(uuid())
@@ -290,29 +252,18 @@ model AiDigest {
   @@index([runId])
 }
 
-//
-// IDEMPOTENCY / EVENT RELIABILITY
-//
-// Every Slack event or interaction gets a deterministic
-// idempotency key before processing.
-//
-// If Slack retries the same event, the unique constraint
-// prevents us from processing it twice.
-//
-
 model InboundEvent {
-  id              String  @id @default(uuid())
+  id              String   @id @default(uuid())
   workspaceId     String
-  provider        String  @default("slack")
-  idempotencyKey  String  @unique
+  provider        String   @default("slack")
+  idempotencyKey  String   @unique
   externalEventId String?
   eventType       String
   payloadHash     String?
-  status          String  @default("received")
+  status          String   @default("received")
   errorMessage    String?
-
-  receivedAt  DateTime  @default(now())
-  processedAt DateTime?
+  receivedAt      DateTime @default(now())
+  processedAt     DateTime?
 
   workspace Workspace @relation(fields: [workspaceId], references: [id])
 

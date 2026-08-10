@@ -11,21 +11,44 @@ export class SchedulerController {
     private readonly schedulerService: SchedulerService,
   ) {}
 
+  /**
+   * V2: Reload all CheckIn cron jobs from PostgreSQL.
+   *
+   * This lets configuration changes take effect without
+   * restarting the NestJS backend.
+   */
+  @Post('refresh')
+  refreshCheckInJobs() {
+    return this.schedulerService.refreshCheckInJobs();
+  }
+
+  /**
+   * Legacy/manual V1 standup trigger.
+   */
   @Post('trigger-standup')
   triggerDailyStandup() {
     return this.schedulerService.triggerDailyStandup();
   }
 
+  /**
+   * Legacy/manual V1 reminder trigger.
+   */
   @Post('send-reminders')
   triggerDailyReminder() {
     return this.schedulerService.triggerDailyReminder();
   }
 
+  /**
+   * Legacy/manual V1 digest trigger.
+   */
   @Post('run-daily')
   runDailyDigest() {
     return this.schedulerService.runDailyDigest();
   }
 
+  /**
+   * Legacy/manual team-level collection trigger.
+   */
   @Post('teams/:teamId/start-standup')
   startTeamStandup(
     @Param('teamId') teamId: string,
@@ -35,6 +58,9 @@ export class SchedulerController {
     );
   }
 
+  /**
+   * Legacy/manual team-level reminder trigger.
+   */
   @Post('teams/:teamId/send-reminder')
   sendTeamReminder(
     @Param('teamId') teamId: string,
@@ -44,10 +70,28 @@ export class SchedulerController {
     );
   }
 
+  /**
+   * Legacy/manual team-level digest trigger.
+   */
   @Post('teams/:teamId/run-digest')
   runTeamDigest(
     @Param('teamId') teamId: string,
   ) {
-    return this.schedulerService.runTeamDigest(teamId);
+    return this.schedulerService.runTeamDigest(
+      teamId,
+    );
+  }
+
+  /**
+   * V2: manually generate the latest report for
+   * one configured CheckIn.
+   */
+  @Post('check-ins/:checkInId/run-report')
+  runCheckInReport(
+    @Param('checkInId') checkInId: string,
+  ) {
+    return this.schedulerService.runCheckInDigest(
+      checkInId,
+    );
   }
 }

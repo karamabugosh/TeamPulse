@@ -6,6 +6,8 @@ import {
 import { AuthService } from '../auth/auth.service';
 import { CollectionService } from '../collection/collection.service';
 import { ReportsService } from '../reports/reports.service';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
 import { IncomingMessageDto } from './dto/incoming-message.dto';
 import { SlackGateway } from './slack.gateway';
 import { buildAppHomeBlocks } from './slack-app-home.view';
@@ -14,7 +16,6 @@ import { SlackService } from './slack.service';
 @Injectable()
 export class SlackListener implements OnModuleInit {
   private readonly logger = new Logger(SlackListener.name);
-  private readonly processedMessageIds = new Set<string>();
 
   constructor(
     private readonly slackService: SlackService,
@@ -22,6 +23,7 @@ export class SlackListener implements OnModuleInit {
     private readonly authService: AuthService,
     private readonly collectionService: CollectionService,
     private readonly reportsService: ReportsService,
+    private readonly prisma: PrismaService,
   ) {}
 
   onModuleInit(): void {
@@ -32,20 +34,156 @@ export class SlackListener implements OnModuleInit {
     this.registerListeners();
   }
 
-  private isDuplicateMessage(msgId: string): boolean {
-    if (!msgId) return false;
-
-    if (this.processedMessageIds.has(msgId)) {
-      return true;
+  private async claimInboundEvent(
+    slackUserId: string,
+    idempotencyKey: string,
+    eventType: string,
+    externalEventId?: string,
+  ): Promise<{ claimed: boolean; eventId?: string }> {
+    if (!idempotencyKey) {
+      return { claimed: true };
     }
 
-    this.processedMessageIds.add(msgId);
+    const user = await this.prisma.user.findUnique({
+      where: {
+        slackUserId,
+      },
+      select: {
+        workspaceId: true,
+      },
+    });
 
-    setTimeout(() => {
-      this.processedMessageIds.delete(msgId);
-    }, 10000);
+    if (!user) {
+      throw new Error(
+        `Cannot create inbound event because Slack user ${slackUserId} is not registered.`,
+      );
+    }
 
-    return false;
+    try {
+      const event = await this.prisma.inboundEvent.create({
+        data: {
+          workspaceId: user.workspaceId,
+          provider: 'slack',
+          idempotencyKey,
+          externalEventId: externalEventId || null,
+          eventType,
+          status: 'processing',
+        },
+      });
+
+      return {
+        claimed: true,
+        eventId: event.id,
+      };
+    } catch (error: unknown) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        const existingEvent =
+          await this.prisma.inboundEvent.findUnique({
+            where: {
+              idempotencyKey,
+            },
+            select: {
+              id: true,
+              status: true,
+            },
+          });
+
+        if (!existingEvent) {
+          throw error;
+        }
+
+        /*
+         * Failed events may be retried.
+         *
+         * updateMany makes the reclaim atomic so if two
+         * Slack retries arrive together, only one can move
+         * the row from failed -> processing.
+         */
+        if (existingEvent.status === 'failed') {
+          const reclaimed =
+            await this.prisma.inboundEvent.updateMany({
+              where: {
+                id: existingEvent.id,
+                status: 'failed',
+              },
+              data: {
+                status: 'processing',
+                errorMessage: null,
+                processedAt: null,
+                receivedAt: new Date(),
+                externalEventId: externalEventId || null,
+              },
+            });
+
+          if (reclaimed.count === 1) {
+            this.logger.log(
+              `Retrying previously failed Slack event ${idempotencyKey}.`,
+            );
+
+            return {
+              claimed: true,
+              eventId: existingEvent.id,
+            };
+          }
+        }
+
+        this.logger.debug(
+          `Ignoring duplicate Slack event ${idempotencyKey} with status ${existingEvent.status}.`,
+        );
+
+        return {
+          claimed: false,
+        };
+      }
+
+      throw error;
+    }
+  }
+
+  private async markInboundEventProcessed(
+    eventId?: string,
+  ): Promise<void> {
+    if (!eventId) {
+      return;
+    }
+
+    await this.prisma.inboundEvent.update({
+      where: {
+        id: eventId,
+      },
+      data: {
+        status: 'processed',
+        processedAt: new Date(),
+        errorMessage: null,
+      },
+    });
+  }
+
+  private async markInboundEventFailed(
+    eventId: string | undefined,
+    error: unknown,
+  ): Promise<void> {
+    if (!eventId) {
+      return;
+    }
+
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    await this.prisma.inboundEvent.update({
+      where: {
+        id: eventId,
+      },
+      data: {
+        status: 'failed',
+        errorMessage: message,
+      },
+    });
   }
 
   private registerListeners(): void {
@@ -59,6 +197,7 @@ export class SlackListener implements OnModuleInit {
       this.logger.error(
         'Slack app is NOT initialized. Listeners CANNOT be registered.',
       );
+
       return;
     }
 
@@ -70,13 +209,6 @@ export class SlackListener implements OnModuleInit {
         msg.client_msg_id ||
         `${msg.user}-${msg.ts}`;
 
-      if (this.isDuplicateMessage(msgIdentifier)) {
-        this.logger.debug(
-          `Ignoring duplicate message event ${msgIdentifier}`,
-        );
-        return;
-      }
-
       if (
         msg.bot_id ||
         msg.subtype === 'bot_message' ||
@@ -86,6 +218,7 @@ export class SlackListener implements OnModuleInit {
         this.logger.debug(
           'Ignored bot message or message modification event.',
         );
+
         return;
       }
 
@@ -93,17 +226,38 @@ export class SlackListener implements OnModuleInit {
         this.logger.warn(
           'Ignored Slack message without a user or channel.',
         );
+
         return;
       }
 
+      /*
+       * Do not log msg.text.
+       * Standup answers may contain private employee information.
+       */
       this.logger.log(
-        `Processing incoming Slack message from user ${msg.user} in channel ${msg.channel}: "${msg.text}"`,
+        `Processing incoming Slack message from user ${msg.user} in channel ${msg.channel}.`,
       );
+
+      let inboundEventId: string | undefined;
 
       try {
         await this.slackService.ensureUserRegistered(
           msg.user,
         );
+
+        const claim =
+          await this.claimInboundEvent(
+            msg.user,
+            `slack:message:${msgIdentifier}`,
+            'message',
+            msg.client_msg_id || msg.ts,
+          );
+
+        if (!claim.claimed) {
+          return;
+        }
+
+        inboundEventId = claim.eventId;
 
         try {
           const userInfo =
@@ -145,7 +299,16 @@ export class SlackListener implements OnModuleInit {
         await this.slackGateway.handleIncomingMessage(
           payload,
         );
+
+        await this.markInboundEventProcessed(
+          inboundEventId,
+        );
       } catch (error: unknown) {
+        await this.markInboundEventFailed(
+          inboundEventId,
+          error,
+        );
+
         const message =
           error instanceof Error
             ? error.message
@@ -189,10 +352,12 @@ export class SlackListener implements OnModuleInit {
     app.event(
       'app_mention',
       async ({ event }) => {
+        /*
+         * Do not log the entire Slack event because it contains
+         * the user's message text and additional event metadata.
+         */
         this.logger.log(
-          `[SLACK EVENT TRIGGERED] app_mention received: ${JSON.stringify(
-            event,
-          )}`,
+          `[SLACK EVENT TRIGGERED] app_mention received from user ${event.user} in channel ${event.channel}.`,
         );
 
         try {
@@ -307,7 +472,8 @@ export class SlackListener implements OnModuleInit {
       async ({ ack, body, client }) => {
         await ack();
 
-        const userId = body.user.id;
+        const userId =
+          body.user.id;
 
         try {
           await this.slackService.ensureUserRegistered(
@@ -326,6 +492,7 @@ export class SlackListener implements OnModuleInit {
             this.logger.error(
               'Could not open a DM channel for the standup.',
             );
+
             return;
           }
 
