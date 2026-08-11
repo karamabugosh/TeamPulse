@@ -308,7 +308,7 @@ export class SchedulerService
    * - participant conflict handling
    * - reminderDueAt initialization
    */
-  private async startScheduledCheckIn(
+  async startScheduledCheckIn(
     checkInId: string,
   ): Promise<void> {
     const scheduledFor =

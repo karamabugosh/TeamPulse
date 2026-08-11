@@ -134,6 +134,17 @@ model Question {
   isRequired Boolean      @default(true)
   isActive   Boolean      @default(true)
 
+  // Optional conditional branching.
+  //
+  // Example:
+  // "Describe the blocker"
+  // dependsOnQuestionId = ID of "Are you currently blocked?"
+  // showWhenAnswers     = ["yes"]
+  //
+  // If dependsOnQuestionId is null, the question is always eligible.
+  dependsOnQuestionId String?
+  showWhenAnswers     Json?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -141,8 +152,12 @@ model Question {
   answers            Answer[]
   conversationStates ConversationState[]
 
+  dependsOnQuestion  Question?   @relation("QuestionBranching", fields: [dependsOnQuestionId], references: [id], onDelete: SetNull)
+  dependentQuestions Question[]  @relation("QuestionBranching")
+
   @@index([checkInId])
   @@index([isActive])
+  @@index([dependsOnQuestionId])
 }
 
 model StandupRun {

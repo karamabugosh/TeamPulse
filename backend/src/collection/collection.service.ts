@@ -249,12 +249,148 @@ export class CollectionService
       : undefined;
   }
 
+  private parseBranchAnswers(
+    value: Prisma.JsonValue | null,
+  ): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value
+      .filter(
+        (item): item is string =>
+          typeof item === 'string',
+      )
+      .map((item) =>
+        item.trim().toLowerCase(),
+      )
+      .filter(Boolean);
+  }
+
+  private normalizeBranchValue(
+    value: unknown,
+  ): string | null {
+    if (typeof value === 'boolean') {
+      return value ? 'yes' : 'no';
+    }
+
+    if (typeof value === 'number') {
+      return String(value);
+    }
+
+    if (typeof value === 'string') {
+      const normalized =
+        value.trim().toLowerCase();
+
+      return normalized || null;
+    }
+
+    return null;
+  }
+
+  private getBranchAnswerValue(
+    answer: {
+      text: string;
+      structuredValue: Prisma.JsonValue | null;
+    },
+  ): string | null {
+    const structuredValue =
+      answer.structuredValue;
+
+    if (
+      structuredValue &&
+      typeof structuredValue === 'object' &&
+      !Array.isArray(structuredValue)
+    ) {
+      const value =
+        (
+          structuredValue as Record<
+            string,
+            unknown
+          >
+        ).value;
+
+      const normalizedStructuredValue =
+        this.normalizeBranchValue(
+          value,
+        );
+
+      if (
+        normalizedStructuredValue
+      ) {
+        return normalizedStructuredValue;
+      }
+    }
+
+    return this.normalizeBranchValue(
+      answer.text,
+    );
+  }
+
+  private isQuestionEligible(
+    question: {
+      dependsOnQuestionId:
+        string | null;
+      showWhenAnswers:
+        Prisma.JsonValue | null;
+    },
+    answersByQuestionId: Map<
+      string,
+      {
+        text: string;
+        structuredValue:
+          Prisma.JsonValue | null;
+      }
+    >,
+  ): boolean {
+    if (
+      !question.dependsOnQuestionId
+    ) {
+      return true;
+    }
+
+    const parentAnswer =
+      answersByQuestionId.get(
+        question.dependsOnQuestionId,
+      );
+
+    if (!parentAnswer) {
+      return false;
+    }
+
+    const allowedAnswers =
+      this.parseBranchAnswers(
+        question.showWhenAnswers,
+      );
+
+    if (
+      allowedAnswers.length ===
+      0
+    ) {
+      return false;
+    }
+
+    const actualAnswer =
+      this.getBranchAnswerValue(
+        parentAnswer,
+      );
+
+    if (!actualAnswer) {
+      return false;
+    }
+
+    return allowedAnswers.includes(
+      actualAnswer,
+    );
+  }
+
   private toQuestionPayload(
     question: {
       id: string;
       question: string;
       type: QuestionType;
-      options: Prisma.JsonValue | null;
+      options:
+        Prisma.JsonValue | null;
     },
     questionNumber?: number,
     totalQuestions?: number,
@@ -293,7 +429,8 @@ export class CollectionService
   private validateAnswerForQuestion(
     question: {
       type: QuestionType;
-      options: Prisma.JsonValue | null;
+      options:
+        Prisma.JsonValue | null;
     },
     rawAnswer: string,
   ): ValidatedAnswer {
@@ -312,7 +449,9 @@ export class CollectionService
     switch (question.type) {
       case QuestionType.FREE_TEXT:
         return {
-          text: trimmed,
+          text:
+            trimmed,
+
           structuredValue:
             Prisma.JsonNull,
         };
@@ -336,9 +475,12 @@ export class CollectionService
           )
         ) {
           return {
-            text: 'Yes',
+            text:
+              'Yes',
+
             structuredValue: {
-              value: true,
+              value:
+                true,
             },
           };
         }
@@ -349,9 +491,12 @@ export class CollectionService
           )
         ) {
           return {
-            text: 'No',
+            text:
+              'No',
+
             structuredValue: {
-              value: false,
+              value:
+                false,
             },
           };
         }
@@ -363,27 +508,39 @@ export class CollectionService
 
       case QuestionType.YES_NO_MAYBE: {
         if (
-          ['yes', 'y'].includes(
+          [
+            'yes',
+            'y',
+          ].includes(
             normalized,
           )
         ) {
           return {
-            text: 'Yes',
+            text:
+              'Yes',
+
             structuredValue: {
-              value: 'yes',
+              value:
+                'yes',
             },
           };
         }
 
         if (
-          ['no', 'n'].includes(
+          [
+            'no',
+            'n',
+          ].includes(
             normalized,
           )
         ) {
           return {
-            text: 'No',
+            text:
+              'No',
+
             structuredValue: {
-              value: 'no',
+              value:
+                'no',
             },
           };
         }
@@ -399,9 +556,12 @@ export class CollectionService
           )
         ) {
           return {
-            text: 'Maybe',
+            text:
+              'Maybe',
+
             structuredValue: {
-              value: 'maybe',
+              value:
+                'maybe',
             },
           };
         }
@@ -419,7 +579,8 @@ export class CollectionService
 
         if (
           !options ||
-          options.length === 0
+          options.length ===
+            0
         ) {
           throw new BadRequestException(
             'This multiple-choice question has no configured options.',
@@ -435,12 +596,11 @@ export class CollectionService
               normalized,
           );
 
-        if (
-          matchingOption
-        ) {
+        if (matchingOption) {
           return {
             text:
               matchingOption,
+
             structuredValue: {
               value:
                 matchingOption,
@@ -449,7 +609,9 @@ export class CollectionService
         }
 
         const numericChoice =
-          Number(trimmed);
+          Number(
+            trimmed,
+          );
 
         if (
           Number.isInteger(
@@ -461,14 +623,18 @@ export class CollectionService
         ) {
           const selected =
             options[
-              numericChoice - 1
+              numericChoice -
+                1
             ];
 
           return {
-            text: selected,
+            text:
+              selected,
+
             structuredValue: {
               value:
                 selected,
+
               optionIndex:
                 numericChoice -
                 1,
@@ -485,7 +651,9 @@ export class CollectionService
 
       case QuestionType.SCALE_1_5: {
         const numberValue =
-          Number(trimmed);
+          Number(
+            trimmed,
+          );
 
         if (
           !Number.isInteger(
@@ -501,7 +669,9 @@ export class CollectionService
 
         return {
           text:
-            String(numberValue),
+            String(
+              numberValue,
+            ),
 
           structuredValue: {
             value:
@@ -541,7 +711,8 @@ export class CollectionService
 
     await this.prisma.user.update({
       where: {
-        id: user.id,
+        id:
+          user.id,
       },
 
       data: {
@@ -566,7 +737,8 @@ export class CollectionService
     const activeQuestionCount =
       await this.prisma.question.count({
         where: {
-          isActive: true,
+          isActive:
+            true,
         },
       });
 
@@ -578,7 +750,8 @@ export class CollectionService
         },
 
         orderBy: {
-          updatedAt: 'desc',
+          updatedAt:
+            'desc',
         },
       });
 
@@ -589,9 +762,11 @@ export class CollectionService
     if (
       session?.isCompleted
     ) {
-      status = 'completed';
+      status =
+        'completed';
     } else if (
-      session?.currentQuestionId
+      session
+        ?.currentQuestionId
     ) {
       status =
         'in_progress';
@@ -599,7 +774,9 @@ export class CollectionService
 
     return {
       activeQuestionCount,
+
       status,
+
       lastCompletedAt:
         session?.completedAt ??
         null,
@@ -625,11 +802,13 @@ export class CollectionService
       await this.prisma.conversationState.findFirst({
         where: {
           userId,
-          isCompleted: false,
+          isCompleted:
+            false,
         },
 
         orderBy: {
-          updatedAt: 'desc',
+          updatedAt:
+            'desc',
         },
       });
 
@@ -666,25 +845,33 @@ export class CollectionService
       await this.prisma.conversationState.create({
         data: {
           userId,
+
           submissionId:
             submission.id,
+
           startedAt,
-          isCompleted: false,
+
+          isCompleted:
+            false,
         },
       });
 
     const firstQuestion =
       await this.prisma.question.findFirst({
         where: {
-          isActive: true,
+          isActive:
+            true,
         },
 
         orderBy: {
-          order: 'asc',
+          order:
+            'asc',
         },
       });
 
-    if (!firstQuestion) {
+    if (
+      !firstQuestion
+    ) {
       this.logger.warn(
         'No active questions were found.',
       );
@@ -727,7 +914,8 @@ export class CollectionService
 
     await this.prisma.conversationState.update({
       where: {
-        id: session.id,
+        id:
+          session.id,
       },
 
       data: {
@@ -790,8 +978,8 @@ export class CollectionService
     }
 
     const checkInId =
-      session.submission.run
-        .checkInId;
+      session.submission
+        .run.checkInId;
 
     const question =
       await this.prisma.question.findFirst({
@@ -813,9 +1001,14 @@ export class CollectionService
         },
 
         select: {
-          id: true,
-          type: true,
-          options: true,
+          id:
+            true,
+
+          type:
+            true,
+
+          options:
+            true,
         },
       });
 
@@ -838,6 +1031,7 @@ export class CollectionService
         submissionId_questionId: {
           submissionId:
             session.submissionId,
+
           questionId,
         },
       },
@@ -853,6 +1047,7 @@ export class CollectionService
 
       create: {
         userId,
+
         questionId,
 
         submissionId:
@@ -869,7 +1064,8 @@ export class CollectionService
 
     await this.prisma.conversationState.update({
       where: {
-        id: session.id,
+        id:
+          session.id,
       },
 
       data: {
@@ -886,7 +1082,8 @@ export class CollectionService
       await this.prisma.standupSubmission.update({
         where: {
           id:
-            session.submission.id,
+            session
+              .submission.id,
         },
 
         data: {
@@ -955,7 +1152,14 @@ export class CollectionService
         },
 
         select: {
-          questionId: true,
+          questionId:
+            true,
+
+          text:
+            true,
+
+          structuredValue:
+            true,
         },
       });
 
@@ -967,16 +1171,37 @@ export class CollectionService
         ),
       );
 
-    const nextIndex =
-      activeQuestions.findIndex(
+    const answersByQuestionId =
+      new Map(
+        answers.map(
+          (answer) =>
+            [
+              answer.questionId,
+              {
+                text:
+                  answer.text,
+
+                structuredValue:
+                  answer.structuredValue,
+              },
+            ] as const,
+        ),
+      );
+
+    const nextQuestion =
+      activeQuestions.find(
         (question) =>
           !answeredQuestionIds.has(
             question.id,
+          ) &&
+          this.isQuestionEligible(
+            question,
+            answersByQuestionId,
           ),
       );
 
     if (
-      nextIndex === -1
+      !nextQuestion
     ) {
       await this.finishConversationState(
         session.id,
@@ -984,11 +1209,6 @@ export class CollectionService
 
       return null;
     }
-
-    const nextQuestion =
-      activeQuestions[
-        nextIndex
-      ];
 
     await this.prisma.conversationState.update({
       where: {
@@ -1002,10 +1222,24 @@ export class CollectionService
       },
     });
 
+    const hasConditionalQuestions =
+      activeQuestions.some(
+        (question) =>
+          Boolean(
+            question.dependsOnQuestionId,
+          ),
+      );
+
+    const questionNumber =
+      answeredQuestionIds.size +
+      1;
+
     return this.toQuestionPayload(
       nextQuestion,
-      nextIndex + 1,
-      activeQuestions.length,
+      questionNumber,
+      hasConditionalQuestions
+        ? undefined
+        : activeQuestions.length,
     );
   }
 
@@ -1044,7 +1278,8 @@ export class CollectionService
         },
 
         include: {
-          submission: true,
+          submission:
+            true,
         },
       });
 
@@ -1155,30 +1390,102 @@ export class CollectionService
           .run.checkInId,
       );
 
-    const questionIndex =
-      activeQuestions.findIndex(
-        (question) =>
-          question.id ===
+    const question =
+      activeQuestions.find(
+        (candidate) =>
+          candidate.id ===
           session.currentQuestionId,
       );
 
+    if (!question) {
+      return this.getNextQuestion(
+        userIdentifier,
+      );
+    }
+
+    const answers =
+      await this.prisma.answer.findMany({
+        where: {
+          submissionId:
+            session.submissionId,
+        },
+
+        select: {
+          questionId:
+            true,
+
+          text:
+            true,
+
+          structuredValue:
+            true,
+        },
+      });
+
+    const answersByQuestionId =
+      new Map(
+        answers.map(
+          (answer) =>
+            [
+              answer.questionId,
+              {
+                text:
+                  answer.text,
+
+                structuredValue:
+                  answer.structuredValue,
+              },
+            ] as const,
+        ),
+      );
+
     if (
-      questionIndex === -1
+      !this.isQuestionEligible(
+        question,
+        answersByQuestionId,
+      )
     ) {
       return this.getNextQuestion(
         userIdentifier,
       );
     }
 
-    const question =
-      activeQuestions[
-        questionIndex
-      ];
+    const answeredQuestionIds =
+      new Set(
+        answers.map(
+          (answer) =>
+            answer.questionId,
+        ),
+      );
+
+    const hasConditionalQuestions =
+      activeQuestions.some(
+        (candidate) =>
+          Boolean(
+            candidate.dependsOnQuestionId,
+          ),
+      );
+
+    const currentAlreadyAnswered =
+      answeredQuestionIds.has(
+        question.id,
+      );
+
+    const questionNumber =
+      currentAlreadyAnswered
+        ? Math.max(
+            1,
+            answeredQuestionIds.size,
+          )
+        : answeredQuestionIds.size +
+          1;
 
     return this.toQuestionPayload(
       question,
-      questionIndex + 1,
-      activeQuestions.length,
+      questionNumber,
+      hasConditionalQuestions
+        ? undefined
+        : activeQuestions.length,
     );
   }
 
@@ -1192,34 +1499,40 @@ export class CollectionService
             'completed',
 
           completedAt: {
-            not: null,
+            not:
+              null,
           },
 
-          run: teamId
-            ? {
-                teamId,
-              }
-            : undefined,
+          run:
+            teamId
+              ? {
+                  teamId,
+                }
+              : undefined,
 
-          user: teamId
-            ? {
-                teamMembers: {
-                  some: {
-                    teamId,
-                    optedOut:
-                      false,
+          user:
+            teamId
+              ? {
+                  teamMembers: {
+                    some: {
+                      teamId,
+
+                      optedOut:
+                        false,
+                    },
                   },
-                },
-              }
-            : undefined,
+                }
+              : undefined,
         },
 
         include: {
-          user: true,
+          user:
+            true,
 
           answers: {
             include: {
-              question: true,
+              question:
+                true,
             },
 
             orderBy: {
@@ -1266,7 +1579,8 @@ export class CollectionService
     ) {
       if (
         submission.answers
-          .length === 0
+          .length ===
+        0
       ) {
         continue;
       }
@@ -1305,7 +1619,9 @@ export class CollectionService
               (answer) =>
                 `*${answer.question.question}*\n${answer.text}`,
             )
-            .join('\n'),
+            .join(
+              '\n',
+            ),
 
         blocker:
           blockerAnswer?.text ||
@@ -1340,24 +1656,28 @@ export class CollectionService
             true,
 
           completedAt: {
-            not: null,
+            not:
+              null,
           },
 
-          user: teamId
-            ? {
-                teamMembers: {
-                  some: {
-                    teamId,
-                    optedOut:
-                      false,
+          user:
+            teamId
+              ? {
+                  teamMembers: {
+                    some: {
+                      teamId,
+
+                      optedOut:
+                        false,
+                    },
                   },
-                },
-              }
-            : undefined,
+                }
+              : undefined,
         },
 
         include: {
-          user: true,
+          user:
+            true,
         },
 
         orderBy: {
@@ -1389,7 +1709,8 @@ export class CollectionService
           },
 
           include: {
-            question: true,
+            question:
+              true,
           },
 
           orderBy: {
@@ -1439,7 +1760,9 @@ export class CollectionService
               (answer) =>
                 `*${answer.question.question}*\n${answer.text}`,
             )
-            .join('\n'),
+            .join(
+              '\n',
+            ),
 
         blocker:
           blockerAnswer?.text ||
@@ -1472,7 +1795,9 @@ export class CollectionService
       await this.prisma.teamMember.findMany({
         where: {
           teamId,
-          optedOut: false,
+
+          optedOut:
+            false,
 
           user: {
             slackUserId: {
@@ -1483,7 +1808,8 @@ export class CollectionService
         },
 
         include: {
-          user: true,
+          user:
+            true,
         },
 
         orderBy: {
@@ -1532,7 +1858,8 @@ export class CollectionService
             },
 
             include: {
-              user: true,
+              user:
+                true,
             },
 
             orderBy: {
@@ -1559,7 +1886,8 @@ export class CollectionService
 
     if (
       team.teamMembers
-        .length === 0
+        .length ===
+      0
     ) {
       return [];
     }
@@ -1577,7 +1905,9 @@ export class CollectionService
         },
       });
 
-    if (!firstQuestion) {
+    if (
+      !firstQuestion
+    ) {
       throw new NotFoundException(
         'No active standup questions were found.',
       );
@@ -1686,6 +2016,7 @@ export class CollectionService
       await this.prisma.standupRun.findFirst({
         where: {
           teamId,
+
           status:
             'collecting',
         },
@@ -1705,7 +2036,9 @@ export class CollectionService
             },
 
             include: {
-              user: true,
+              user:
+                true,
+
               conversationState:
                 true,
             },
@@ -1786,16 +2119,19 @@ export class CollectionService
       await this.prisma.standupSubmission.findMany({
         where: {
           runId,
+
           status:
             'completed',
         },
 
         include: {
-          user: true,
+          user:
+            true,
 
           answers: {
             include: {
-              question: true,
+              question:
+                true,
             },
 
             orderBy: {
@@ -1815,7 +2151,8 @@ export class CollectionService
       .filter(
         (submission) =>
           submission.answers
-            .length > 0,
+            .length >
+          0,
       )
       .map(
         (submission) => {
@@ -1897,7 +2234,8 @@ export class CollectionService
             },
 
             include: {
-              user: true,
+              user:
+                true,
 
               conversationState: {
                 include: {
@@ -1991,7 +2329,8 @@ export class CollectionService
             true,
 
           completedAt: {
-            not: null,
+            not:
+              null,
           },
         },
 
@@ -2041,6 +2380,7 @@ export class CollectionService
   ): Promise<{
     completedResponses:
       StandupResponse[];
+
     noUpdateUsers:
       string[];
   }> {

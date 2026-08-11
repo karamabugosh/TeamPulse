@@ -15,6 +15,27 @@ import { SchedulerService } from '../scheduler/scheduler.service';
 import { CreateCheckInDto } from './dto/create-check-in.dto';
 import { UpdateCheckInDto } from './dto/update-check-in.dto';
 
+type QuestionConfigInput = {
+  id?: string;
+  ref?: string;
+  question: string;
+  order: number;
+  type?: QuestionType;
+  options?: string[];
+  isRequired?: boolean;
+  isActive?: boolean;
+  dependsOnQuestionId?: string | null;
+  showWhenAnswers?: string[] | null;
+};
+
+type BranchQuestionMeta = {
+  id: string;
+  order: number;
+  type: QuestionType;
+  options: Prisma.JsonValue | null;
+  isActive: boolean;
+};
+
 @Injectable()
 export class CheckInService {
   private readonly logger =
@@ -80,20 +101,6 @@ export class CheckInService {
     },
   };
 
-  /**
-   * Reconciles the runtime scheduler after a successful
-   * CheckIn configuration mutation.
-   *
-   * ModuleRef is used here instead of constructor-injecting
-   * SchedulerService directly because SchedulerService already
-   * depends on the CheckIn run layer. Runtime lookup keeps the
-   * configuration service from introducing a constructor-level
-   * circular dependency.
-   *
-   * PostgreSQL remains the source of truth. If reconciliation
-   * fails, the configuration stays persisted and the operational
-   * /scheduler/refresh endpoint remains available as recovery.
-   */
   private async refreshSchedulerAfterMutation(
     operation: string,
   ): Promise<void> {
@@ -210,41 +217,200 @@ export class CheckInService {
                           ),
                       }
                     : undefined,
-
-                questions:
-                  dto.questions &&
-                  dto.questions.length > 0
-                    ? {
-                        create:
-                          dto.questions.map(
-                            (question) => ({
-                              question:
-                                question.question.trim(),
-
-                              order:
-                                question.order,
-
-                              type:
-                                question.type ??
-                                QuestionType.FREE_TEXT,
-
-                              options:
-                                question.options ??
-                                Prisma.JsonNull,
-
-                              isRequired:
-                                question.isRequired ??
-                                true,
-
-                              isActive:
-                                question.isActive ??
-                                true,
-                            }),
-                          ),
-                      }
-                    : undefined,
               },
             });
+
+          if (
+            dto.questions &&
+            dto.questions.length > 0
+          ) {
+            const createdQuestions:
+              Array<{
+                sourceIndex: number;
+                row: BranchQuestionMeta;
+              }> = [];
+
+            const refToQuestionId =
+              new Map<string, string>();
+
+            for (
+              let index = 0;
+              index < dto.questions.length;
+              index += 1
+            ) {
+              const question =
+                dto.questions[index];
+
+              const row =
+                await tx.question.create({
+                  data: {
+                    checkInId:
+                      checkIn.id,
+
+                    question:
+                      question.question.trim(),
+
+                    order:
+                      question.order,
+
+                    type:
+                      question.type ??
+                      QuestionType.FREE_TEXT,
+
+                    options:
+                      question.options ??
+                      Prisma.JsonNull,
+
+                    isRequired:
+                      question.isRequired ??
+                      true,
+
+                    isActive:
+                      question.isActive ??
+                      true,
+
+                    dependsOnQuestionId:
+                      null,
+
+                    showWhenAnswers:
+                      Prisma.JsonNull,
+                  },
+                });
+
+              createdQuestions.push({
+                sourceIndex:
+                  index,
+
+                row: {
+                  id:
+                    row.id,
+
+                  order:
+                    row.order,
+
+                  type:
+                    row.type,
+
+                  options:
+                    row.options,
+
+                  isActive:
+                    row.isActive,
+                },
+              });
+
+              const ref =
+                question.ref?.trim();
+
+              if (ref) {
+                refToQuestionId.set(
+                  ref,
+                  row.id,
+                );
+              }
+            }
+
+            const questionById =
+              new Map(
+                createdQuestions.map(
+                  ({ row }) => [
+                    row.id,
+                    row,
+                  ] as const,
+                ),
+              );
+
+            const branchEdges:
+              Array<{
+                id: string;
+                dependsOnQuestionId:
+                  string | null;
+              }> = [];
+
+            for (
+              const createdQuestion
+              of createdQuestions
+            ) {
+              const source =
+                dto.questions[
+                  createdQuestion.sourceIndex
+                ];
+
+              const dependencyReference =
+                source.dependsOnQuestionId
+                  ?.trim() ||
+                null;
+
+              if (!dependencyReference) {
+                branchEdges.push({
+                  id:
+                    createdQuestion.row.id,
+
+                  dependsOnQuestionId:
+                    null,
+                });
+
+                continue;
+              }
+
+              const parentId =
+                refToQuestionId.get(
+                  dependencyReference,
+                );
+
+              if (!parentId) {
+                throw new BadRequestException(
+                  `Question ${source.order} depends on "${dependencyReference}", but that reference does not match any question ref in this create request.`,
+                );
+              }
+
+              const parent =
+                questionById.get(
+                  parentId,
+                );
+
+              if (!parent) {
+                throw new BadRequestException(
+                  `Could not resolve the parent question for question ${source.order}.`,
+                );
+              }
+
+              this.validateBranchRule(
+                createdQuestion.row,
+                parent,
+                source.showWhenAnswers,
+              );
+
+              await tx.question.update({
+                where: {
+                  id:
+                    createdQuestion.row.id,
+                },
+
+                data: {
+                  dependsOnQuestionId:
+                    parent.id,
+
+                  showWhenAnswers:
+                    this.branchAnswersForStorage(
+                      source.showWhenAnswers,
+                    ),
+                },
+              });
+
+              branchEdges.push({
+                id:
+                  createdQuestion.row.id,
+
+                dependsOnQuestionId:
+                  parent.id,
+              });
+            }
+
+            this.validateNoBranchCycles(
+              branchEdges,
+            );
+          }
 
           return tx.checkIn.findUnique({
             where: {
@@ -322,11 +488,6 @@ export class CheckInService {
 
     this.validateUpdate(dto);
 
-    /*
-     * Validate the effective timezone + cron pair.
-     * If only one field changes, use the existing
-     * value for the other field.
-     */
     const effectiveTimezone =
       dto.timezone?.trim() ||
       existing.timezone;
@@ -389,10 +550,6 @@ export class CheckInService {
     const updated =
       await this.prisma.$transaction(
         async (tx) => {
-          /*
-           * Replace participant configuration when explicitly
-           * supplied by the update request.
-           */
           if (
             participantIds !== undefined
           ) {
@@ -425,13 +582,6 @@ export class CheckInService {
             }
           }
 
-          /*
-           * Replace current question configuration while
-           * preserving questions that already have answers.
-           *
-           * Answered questions are disabled rather than deleted
-           * so historical runs continue to reference valid rows.
-           */
           if (
             dto.questions !== undefined
           ) {
@@ -452,8 +602,179 @@ export class CheckInService {
                 },
               });
 
+            const existingById =
+              new Map(
+                existingQuestions.map(
+                  (question) => [
+                    question.id,
+                    question,
+                  ] as const,
+                ),
+              );
+
+            const suppliedIds =
+              dto.questions
+                .map(
+                  (question) =>
+                    question.id?.trim(),
+                )
+                .filter(
+                  (
+                    questionId,
+                  ): questionId is string =>
+                    Boolean(questionId),
+                );
+
+            const uniqueSuppliedIds =
+              new Set(
+                suppliedIds,
+              );
+
+            if (
+              uniqueSuppliedIds.size !==
+              suppliedIds.length
+            ) {
+              throw new BadRequestException(
+                'The question update contains duplicate question IDs.',
+              );
+            }
+
+            for (
+              const suppliedId
+              of suppliedIds
+            ) {
+              if (
+                !existingById.has(
+                  suppliedId,
+                )
+              ) {
+                throw new BadRequestException(
+                  `Question ${suppliedId} does not belong to check-in ${id}.`,
+                );
+              }
+            }
+
+            const resultingQuestions:
+              Array<{
+                sourceIndex: number;
+                row: BranchQuestionMeta;
+              }> = [];
+
+            for (
+              let index = 0;
+              index < dto.questions.length;
+              index += 1
+            ) {
+              const question =
+                dto.questions[index];
+
+              const questionId =
+                question.id?.trim();
+
+              const priorQuestion =
+                questionId
+                  ? existingById.get(
+                      questionId,
+                    )
+                  : undefined;
+
+              const baseData = {
+                question:
+                  question.question.trim(),
+
+                order:
+                  question.order,
+
+                type:
+                  question.type ??
+                  priorQuestion?.type ??
+                  QuestionType.FREE_TEXT,
+
+                options:
+                  question.options !==
+                  undefined
+                    ? question.options
+                    : priorQuestion?.options ??
+                      Prisma.JsonNull,
+
+                isRequired:
+                  question.isRequired ??
+                  priorQuestion?.isRequired ??
+                  true,
+
+                isActive:
+                  question.isActive ??
+                  priorQuestion?.isActive ??
+                  true,
+
+                dependsOnQuestionId:
+                  null,
+
+                showWhenAnswers:
+                  Prisma.JsonNull,
+              };
+
+              const row =
+                questionId
+                  ? await tx.question.update({
+                      where: {
+                        id:
+                          questionId,
+                      },
+
+                      data:
+                        baseData,
+                    })
+                  : await tx.question.create({
+                      data: {
+                        checkInId:
+                          id,
+
+                        ...baseData,
+                      },
+                    });
+
+              resultingQuestions.push({
+                sourceIndex:
+                  index,
+
+                row: {
+                  id:
+                    row.id,
+
+                  order:
+                    row.order,
+
+                  type:
+                    row.type,
+
+                  options:
+                    row.options,
+
+                  isActive:
+                    row.isActive,
+                },
+              });
+            }
+
+            const resultingIds =
+              new Set(
+                resultingQuestions.map(
+                  ({ row }) =>
+                    row.id,
+                ),
+              );
+
+            const omittedQuestions =
+              existingQuestions.filter(
+                (question) =>
+                  !resultingIds.has(
+                    question.id,
+                  ),
+              );
+
             const deletableQuestionIds =
-              existingQuestions
+              omittedQuestions
                 .filter(
                   (question) =>
                     question._count.answers ===
@@ -465,7 +786,7 @@ export class CheckInService {
                 );
 
             const historicalQuestionIds =
-              existingQuestions
+              omittedQuestions
                 .filter(
                   (question) =>
                     question._count.answers >
@@ -505,45 +826,105 @@ export class CheckInService {
                 data: {
                   isActive:
                     false,
+
+                  dependsOnQuestionId:
+                    null,
+
+                  showWhenAnswers:
+                    Prisma.JsonNull,
                 },
               });
             }
 
-            if (
-              dto.questions.length > 0
+            const resultingById =
+              new Map(
+                resultingQuestions.map(
+                  ({ row }) => [
+                    row.id,
+                    row,
+                  ] as const,
+                ),
+              );
+
+            const branchEdges:
+              Array<{
+                id: string;
+                dependsOnQuestionId:
+                  string | null;
+              }> = [];
+
+            for (
+              const resultingQuestion
+              of resultingQuestions
             ) {
-              await tx.question.createMany({
-                data:
-                  dto.questions.map(
-                    (question) => ({
-                      checkInId:
-                        id,
+              const source =
+                dto.questions[
+                  resultingQuestion.sourceIndex
+                ];
 
-                      question:
-                        question.question.trim(),
+              const dependencyId =
+                source.dependsOnQuestionId
+                  ?.trim() ||
+                null;
 
-                      order:
-                        question.order,
+              if (!dependencyId) {
+                branchEdges.push({
+                  id:
+                    resultingQuestion.row.id,
 
-                      type:
-                        question.type ??
-                        QuestionType.FREE_TEXT,
+                  dependsOnQuestionId:
+                    null,
+                });
 
-                      options:
-                        question.options ??
-                        Prisma.JsonNull,
+                continue;
+              }
 
-                      isRequired:
-                        question.isRequired ??
-                        true,
+              const parent =
+                resultingById.get(
+                  dependencyId,
+                );
 
-                      isActive:
-                        question.isActive ??
-                        true,
-                    }),
-                  ),
+              if (!parent) {
+                throw new BadRequestException(
+                  `Question ${source.order} depends on ${dependencyId}, but the parent question is not part of the active question configuration for this check-in.`,
+                );
+              }
+
+              this.validateBranchRule(
+                resultingQuestion.row,
+                parent,
+                source.showWhenAnswers,
+              );
+
+              await tx.question.update({
+                where: {
+                  id:
+                    resultingQuestion.row.id,
+                },
+
+                data: {
+                  dependsOnQuestionId:
+                    parent.id,
+
+                  showWhenAnswers:
+                    this.branchAnswersForStorage(
+                      source.showWhenAnswers,
+                    ),
+                },
+              });
+
+              branchEdges.push({
+                id:
+                  resultingQuestion.row.id,
+
+                dependsOnQuestionId:
+                  parent.id,
               });
             }
+
+            this.validateNoBranchCycles(
+              branchEdges,
+            );
           }
 
           await tx.checkIn.update({
@@ -639,10 +1020,6 @@ export class CheckInService {
       );
     }
 
-    /*
-     * Once execution history exists, retain the CheckIn
-     * configuration for historical integrity.
-     */
     if (
       checkIn._count.runs > 0
     ) {
@@ -961,14 +1338,7 @@ export class CheckInService {
 
   private validateQuestions(
     questions:
-      | Array<{
-          question: string;
-          order: number;
-          type?: QuestionType;
-          options?: string[];
-          isRequired?: boolean;
-          isActive?: boolean;
-        }>
+      | QuestionConfigInput[]
       | undefined,
   ) {
     if (!questions) {
@@ -984,6 +1354,12 @@ export class CheckInService {
           QuestionType,
         ),
       );
+
+    const refs =
+      new Set<string>();
+
+    const ids =
+      new Set<string>();
 
     for (
       const question
@@ -1021,6 +1397,44 @@ export class CheckInService {
       orders.add(
         question.order,
       );
+
+      const questionId =
+        question.id?.trim();
+
+      if (questionId) {
+        if (
+          ids.has(
+            questionId,
+          )
+        ) {
+          throw new BadRequestException(
+            `Duplicate question ID "${questionId}".`,
+          );
+        }
+
+        ids.add(
+          questionId,
+        );
+      }
+
+      const ref =
+        question.ref?.trim();
+
+      if (ref) {
+        if (
+          refs.has(
+            ref,
+          )
+        ) {
+          throw new BadRequestException(
+            `Duplicate question ref "${ref}".`,
+          );
+        }
+
+        refs.add(
+          ref,
+        );
+      }
 
       const type =
         question.type ??
@@ -1069,10 +1483,6 @@ export class CheckInService {
           );
         }
 
-        /*
-         * Option matching during collection is case-insensitive,
-         * so prevent configuration that is only different by case.
-         */
         const normalizedOptions =
           cleanedOptions.map(
             (option) =>
@@ -1122,6 +1532,338 @@ export class CheckInService {
           `Question ${question.order} only supports custom options when type is MULTIPLE_CHOICE.`,
         );
       }
+
+      const dependency =
+        question.dependsOnQuestionId
+          ?.trim() ||
+        null;
+
+      const branchAnswers =
+        question.showWhenAnswers ??
+        null;
+
+      if (
+        dependency &&
+        questionId &&
+        dependency ===
+          questionId
+      ) {
+        throw new BadRequestException(
+          `Question ${question.order} cannot depend on itself.`,
+        );
+      }
+
+      if (
+        dependency &&
+        ref &&
+        dependency ===
+          ref
+      ) {
+        throw new BadRequestException(
+          `Question ${question.order} cannot depend on itself.`,
+        );
+      }
+
+      if (
+        dependency &&
+        (
+          !Array.isArray(
+            branchAnswers,
+          ) ||
+          branchAnswers.length ===
+            0
+        )
+      ) {
+        throw new BadRequestException(
+          `Question ${question.order} must provide showWhenAnswers when dependsOnQuestionId is set.`,
+        );
+      }
+
+      if (
+        !dependency &&
+        Array.isArray(
+          branchAnswers,
+        ) &&
+        branchAnswers.length >
+          0
+      ) {
+        throw new BadRequestException(
+          `Question ${question.order} has showWhenAnswers but no dependsOnQuestionId.`,
+        );
+      }
+
+      if (
+        branchAnswers !== null &&
+        branchAnswers !== undefined
+      ) {
+        if (
+          !Array.isArray(
+            branchAnswers,
+          )
+        ) {
+          throw new BadRequestException(
+            `showWhenAnswers for question ${question.order} must be an array.`,
+          );
+        }
+
+        const cleanedBranchAnswers =
+          branchAnswers.map(
+            (answer) =>
+              answer?.trim(),
+          );
+
+        if (
+          cleanedBranchAnswers.some(
+            (answer) =>
+              !answer,
+          )
+        ) {
+          throw new BadRequestException(
+            `Question ${question.order} contains an empty branch answer.`,
+          );
+        }
+
+        const normalizedBranchAnswers =
+          cleanedBranchAnswers.map(
+            (answer) =>
+              answer.toLowerCase(),
+          );
+
+        if (
+          new Set(
+            normalizedBranchAnswers,
+          ).size !==
+          normalizedBranchAnswers.length
+        ) {
+          throw new BadRequestException(
+            `Question ${question.order} contains duplicate branch answers.`,
+          );
+        }
+      }
+    }
+  }
+
+  private branchAnswersForStorage(
+    answers:
+      | string[]
+      | null
+      | undefined,
+  ):
+    | Prisma.InputJsonValue
+    | typeof Prisma.JsonNull {
+    if (
+      !answers ||
+      answers.length === 0
+    ) {
+      return Prisma.JsonNull;
+    }
+
+    return answers.map(
+      (answer) =>
+        answer
+          .trim()
+          .toLowerCase(),
+    );
+  }
+
+  private parseStringOptions(
+    value: Prisma.JsonValue | null,
+  ): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value
+      .filter(
+        (
+          option,
+        ): option is string =>
+          typeof option ===
+          'string',
+      )
+      .map(
+        (option) =>
+          option
+            .trim()
+            .toLowerCase(),
+      )
+      .filter(Boolean);
+  }
+
+  private validateBranchRule(
+    child: BranchQuestionMeta,
+    parent: BranchQuestionMeta,
+    showWhenAnswers:
+      | string[]
+      | null
+      | undefined,
+  ): void {
+    if (
+      child.id ===
+      parent.id
+    ) {
+      throw new BadRequestException(
+        `Question ${child.order} cannot depend on itself.`,
+      );
+    }
+
+    if (!parent.isActive) {
+      throw new BadRequestException(
+        `Question ${child.order} cannot depend on inactive question ${parent.order}.`,
+      );
+    }
+
+    if (
+      parent.order >=
+      child.order
+    ) {
+      throw new BadRequestException(
+        `Question ${child.order} must appear after its parent question ${parent.order}.`,
+      );
+    }
+
+    if (
+      !showWhenAnswers ||
+      showWhenAnswers.length ===
+        0
+    ) {
+      throw new BadRequestException(
+        `Question ${child.order} must define at least one showWhenAnswers value.`,
+      );
+    }
+
+    const normalized =
+      showWhenAnswers.map(
+        (answer) =>
+          answer
+            .trim()
+            .toLowerCase(),
+      );
+
+    let allowed:
+      Set<string> | null =
+      null;
+
+    switch (parent.type) {
+      case QuestionType.YES_NO:
+        allowed =
+          new Set([
+            'yes',
+            'no',
+          ]);
+        break;
+
+      case QuestionType.YES_NO_MAYBE:
+        allowed =
+          new Set([
+            'yes',
+            'no',
+            'maybe',
+          ]);
+        break;
+
+      case QuestionType.SCALE_1_5:
+        allowed =
+          new Set([
+            '1',
+            '2',
+            '3',
+            '4',
+            '5',
+          ]);
+        break;
+
+      case QuestionType.MULTIPLE_CHOICE:
+        allowed =
+          new Set(
+            this.parseStringOptions(
+              parent.options,
+            ),
+          );
+        break;
+
+      case QuestionType.FREE_TEXT:
+        allowed =
+          null;
+        break;
+
+      default:
+        allowed =
+          null;
+    }
+
+    if (allowed) {
+      const invalidAnswers =
+        normalized.filter(
+          (answer) =>
+            !allowed!.has(
+              answer,
+            ),
+        );
+
+      if (
+        invalidAnswers.length >
+        0
+      ) {
+        throw new BadRequestException(
+          `Question ${child.order} contains invalid branch answer(s) for parent question ${parent.order}: ${invalidAnswers.join(
+            ', ',
+          )}.`,
+        );
+      }
+    }
+  }
+
+  private validateNoBranchCycles(
+    questions:
+      Array<{
+        id: string;
+        dependsOnQuestionId:
+          string | null;
+      }>,
+  ): void {
+    const parentByQuestionId =
+      new Map(
+        questions.map(
+          (question) => [
+            question.id,
+            question.dependsOnQuestionId,
+          ] as const,
+        ),
+      );
+
+    for (
+      const question
+      of questions
+    ) {
+      const visited =
+        new Set<string>();
+
+      let currentId:
+        string | null =
+        question.id;
+
+      while (currentId) {
+        if (
+          visited.has(
+            currentId,
+          )
+        ) {
+          throw new BadRequestException(
+            'Question branching contains a circular dependency.',
+          );
+        }
+
+        visited.add(
+          currentId,
+        );
+
+        currentId =
+          parentByQuestionId.get(
+            currentId,
+          ) ??
+          null;
+      }
     }
   }
 
@@ -1155,7 +1897,8 @@ export class CheckInService {
         },
 
         select: {
-          id: true,
+          id:
+            true,
         },
       });
 
@@ -1170,7 +1913,9 @@ export class CheckInService {
     const invalidIds =
       participantIds.filter(
         (id) =>
-          !validIds.has(id),
+          !validIds.has(
+            id,
+          ),
       );
 
     if (

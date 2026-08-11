@@ -83,6 +83,26 @@ export class SchedulerController {
   }
 
   /**
+   * V2: manually start one configured CheckIn.
+   *
+   * Uses the exact same lifecycle as the scheduled collection
+   * path:
+   * - StandupRun creation
+   * - submission creation
+   * - ConversationState creation
+   * - reminder state
+   * - Slack delivery
+   */
+  @Post('check-ins/:checkInId/start')
+  startCheckIn(
+    @Param('checkInId') checkInId: string,
+  ) {
+    return this.schedulerService.startScheduledCheckIn(
+      checkInId,
+    );
+  }
+
+  /**
    * V2: manually generate the latest report for
    * one configured CheckIn.
    */
