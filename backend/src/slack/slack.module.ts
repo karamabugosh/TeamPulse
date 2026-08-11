@@ -12,6 +12,8 @@ import { SlackGateway } from './slack.gateway';
 import { SlackListener } from './slack.listener';
 import { SlackService } from './slack.service';
 import { SlackQuestionsListener } from './slack-questions.listener';
+import { CheckInThreadService } from './check-in-thread.service';
+import { SlackCheckInListener } from './slack-checkin.listener';
 
 @Module({
   imports: [
@@ -26,10 +28,13 @@ import { SlackQuestionsListener } from './slack-questions.listener';
     SlackGateway,
     SlackListener,
     SlackQuestionsListener,
+    CheckInThreadService,
+    SlackCheckInListener,
   ],
   exports: [
     SlackGateway,
     SlackService,
+    CheckInThreadService,
   ],
 })
 export class SlackModule {}

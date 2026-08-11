@@ -290,6 +290,7 @@ export class SlackListener implements OnModuleInit {
           channelId: msg.channel,
           message: msg.text ?? '',
           timestamp: msg.ts ?? '',
+          threadTs: msg.thread_ts ?? undefined,
         };
 
         this.logger.log(

@@ -12,6 +12,9 @@ export class CheckInRunService {
   private readonly logger =
     new Logger(CheckInRunService.name);
 
+  /** Conversations older than this are auto-completed when blocking a new CheckIn. */
+  private readonly staleConversationMs = 24 * 60 * 60 * 1000;
+
   constructor(
     private readonly prisma: PrismaService,
   ) {}
@@ -67,7 +70,7 @@ export class CheckInRunService {
       );
     }
 
-    if (!checkIn.enabled) {
+    if (!checkIn.enabled && triggerSource !== 'manual') {
       throw new BadRequestException(
         `CheckIn "${checkIn.name}" is disabled.`,
       );
@@ -112,6 +115,16 @@ export class CheckInRunService {
           )
         : null;
 
+    const reportDueAt =
+      checkIn.reportTriggerMode === 'timeout' &&
+      checkIn.reportTimeoutMinutes &&
+      checkIn.reportTimeoutMinutes > 0
+        ? new Date(
+            scheduledFor.getTime() +
+              checkIn.reportTimeoutMinutes * 60 * 1000,
+          )
+        : null;
+
     try {
       const skippedParticipants: Array<{
         userId: string;
@@ -142,8 +155,60 @@ export class CheckInRunService {
 
                   reminderSentAt:
                     null,
+
+                  reportDueAt,
                 },
               });
+
+            // Close any previous collecting runs for this CheckIn so
+            // participants are not permanently blocked by stale sessions.
+            const supersededRuns = await tx.standupRun.findMany({
+              where: {
+                checkInId: checkIn.id,
+                status: 'collecting',
+                id: { not: createdRun.id },
+              },
+              select: { id: true },
+            });
+
+            if (supersededRuns.length > 0) {
+              const supersededRunIds = supersededRuns.map((r) => r.id);
+
+              await tx.standupSubmission.updateMany({
+                where: {
+                  runId: { in: supersededRunIds },
+                  status: { in: ['pending', 'in_progress'] },
+                },
+                data: {
+                  status: 'completed',
+                  completedAt: new Date(),
+                },
+              });
+
+              await tx.conversationState.updateMany({
+                where: {
+                  submission: { runId: { in: supersededRunIds } },
+                  isCompleted: false,
+                },
+                data: {
+                  isCompleted: true,
+                  completedAt: new Date(),
+                },
+              });
+
+              await tx.standupRun.updateMany({
+                where: { id: { in: supersededRunIds } },
+                data: {
+                  status: 'completed',
+                  completedAt: new Date(),
+                  reminderDueAt: null,
+                },
+              });
+
+              this.logger.log(
+                `Closed ${supersededRunIds.length} superseded collecting run(s) for CheckIn "${checkIn.name}".`,
+              );
+            }
 
             let createdSubmissionCount =
               0;
@@ -177,7 +242,11 @@ export class CheckInRunService {
                     submission: {
                       include: {
                         run: {
-                          include: {
+                          select: {
+                            id: true,
+                            checkInId: true,
+                            status: true,
+                            startedAt: true,
                             checkIn: {
                               select: {
                                 id: true,
@@ -197,31 +266,55 @@ export class CheckInRunService {
                 });
 
               if (existingConversation) {
-                const existingCheckInName =
-                  existingConversation
-                    .submission
-                    .run
-                    .checkIn
-                    ?.name;
+                const shouldRelease =
+                  this.shouldReleaseBlockingConversation(
+                    existingConversation,
+                    checkIn.id,
+                  );
 
-                skippedParticipants.push({
-                  userId:
-                    user.id,
+                if (shouldRelease) {
+                  await tx.conversationState.update({
+                    where: { id: existingConversation.id },
+                    data: {
+                      isCompleted: true,
+                      completedAt: new Date(),
+                    },
+                  });
 
-                  slackUserId:
-                    user.slackUserId,
+                  await tx.standupSubmission.update({
+                    where: { id: existingConversation.submissionId },
+                    data: {
+                      status: 'completed',
+                      completedAt: new Date(),
+                    },
+                  });
 
-                  reason:
-                    existingCheckInName
-                      ? `User already has an active CheckIn: "${existingCheckInName}".`
-                      : 'User already has an active standup conversation.',
-                });
+                  this.logger.warn(
+                    `Released stale conversation for user ${user.slackUserId} to allow CheckIn "${checkIn.name}".`,
+                  );
+                } else {
+                  const existingCheckInName =
+                    existingConversation
+                      .submission
+                      .run
+                      .checkIn
+                      ?.name;
 
-                this.logger.warn(
-                  `Skipping user ${user.slackUserId} for CheckIn "${checkIn.name}" because an unfinished conversation already exists.`,
-                );
+                  skippedParticipants.push({
+                    userId: user.id,
+                    slackUserId: user.slackUserId,
+                    reason:
+                      existingCheckInName
+                        ? `User already has an active CheckIn: "${existingCheckInName}".`
+                        : 'User already has an active standup conversation.',
+                  });
 
-                continue;
+                  this.logger.warn(
+                    `Skipping user ${user.slackUserId} for CheckIn "${checkIn.name}" because an unfinished conversation already exists.`,
+                  );
+
+                  continue;
+                }
               }
 
               const submission =
@@ -468,5 +561,105 @@ export class CheckInRunService {
 
       throw error;
     }
+  }
+
+  async getRunForDelivery(runId: string) {
+    const run = await this.prisma.standupRun.findUnique({
+      where: { id: runId },
+      include: {
+        checkIn: {
+          select: {
+            id: true,
+            name: true,
+            introMessage: true,
+          },
+        },
+        submissions: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                slackUserId: true,
+                slackDisplayName: true,
+              },
+            },
+            conversationState: {
+              include: {
+                currentQuestion: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!run) {
+      throw new NotFoundException(`Run ${runId} was not found.`);
+    }
+
+    if (!run.checkIn) {
+      throw new BadRequestException(
+        `Run ${runId} is not linked to a V2 CheckIn.`,
+      );
+    }
+
+    return {
+      checkInName: run.checkIn.name,
+      introMessage: run.checkIn.introMessage,
+      run: {
+        id: run.id,
+        submissions: run.submissions,
+      },
+    };
+  }
+
+  /**
+   * Determines whether an existing unfinished conversation should be
+   * auto-completed so a new CheckIn can deliver a DM to this user.
+   */
+  private shouldReleaseBlockingConversation(
+    conversation: {
+      updatedAt: Date;
+      submission: {
+        slackDmChannelId?: string | null;
+        run: {
+          checkInId: string | null;
+          status: string;
+          startedAt: Date;
+        };
+      };
+    },
+    targetCheckInId: string,
+  ): boolean {
+    const run = conversation.submission.run;
+
+    // Legacy V1 runs without a CheckIn should not block V2 delivery.
+    if (!run.checkInId) {
+      return true;
+    }
+
+    // A different CheckIn's conversation should not block this one.
+    if (run.checkInId !== targetCheckInId) {
+      return true;
+    }
+
+    // Stale conversations (e.g. user never replied) should not block forever.
+    const ageMs = Date.now() - conversation.updatedAt.getTime();
+    if (ageMs > this.staleConversationMs) {
+      return true;
+    }
+
+    // DM was never delivered for a collecting run — release and retry.
+    if (
+      !conversation.submission.slackDmChannelId &&
+      run.status === 'collecting'
+    ) {
+      const runAgeMs = Date.now() - run.startedAt.getTime();
+      if (runAgeMs > 5 * 60 * 1000) {
+        return true;
+      }
+    }
+
+    return false;
   }
 }

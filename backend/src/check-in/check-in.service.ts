@@ -12,6 +12,8 @@ import { ModuleRef } from '@nestjs/core';
 import { CronTime } from 'cron';
 import { PrismaService } from '../prisma/prisma.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
+import { buildSlackArchiveUrl, buildSlackThreadUrl } from '../slack/slack-checkin.views';
+import { SlackService } from '../slack/slack.service';
 import { CreateCheckInDto } from './dto/create-check-in.dto';
 import { UpdateCheckInDto } from './dto/update-check-in.dto';
 
@@ -172,6 +174,14 @@ export class CheckInService {
                   dto.description?.trim() ||
                   null,
 
+                introMessage:
+                  dto.introMessage?.trim() ||
+                  null,
+
+                outroMessage:
+                  dto.outroMessage?.trim() ||
+                  null,
+
                 enabled:
                   dto.enabled ?? true,
 
@@ -181,6 +191,10 @@ export class CheckInService {
                 collectionCron:
                   dto.collectionCron.trim(),
 
+                updatesChannelId:
+                  dto.updatesChannelId?.trim() ||
+                  null,
+
                 reminderEnabled:
                   dto.reminderEnabled ??
                   true,
@@ -189,13 +203,39 @@ export class CheckInService {
                   dto.reminderMinutesAfter ??
                   30,
 
+                reminderRecurringEnabled:
+                  dto.reminderRecurringEnabled ??
+                  false,
+
+                reminderIntervalMinutes:
+                  dto.reminderIntervalMinutes ??
+                  null,
+
+                reminderOnlyNonResponders:
+                  dto.reminderOnlyNonResponders ??
+                  true,
+
+                reminderOnSlackActive:
+                  dto.reminderOnSlackActive ??
+                  false,
+
                 reportCron:
                   dto.reportCron?.trim() ||
                   null,
 
-                reportChannelId:
-                  dto.reportChannelId?.trim() ||
+                reportTriggerMode:
+                  dto.reportTriggerMode ??
+                  'scheduled',
+
+                reportTimeoutMinutes:
+                  dto.reportTimeoutMinutes ??
                   null,
+
+                publishStatus:
+                  dto.publishStatus ?? 'published',
+
+                scheduleEnabled:
+                  dto.scheduleEnabled ?? true,
 
                 participants:
                   participantIds.length > 0
@@ -273,8 +313,14 @@ export class CheckInService {
           }
         : undefined,
 
-      include:
-        this.includeRelations,
+      include: {
+        ...this.includeRelations,
+        _count: {
+          select: {
+            runs: true,
+          },
+        },
+      },
 
       orderBy: {
         createdAt:
@@ -563,6 +609,16 @@ export class CheckInService {
                     null
                   : undefined,
 
+              introMessage:
+                dto.introMessage !== undefined
+                  ? dto.introMessage?.trim() || null
+                  : undefined,
+
+              outroMessage:
+                dto.outroMessage !== undefined
+                  ? dto.outroMessage?.trim() || null
+                  : undefined,
+
               enabled:
                 dto.enabled,
 
@@ -577,11 +633,30 @@ export class CheckInService {
                   ? dto.collectionCron.trim()
                   : undefined,
 
+              updatesChannelId:
+                dto.updatesChannelId !== undefined
+                  ? dto.updatesChannelId?.trim() || null
+                  : undefined,
+
               reminderEnabled:
                 dto.reminderEnabled,
 
               reminderMinutesAfter:
                 dto.reminderMinutesAfter,
+
+              reminderRecurringEnabled:
+                dto.reminderRecurringEnabled,
+
+              reminderIntervalMinutes:
+                dto.reminderIntervalMinutes !== undefined
+                  ? dto.reminderIntervalMinutes
+                  : undefined,
+
+              reminderOnlyNonResponders:
+                dto.reminderOnlyNonResponders,
+
+              reminderOnSlackActive:
+                dto.reminderOnSlackActive,
 
               reportCron:
                 dto.reportCron !== undefined
@@ -589,12 +664,19 @@ export class CheckInService {
                     null
                   : undefined,
 
-              reportChannelId:
-                dto.reportChannelId !==
-                undefined
-                  ? dto.reportChannelId?.trim() ||
-                    null
+              reportTriggerMode:
+                dto.reportTriggerMode,
+
+              reportTimeoutMinutes:
+                dto.reportTimeoutMinutes !== undefined
+                  ? dto.reportTimeoutMinutes
                   : undefined,
+
+              publishStatus:
+                dto.publishStatus,
+
+              scheduleEnabled:
+                dto.scheduleEnabled,
             },
           });
 
@@ -616,7 +698,58 @@ export class CheckInService {
     return updated;
   }
 
-  async remove(id: string) {
+  private async deleteCheckInWithRuns(
+    tx: Prisma.TransactionClient,
+    checkInId: string,
+  ) {
+    const runs = await tx.standupRun.findMany({
+      where: { checkInId },
+      select: { id: true },
+    });
+    const runIds = runs.map((run) => run.id);
+
+    if (runIds.length > 0) {
+      const submissions = await tx.standupSubmission.findMany({
+        where: { runId: { in: runIds } },
+        select: { id: true },
+      });
+      const submissionIds = submissions.map((s) => s.id);
+
+      if (submissionIds.length > 0) {
+        await tx.answer.deleteMany({
+          where: { submissionId: { in: submissionIds } },
+        });
+        await tx.conversationState.deleteMany({
+          where: { submissionId: { in: submissionIds } },
+        });
+      }
+
+      await tx.standupThreadUpdate.deleteMany({
+        where: { runId: { in: runIds } },
+      });
+      await tx.standupSubmission.deleteMany({
+        where: { runId: { in: runIds } },
+      });
+      await tx.aiDigest.deleteMany({
+        where: { runId: { in: runIds } },
+      });
+      await tx.standupRun.deleteMany({
+        where: { checkInId },
+      });
+    }
+
+    await tx.checkInParticipant.deleteMany({
+      where: { checkInId },
+    });
+    await tx.question.deleteMany({
+      where: { checkInId },
+    });
+    await tx.checkIn.delete({
+      where: { id: checkInId },
+    });
+  }
+
+  async remove(id: string, force = false) {
     const checkIn =
       await this.prisma.checkIn.findUnique({
         where: {
@@ -639,79 +772,41 @@ export class CheckInService {
       );
     }
 
-    /*
-     * Once execution history exists, retain the CheckIn
-     * configuration for historical integrity.
-     */
-    if (
-      checkIn._count.runs > 0
-    ) {
-      const disabled =
-        await this.prisma.checkIn.update({
-          where: {
-            id,
-          },
+    const runCount = checkIn._count.runs;
 
-          data: {
-            enabled:
-              false,
-          },
-        });
-
-      await this.refreshSchedulerAfterMutation(
-        `disable ${id} during delete`,
-      );
-
+    if (runCount > 0 && !force) {
       return {
-        deleted:
-          false,
-
-        disabled:
-          true,
-
+        deleted: false,
+        canDelete: false,
+        runCount,
         message:
-          'Check-in has historical runs, so it was disabled instead of deleted.',
-
-        checkIn:
-          disabled,
+          'This CheckIn has execution history and cannot be deleted without removing all runs.',
       };
     }
 
-    await this.prisma.$transaction(
-      async (tx) => {
+    await this.prisma.$transaction(async (tx) => {
+      if (runCount > 0) {
+        await this.deleteCheckInWithRuns(tx, id);
+      } else {
         await tx.checkInParticipant.deleteMany({
-          where: {
-            checkInId:
-              id,
-          },
+          where: { checkInId: id },
         });
-
         await tx.question.deleteMany({
-          where: {
-            checkInId:
-              id,
-          },
+          where: { checkInId: id },
         });
-
         await tx.checkIn.delete({
-          where: {
-            id,
-          },
+          where: { id },
         });
-      },
-    );
+      }
+    });
 
     await this.refreshSchedulerAfterMutation(
-      `delete ${id}`,
+      force && runCount > 0 ? `force delete ${id}` : `delete ${id}`,
     );
 
     return {
-      deleted:
-        true,
-
-      disabled:
-        false,
-
+      deleted: true,
+      forceDeleted: runCount > 0,
       id,
     };
   }
@@ -1183,5 +1278,426 @@ export class CheckInService {
         )}`,
       );
     }
+  }
+
+  async duplicate(id: string) {
+    const existing = await this.findOne(id);
+    const participantIds = existing.participants.map((p) => p.teamMemberId);
+
+    const created = await this.prisma.checkIn.create({
+      data: {
+        teamId: existing.teamId,
+        name: `${existing.name} (Copy)`,
+        description: existing.description,
+        introMessage: existing.introMessage,
+        outroMessage: existing.outroMessage,
+        enabled: false,
+        timezone: existing.timezone,
+        collectionCron: existing.collectionCron,
+        updatesChannelId: existing.updatesChannelId,
+        reminderEnabled: existing.reminderEnabled,
+        reminderMinutesAfter: existing.reminderMinutesAfter,
+        reminderRecurringEnabled: existing.reminderRecurringEnabled,
+        reminderIntervalMinutes: existing.reminderIntervalMinutes,
+        reminderOnlyNonResponders: existing.reminderOnlyNonResponders,
+        reminderOnSlackActive: existing.reminderOnSlackActive,
+        reportCron: existing.reportCron,
+        reportTriggerMode: existing.reportTriggerMode,
+        reportTimeoutMinutes: existing.reportTimeoutMinutes,
+        participants: participantIds.length > 0 ? {
+          create: participantIds.map((teamMemberId) => ({ teamMemberId })),
+        } : undefined,
+        questions: {
+          create: existing.questions.map((q) => ({
+            question: q.question,
+            order: q.order,
+            type: q.type,
+            options: q.options ? (q.options as any) : undefined,
+            isRequired: q.isRequired,
+            isActive: q.isActive,
+          })),
+        },
+      },
+      include: this.includeRelations,
+    });
+
+    await this.refreshSchedulerAfterMutation(`duplicate ${existing.id}`);
+
+    return created;
+  }
+
+  async getActiveRuns() {
+    const runs = await this.prisma.standupRun.findMany({
+      where: {
+        checkInId: { not: null },
+        status: 'collecting',
+      },
+      include: this.runIncludeRelations,
+      orderBy: { startedAt: 'desc' },
+      take: 20,
+    });
+
+    return Promise.all(
+      runs.map(async (run) => {
+        try {
+          return await this.enrichRun(run);
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Failed to enrich run ${run.id}: ${message}`,
+          );
+          return {
+            ...run,
+            participantsResponded: run.submissions?.filter(
+              (s: { status: string }) => s.status === 'completed',
+            ).length ?? 0,
+            totalParticipants: run.submissions?.length ?? 0,
+            threadStatus: this.resolveThreadStatus(run),
+            reportStatus: this.resolveReportStatus(
+              run,
+              run.submissions?.filter(
+                (s: { status: string }) => s.status === 'completed',
+              ).length ?? 0,
+              run.submissions?.length ?? 0,
+            ),
+            slackThreadUrl: null,
+            durationMinutes: null,
+            aiReport: run.aiDigests?.[0] ?? null,
+          };
+        }
+      }),
+    );
+  }
+
+  async getRunHistory(options?: {
+    page?: number;
+    limit?: number;
+    checkInId?: string;
+  }) {
+    const page = Math.max(1, options?.page ?? 1);
+    const limit = Math.min(100, Math.max(1, options?.limit ?? 25));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.StandupRunWhereInput = {
+      status: { not: 'collecting' },
+      checkInId: options?.checkInId
+        ? options.checkInId
+        : { not: null },
+    };
+
+    const [runs, total] = await Promise.all([
+      this.prisma.standupRun.findMany({
+        where,
+        include: this.runIncludeRelations,
+        orderBy: { startedAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.standupRun.count({ where }),
+    ]);
+
+    const enriched = await Promise.all(
+      runs.map(async (run) => {
+        try {
+          return await this.enrichRun(run);
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Failed to enrich history run ${run.id}: ${message}`,
+          );
+          return {
+            ...run,
+            participantsResponded: 0,
+            totalParticipants: run.submissions?.length ?? 0,
+            threadStatus: this.resolveThreadStatus(run),
+            reportStatus: this.resolveReportStatus(run, 0, run.submissions?.length ?? 0),
+            slackThreadUrl: null,
+            durationMinutes: null,
+            aiReport: run.aiDigests?.[0] ?? null,
+          };
+        }
+      }),
+    );
+
+    return {
+      runs: enriched,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  private readonly runIncludeRelations = {
+    checkIn: {
+      select: {
+        id: true,
+        name: true,
+        timezone: true,
+        updatesChannelId: true,
+        reportTriggerMode: true,
+      },
+    },
+    team: {
+      select: {
+        id: true,
+        name: true,
+        workspace: {
+          select: {
+            slackWorkspaceId: true,
+            slackWorkspaceName: true,
+          },
+        },
+      },
+    },
+    submissions: {
+      include: {
+        user: {
+          select: {
+            id: true,
+            slackDisplayName: true,
+            slackUserId: true,
+          },
+        },
+      },
+    },
+    aiDigests: {
+      orderBy: { generatedAt: 'desc' as const },
+      take: 1,
+      select: {
+        id: true,
+        generatedAt: true,
+        source: true,
+        summary: true,
+      },
+    },
+    _count: {
+      select: { submissions: true },
+    },
+  };
+
+  private async enrichRun(run: any) {
+    const participantsResponded = run.submissions.filter(
+      (s: { status: string }) => s.status === 'completed',
+    ).length;
+    const totalParticipants = run.submissions.length;
+    const slackWorkspaceId =
+      run.team?.workspace?.slackWorkspaceId ||
+      process.env.SLACK_TEAM_ID ||
+      '';
+
+    const threadStatus = this.resolveThreadStatus(run);
+    const reportStatus = this.resolveReportStatus(
+      run,
+      participantsResponded,
+      totalParticipants,
+    );
+
+    let slackThreadUrl: string | null = null;
+    if (run.slackChannelId && run.slackThreadTs) {
+      slackThreadUrl = await this.resolveSlackThreadUrl(
+        run.slackChannelId,
+        run.slackThreadTs,
+        slackWorkspaceId,
+        run.team?.workspace?.slackWorkspaceName,
+      );
+    }
+
+    const durationMinutes =
+      run.completedAt && run.startedAt
+        ? Math.round(
+            (new Date(run.completedAt).getTime() -
+              new Date(run.startedAt).getTime()) /
+              60000,
+          )
+        : null;
+
+    return {
+      ...run,
+      participantsResponded,
+      totalParticipants,
+      threadStatus,
+      reportStatus,
+      slackThreadUrl,
+      durationMinutes,
+      aiReport: run.aiDigests?.[0] ?? null,
+    };
+  }
+
+  private resolveThreadStatus(run: {
+    slackChannelId?: string | null;
+    slackThreadTs?: string | null;
+    startedAt: Date;
+    status: string;
+  }): {
+    code: 'active' | 'creating' | 'failed' | 'not_started';
+    label: string;
+    tooltip: string;
+  } {
+    if (run.slackThreadTs && run.slackChannelId) {
+      return {
+        code: 'active',
+        label: 'Thread Active',
+        tooltip: 'Slack thread is live. Participant updates and reports post here.',
+      };
+    }
+
+    const ageMs = Date.now() - new Date(run.startedAt).getTime();
+    const fiveMinutes = 5 * 60 * 1000;
+
+    if (run.status === 'collecting' && ageMs < 30_000) {
+      return {
+        code: 'creating',
+        label: 'Creating Thread...',
+        tooltip: 'Posting the parent message to the updates channel.',
+      };
+    }
+
+    if (ageMs < fiveMinutes) {
+      return {
+        code: 'creating',
+        label: 'Creating Thread...',
+        tooltip: 'Waiting for Slack to confirm the thread anchor.',
+      };
+    }
+
+    if (run.status === 'collecting' || ageMs >= fiveMinutes) {
+      return {
+        code: 'failed',
+        label: 'Failed to Create',
+        tooltip:
+          'Could not create a Slack thread. Check updates channel configuration and bot permissions.',
+      };
+    }
+
+    return {
+      code: 'not_started',
+      label: 'Not Started',
+      tooltip: 'This run has not posted a Slack thread yet.',
+    };
+  }
+
+  private resolveReportStatus(
+    run: {
+      status: string;
+      reportGeneratedAt?: Date | null;
+      checkIn?: { reportTriggerMode?: string | null } | null;
+    },
+    participantsResponded: number,
+    totalParticipants: number,
+  ): {
+    code: 'posted' | 'generating' | 'ready' | 'pending' | 'failed';
+    label: string;
+    tooltip: string;
+  } {
+    if (run.reportGeneratedAt) {
+      return {
+        code: 'posted',
+        label: 'Posted to Thread',
+        tooltip: 'AI report was generated and posted in the Slack thread.',
+      };
+    }
+
+    const allAnswered =
+      totalParticipants > 0 &&
+      participantsResponded === totalParticipants;
+
+    if (allAnswered && run.status === 'collecting') {
+      return {
+        code: 'ready',
+        label: 'Ready',
+        tooltip: 'All participants responded. Waiting for report trigger.',
+      };
+    }
+
+    if (allAnswered) {
+      return {
+        code: 'generating',
+        label: 'Generating...',
+        tooltip: 'AI report is being generated.',
+      };
+    }
+
+    if (
+      run.status === 'completed' &&
+      !run.reportGeneratedAt &&
+      run.checkIn?.reportTriggerMode === 'scheduled'
+    ) {
+      return {
+        code: 'failed',
+        label: 'Failed',
+        tooltip: 'Run completed but no report was generated.',
+      };
+    }
+
+    return {
+      code: 'pending',
+      label: 'Pending',
+      tooltip: 'Report will be generated after collection completes.',
+    };
+  }
+
+  private async resolveSlackThreadUrl(
+    channelId: string,
+    threadTs: string,
+    slackWorkspaceId: string,
+    workspaceName?: string | null,
+  ): Promise<string | null> {
+    const fallback = this.buildFallbackSlackThreadUrl(
+      channelId,
+      threadTs,
+      slackWorkspaceId,
+      workspaceName,
+    );
+
+    try {
+      const slackService = this.moduleRef.get(SlackService, {
+        strict: false,
+      });
+      const permalink = await slackService.getPermalink(
+        channelId,
+        threadTs,
+      );
+      if (permalink) {
+        return permalink;
+      }
+    } catch {
+      // Use constructed fallback URL.
+    }
+
+    return fallback;
+  }
+
+  private buildFallbackSlackThreadUrl(
+    channelId: string,
+    threadTs: string,
+    slackWorkspaceId: string,
+    workspaceName?: string | null,
+  ): string | null {
+    if (slackWorkspaceId && !slackWorkspaceId.startsWith('T0000')) {
+      return buildSlackThreadUrl(
+        slackWorkspaceId,
+        channelId,
+        threadTs,
+      );
+    }
+
+    const domain = workspaceName
+      ?.toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+
+    if (domain && domain.length > 2) {
+      return buildSlackArchiveUrl(domain, channelId, threadTs);
+    }
+
+    return slackWorkspaceId
+      ? buildSlackThreadUrl(slackWorkspaceId, channelId, threadTs)
+      : null;
   }
 }

@@ -1,0 +1,24 @@
+-- AlterEnum
+ALTER TYPE "QuestionType" ADD VALUE IF NOT EXISTS 'NUMERICAL';
+
+-- AlterTable CheckIn
+ALTER TABLE "CheckIn" ADD COLUMN IF NOT EXISTS "introMessage" TEXT;
+ALTER TABLE "CheckIn" ADD COLUMN IF NOT EXISTS "outroMessage" TEXT;
+ALTER TABLE "CheckIn" ADD COLUMN IF NOT EXISTS "collectionChannelId" TEXT;
+ALTER TABLE "CheckIn" ADD COLUMN IF NOT EXISTS "reminderRecurringEnabled" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "CheckIn" ADD COLUMN IF NOT EXISTS "reminderIntervalMinutes" INTEGER;
+ALTER TABLE "CheckIn" ADD COLUMN IF NOT EXISTS "reminderOnlyNonResponders" BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE "CheckIn" ADD COLUMN IF NOT EXISTS "reminderOnSlackActive" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "CheckIn" ADD COLUMN IF NOT EXISTS "reportTriggerMode" TEXT NOT NULL DEFAULT 'scheduled';
+ALTER TABLE "CheckIn" ADD COLUMN IF NOT EXISTS "reportTimeoutMinutes" INTEGER;
+
+-- AlterTable StandupRun
+ALTER TABLE "StandupRun" ADD COLUMN IF NOT EXISTS "reminderCount" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "StandupRun" ADD COLUMN IF NOT EXISTS "lastReminderAt" TIMESTAMP(3);
+ALTER TABLE "StandupRun" ADD COLUMN IF NOT EXISTS "slackChannelId" TEXT;
+ALTER TABLE "StandupRun" ADD COLUMN IF NOT EXISTS "slackThreadTs" TEXT;
+ALTER TABLE "StandupRun" ADD COLUMN IF NOT EXISTS "reportDueAt" TIMESTAMP(3);
+ALTER TABLE "StandupRun" ADD COLUMN IF NOT EXISTS "reportGeneratedAt" TIMESTAMP(3);
+
+CREATE INDEX IF NOT EXISTS "StandupRun_slackThreadTs_idx" ON "StandupRun"("slackThreadTs");
+CREATE INDEX IF NOT EXISTS "StandupRun_reportDueAt_idx" ON "StandupRun"("reportDueAt");

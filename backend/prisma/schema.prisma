@@ -9,6 +9,7 @@ datasource db {
 
 enum QuestionType {
   FREE_TEXT
+  NUMERICAL
   YES_NO
   YES_NO_MAYBE
   MULTIPLE_CHOICE
@@ -41,6 +42,7 @@ model User {
   answers            Answer[]
   submissions        StandupSubmission[]
   conversationStates ConversationState[]
+  threadUpdates      StandupThreadUpdate[]
 }
 
 model Team {
@@ -85,16 +87,27 @@ model CheckIn {
   teamId      String
   name        String
   description String?
+  introMessage String?
+  outroMessage String?
   enabled     Boolean @default(true)
 
   timezone       String
   collectionCron String
+  updatesChannelId String?
 
-  reminderEnabled      Boolean @default(true)
-  reminderMinutesAfter Int     @default(30)
+  reminderEnabled           Boolean @default(true)
+  reminderMinutesAfter      Int     @default(30)
+  reminderRecurringEnabled  Boolean @default(false)
+  reminderIntervalMinutes   Int?
+  reminderOnlyNonResponders Boolean @default(true)
+  reminderOnSlackActive     Boolean @default(false)
 
-  reportCron      String?
-  reportChannelId String?
+  reportCron           String?
+  reportTriggerMode    String  @default("scheduled")
+  reportTimeoutMinutes Int?
+
+  publishStatus   String  @default("published")
+  scheduleEnabled Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -157,6 +170,15 @@ model StandupRun {
 
   reminderDueAt  DateTime?
   reminderSentAt DateTime?
+  reminderCount  Int       @default(0)
+  lastReminderAt DateTime?
+
+  slackChannelId  String?
+  slackThreadTs   String?
+  threadReplyCount Int @default(0)
+
+  reportDueAt       DateTime?
+  reportGeneratedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -165,6 +187,7 @@ model StandupRun {
   checkIn     CheckIn?            @relation(fields: [checkInId], references: [id])
   submissions StandupSubmission[]
   aiDigests   AiDigest[]
+  threadUpdates StandupThreadUpdate[]
 
   @@unique([checkInId, scheduledFor])
   @@index([teamId])
@@ -182,6 +205,7 @@ model StandupSubmission {
   status      String   @default("pending")
   startedAt   DateTime?
   completedAt DateTime?
+  slackDmChannelId String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -189,6 +213,7 @@ model StandupSubmission {
   user              User               @relation(fields: [userId], references: [id])
   answers           Answer[]
   conversationState ConversationState?
+  threadUpdates     StandupThreadUpdate[]
 
   @@unique([runId, userId])
   @@index([runId])
@@ -250,6 +275,25 @@ model AiDigest {
 
   @@index([teamId])
   @@index([runId])
+}
+
+model StandupThreadUpdate {
+  id             String   @id @default(uuid())
+  runId          String
+  submissionId   String?
+  userId         String
+  type           String
+  slackMessageTs String?
+  content        String
+  createdAt      DateTime @default(now())
+
+  run        StandupRun         @relation(fields: [runId], references: [id], onDelete: Cascade)
+  submission StandupSubmission? @relation(fields: [submissionId], references: [id], onDelete: SetNull)
+  user       User               @relation(fields: [userId], references: [id])
+
+  @@index([runId])
+  @@index([submissionId])
+  @@index([userId])
 }
 
 model InboundEvent {

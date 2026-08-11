@@ -4,6 +4,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import {
   Prisma,
   QuestionType,
@@ -15,6 +16,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { QuestionPayloadDto } from '../slack/dto/question-payload.dto';
 import { CollectionGateway } from '../slack/interfaces/collection.gateway';
+import { SchedulerService } from '../scheduler/scheduler.service';
 
 export type AppHomeSummary = {
   activeQuestionCount: number;
@@ -38,6 +40,7 @@ export class CollectionService
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly moduleRef: ModuleRef,
   ) {}
 
   private async getOrCreateUser(
@@ -507,6 +510,21 @@ export class CollectionService
             value:
               numberValue,
           },
+        };
+      }
+
+      case QuestionType.NUMERICAL: {
+        const numberValue = Number(trimmed);
+
+        if (Number.isNaN(numberValue)) {
+          throw new BadRequestException(
+            'Please answer with a valid number.',
+          );
+        }
+
+        return {
+          text: trimmed,
+          structuredValue: { value: numberValue },
         };
       }
 
@@ -1011,7 +1029,7 @@ export class CollectionService
 
   async finishConversation(
     userIdentifier: string,
-  ): Promise<void> {
+  ): Promise<string | null> {
     const user =
       await this.getOrCreateUser(
         userIdentifier,
@@ -1028,9 +1046,13 @@ export class CollectionService
       );
     }
 
+    const submissionId = session.submissionId;
+
     await this.finishConversationState(
       session.id,
     );
+
+    return submissionId;
   }
 
   private async finishConversationState(
@@ -1111,11 +1133,11 @@ export class CollectionService
       incompleteSubmissionCount ===
       0
     ) {
+      const runId = session.submission.runId;
+
       await this.prisma.standupRun.update({
         where: {
-          id:
-            session.submission
-              .runId,
+          id: runId,
         },
 
         data: {
@@ -1125,7 +1147,92 @@ export class CollectionService
           completedAt,
         },
       });
+
+      await this.maybeTriggerReportForCompletedRun(runId);
     }
+  }
+
+  private async maybeTriggerReportForCompletedRun(runId: string): Promise<void> {
+    try {
+      const run = await this.prisma.standupRun.findUnique({
+        where: { id: runId },
+        include: {
+          checkIn: {
+            select: {
+              id: true,
+              reportTriggerMode: true,
+            },
+          },
+        },
+      });
+
+      if (
+        !run?.checkIn ||
+        run.checkIn.reportTriggerMode !== 'all_answered' ||
+        run.reportGeneratedAt
+      ) {
+        return;
+      }
+
+      const schedulerService = this.moduleRef.get(SchedulerService, { strict: false });
+
+      await schedulerService.runCheckInDigest(run.checkIn.id, runId);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to trigger report for run ${runId}: ${message}`);
+    }
+  }
+
+  async getCurrentQuestionForThread(
+    slackUserId: string,
+    threadTs: string,
+  ): Promise<QuestionPayloadDto | null> {
+    const user = await this.getOrCreateUser(slackUserId);
+
+    const run = await this.prisma.standupRun.findFirst({
+      where: {
+        slackThreadTs: threadTs,
+        status: { not: 'completed' },
+      },
+    });
+
+    if (!run) {
+      return null;
+    }
+
+    const session = await this.prisma.conversationState.findFirst({
+      where: {
+        userId: user.id,
+        isCompleted: false,
+        submission: { runId: run.id },
+      },
+      include: {
+        submission: { include: { run: true } },
+      },
+    });
+
+    if (!session?.submission) {
+      return null;
+    }
+
+    if (!session.currentQuestionId) {
+      return this.getNextQuestion(slackUserId);
+    }
+
+    const activeQuestions = await this.getQuestionsForConversation(run.checkInId);
+    const questionIndex = activeQuestions.findIndex(
+      (q) => q.id === session.currentQuestionId,
+    );
+
+    if (questionIndex === -1) {
+      return this.getNextQuestion(slackUserId);
+    }
+
+    return this.toQuestionPayload(
+      activeQuestions[questionIndex],
+      questionIndex + 1,
+      activeQuestions.length,
+    );
   }
 
   async getCurrentQuestion(
@@ -1870,12 +1977,37 @@ export class CollectionService
       );
   }
 
+  async setSubmissionDmChannel(submissionId: string, dmChannelId: string): Promise<void> {
+    await this.prisma.standupSubmission.update({
+      where: { id: submissionId },
+      data: { slackDmChannelId: dmChannelId },
+    });
+  }
+
+  async getActiveCheckInConfigForUser(slackUserId: string) {
+    const user = await this.getOrCreateUser(slackUserId);
+    const session = await this.getActiveConversationState(user.id);
+    const checkInId = session?.submission?.run?.checkInId;
+    if (!checkInId) return null;
+
+    return this.prisma.checkIn.findUnique({
+      where: { id: checkInId },
+      select: {
+        id: true,
+        name: true,
+        introMessage: true,
+        outroMessage: true,
+      },
+    });
+  }
+
   async getPendingRunMembers(
     runId: string,
   ): Promise<
     Array<{
       userId: string;
       name: string;
+      dmChannelId: string | null;
       currentQuestion:
         QuestionPayloadDto | null;
     }>
@@ -1924,22 +2056,12 @@ export class CollectionService
             ?.currentQuestion;
 
         return {
-          userId:
-            submission.user
-              .slackUserId,
-
-          name:
-            submission.user
-              .slackDisplayName ||
-            submission.user
-              .slackUserId,
-
+          userId: submission.user.slackUserId,
+          name: submission.user.slackDisplayName || submission.user.slackUserId,
+          dmChannelId: submission.slackDmChannelId,
           currentQuestion:
-            question &&
-            question.isActive
-              ? this.toQuestionPayload(
-                  question,
-                )
+            question && question.isActive
+              ? this.toQuestionPayload(question)
               : null,
         };
       },

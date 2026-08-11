@@ -3,4 +3,5 @@ export class IncomingMessageDto {
   channelId: string;
   message: string;
   timestamp: string;
+  threadTs?: string;
 }

@@ -6,6 +6,7 @@ import { QuestionsModule } from './questions/questions.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { TeamModule } from './team/team.module';
 import { CheckInModule } from './check-in/check-in.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { CheckInModule } from './check-in/check-in.module';
     SchedulerModule,
     TeamModule,
     CheckInModule,
+    AdminModule,
   ],
   controllers: [],
   providers: [],

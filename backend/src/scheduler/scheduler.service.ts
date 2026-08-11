@@ -16,6 +16,7 @@ import { CollectionService } from '../collection/collection.service';
 import { DigestService } from '../digest/digest.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportsService } from '../reports/reports.service';
+import { CheckInThreadService } from '../slack/check-in-thread.service';
 import { SlackGateway } from '../slack/slack.gateway';
 import { SlackService } from '../slack/slack.service';
 
@@ -57,6 +58,7 @@ export class SchedulerService
     private readonly aiService: AiService,
     private readonly reportsService: ReportsService,
     private readonly checkInRunService: CheckInRunService,
+    private readonly checkInThreadService: CheckInThreadService,
   ) {}
 
   // =========================================================
@@ -192,6 +194,8 @@ export class SchedulerService
       await this.prisma.checkIn.findMany({
         where: {
           enabled: true,
+          publishStatus: 'published',
+          scheduleEnabled: true,
         },
 
         include: {
@@ -311,6 +315,10 @@ export class SchedulerService
   private async startScheduledCheckIn(
     checkInId: string,
   ): Promise<void> {
+    this.logger.log(
+      `[Scheduler] CheckIn collection triggered for ${checkInId}`,
+    );
+
     const scheduledFor =
       new Date();
 
@@ -326,121 +334,45 @@ export class SchedulerService
         'scheduler',
       );
 
-    if (
-      result.status !==
-        'created' ||
-      !result.run
-    ) {
-      this.logger.warn(
-        `CheckIn ${checkInId} already exists for ${scheduledFor.toISOString()}. Duplicate Slack delivery skipped.`,
-      );
-
-      return;
-    }
-
-    /*
-     * A run can contain zero submissions when every
-     * participant already has another active conversation.
-     *
-     * CheckInRunService marks that run completed.
-     */
-    if (
-      result.run.submissions.length ===
-      0
-    ) {
-      this.logger.log(
-        `CheckIn "${result.checkInName}" created run ${result.run.id} with no eligible submissions.`,
-      );
-
-      return;
-    }
-
-    let deliveredCount = 0;
-
-    const failedSlackUserIds:
-      string[] = [];
-
-    for (
-      const submission
-      of result.run.submissions
-    ) {
-      const slackUserId =
-        submission.user.slackUserId;
-
-      const currentQuestion =
-        submission
-          .conversationState
-          ?.currentQuestion;
-
-      if (
-        !slackUserId ||
-        !currentQuestion
-      ) {
-        if (slackUserId) {
-          failedSlackUserIds.push(
-            slackUserId,
-          );
-        }
-
-        continue;
-      }
-
-      const dmChannelId =
-        await this.slackService.openDirectMessage(
-          slackUserId,
-        );
-
-      if (!dmChannelId) {
-        failedSlackUserIds.push(
-          slackUserId,
-        );
-
-        continue;
-      }
-
-      const delivered =
-        await this.slackService.sendMessage({
-          channelId:
-            dmChannelId,
-
-          text:
-            `*${result.checkInName} — ${result.teamName}*\n` +
-            `${currentQuestion.question}\n\n` +
-            '_Reply directly to continue this check-in._',
-        });
-
-      if (delivered) {
-        deliveredCount += 1;
-      } else {
-        failedSlackUserIds.push(
-          slackUserId,
-        );
-      }
-    }
-
     this.logger.log(
-      `CheckIn "${result.checkInName}" started as run ${result.run.id}. Delivered ${deliveredCount}/${result.run.submissions.length} message(s).`,
+      `[Scheduler] startCheckInRun status=${result.status} checkIn="${result.checkInName}" submissions=${result.run?.submissions?.length ?? 0} skipped=${result.skippedParticipantCount ?? 0}`,
     );
 
-    if (
-      failedSlackUserIds.length >
-      0
-    ) {
+    if (!result.run) {
       this.logger.warn(
-        `Run ${result.run.id} failed Slack delivery for ${failedSlackUserIds.length} participant(s).`,
+        `[Scheduler] No run returned for CheckIn ${checkInId} — nothing to deliver.`,
       );
+      return;
     }
 
-    /*
-     * IMPORTANT:
-     *
-     * Do not initialize reminderDueAt here.
-     *
-     * CheckInRunService already created the durable reminder
-     * state when the run was created. This ensures manual,
-     * scheduled, and future trigger sources use the same
-     * lifecycle.
-     */
+    await this.checkInThreadService.createRunThread(result.run.id);
+
+    if (result.run.submissions.length === 0) {
+      this.logger.log(
+        `[Scheduler] CheckIn "${result.checkInName}" run ${result.run.id} has no eligible submissions.`,
+      );
+      return;
+    }
+
+    const checkInConfig = await this.prisma.checkIn.findUnique({
+      where: { id: checkInId },
+      select: { introMessage: true },
+    });
+
+    const delivery = await this.slackGateway.deliverCheckInRun(
+      result,
+      checkInConfig?.introMessage,
+    );
+
+    this.logger.log(
+      `[Scheduler] DM delivery for "${result.checkInName}": ${delivery.delivered} sent, ${delivery.failed} failed, ${delivery.skipped} skipped`,
+    );
+
+    if (delivery.failed > 0) {
+      this.logger.error(
+        `[Scheduler] ${delivery.failed} participant(s) did not receive a DM for CheckIn "${result.checkInName}". Check Slack token, scopes (chat:write, im:write), and bot installation.`,
+      );
+    }
   }
 
   // =========================================================
@@ -728,37 +660,26 @@ export class SchedulerService
       of pendingMembers
     ) {
       const dmChannelId =
-        await this.slackService.openDirectMessage(
-          member.userId,
-        );
+        member.dmChannelId ||
+        (await this.slackService.openDirectMessage(member.userId));
 
       if (!dmChannelId) {
         failedCount += 1;
-
         continue;
       }
 
       const questionText =
-        member.currentQuestion
-          ?.text ||
+        member.currentQuestion?.text ||
         'Please complete your check-in.';
 
-      const delivered =
-        await this.slackService.sendMessage({
-          channelId:
-            dmChannelId,
+      await this.slackGateway.sendStandupReminder(
+        member.userId,
+        dmChannelId,
+        run.checkIn.name,
+        questionText,
+      );
 
-          text:
-            `*Reminder — ${run.checkIn.name}*\n` +
-            `${questionText}\n\n` +
-            '_Reply directly to continue your check-in._',
-        });
-
-      if (delivered) {
-        deliveredCount += 1;
-      } else {
-        failedCount += 1;
-      }
+      deliveredCount += 1;
     }
 
     this.logger.log(
@@ -797,6 +718,7 @@ export class SchedulerService
 
   async runCheckInDigest(
     checkInId: string,
+    runId?: string,
   ): Promise<TeamDigestResult> {
     const checkIn =
       await this.prisma.checkIn.findUnique({
@@ -834,43 +756,38 @@ export class SchedulerService
      * We intentionally do not use the old
      * "latest completed answer per user" reporting path.
      */
-    const run =
-      await this.prisma.standupRun.findFirst({
-        where: {
-          checkInId:
-            checkIn.id,
-        },
-
-        orderBy: {
-          scheduledFor:
-            'desc',
-        },
-
-        include: {
-          submissions: {
-            where: {
-              status:
-                'completed',
-            },
-
-            include: {
-              user: true,
-
-              answers: {
-                include: {
-                  question:
-                    true,
-                },
-
-                orderBy: {
-                  createdAt:
-                    'asc',
+    const run = runId
+      ? await this.prisma.standupRun.findUnique({
+          where: { id: runId },
+          include: {
+            submissions: {
+              where: { status: 'completed' },
+              include: {
+                user: true,
+                answers: {
+                  include: { question: true },
+                  orderBy: { createdAt: 'asc' },
                 },
               },
             },
           },
-        },
-      });
+        })
+      : await this.prisma.standupRun.findFirst({
+          where: { checkInId: checkIn.id },
+          orderBy: { scheduledFor: 'desc' },
+          include: {
+            submissions: {
+              where: { status: 'completed' },
+              include: {
+                user: true,
+                answers: {
+                  include: { question: true },
+                  orderBy: { createdAt: 'asc' },
+                },
+              },
+            },
+          },
+        });
 
     if (!run) {
       return {
@@ -1008,34 +925,26 @@ export class SchedulerService
       }
     }
 
-    const channelId =
-      checkIn.reportChannelId?.trim() ||
-      checkIn.team.slackChannelId?.trim();
+    if (!run.slackChannelId || !run.slackThreadTs) {
+      await this.checkInThreadService.createRunThread(run.id);
+      const refreshed = await this.prisma.standupRun.findUnique({
+        where: { id: run.id },
+        select: { slackChannelId: true, slackThreadTs: true },
+      });
+      run.slackChannelId = refreshed?.slackChannelId ?? run.slackChannelId;
+      run.slackThreadTs = refreshed?.slackThreadTs ?? run.slackThreadTs;
+    }
 
-    if (!channelId) {
+    if (!run.slackChannelId || !run.slackThreadTs) {
       return {
-        teamId:
-          checkIn.team.id,
-
-        teamName:
-          checkIn.team.name,
-
-        status:
-          'partial_success',
-
-        responseCount:
-          responses.length,
-
+        teamId: checkIn.team.id,
+        teamName: checkIn.team.name,
+        status: 'partial_success',
+        responseCount: responses.length,
         digest,
-
-        slackDelivered:
-          false,
-
-        slackError:
-          'No report Slack channel is configured.',
-
-        generatedAt:
-          new Date().toISOString(),
+        slackDelivered: false,
+        slackError: 'CheckIn run has no Slack thread — configure updatesChannelId or SLACK_UPDATES_CHANNEL_ID.',
+        generatedAt: new Date().toISOString(),
       };
     }
 
@@ -1113,19 +1022,11 @@ export class SchedulerService
         : undefined;
 
     const slackDelivered =
-      await this.slackService.sendMessage({
-        channelId,
-
-        text:
-          `*${checkIn.name} — ${checkIn.team.name}*\n\n${digest}`,
-
-        ...(digestBlocks
-          ? {
-              blocks:
-                digestBlocks,
-            }
-          : {}),
-      });
+      await this.checkInThreadService.postAiReportToThread(
+        run.id,
+        digest,
+        digestBlocks,
+      );
 
     return {
       teamId:
@@ -1399,6 +1300,8 @@ export class SchedulerService
         await this.slackGateway.sendStandupReminder(
           member.id,
           dmChannelId,
+          'Daily Standup',
+          'Please complete your check-in when you have a moment.',
         );
 
         reminderCount +=

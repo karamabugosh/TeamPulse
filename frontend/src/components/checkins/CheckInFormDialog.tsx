@@ -1,0 +1,413 @@
+import React, { useEffect, useState } from 'react';
+import { CheckCircle, Loader2, Play } from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import { Switch } from '@/components/ui/switch';
+import { Card, CardContent } from '@/components/ui/card';
+import { QuestionBuilder, QuestionItem } from './QuestionBuilder';
+import { ScheduleBuilder } from './ScheduleBuilder';
+import { ParticipantPicker } from './ParticipantPicker';
+import { parseCronToSchedule, scheduleToCron, ScheduleConfig, TIMEZONE_OPTIONS } from '@/lib/schedule';
+import { apiFetch, ApiError } from '@/lib/api';
+import { useToast } from '@/hooks/use-toast';
+
+export type CheckInFormState = {
+  teamId: string;
+  name: string;
+  description: string;
+  introMessage: string;
+  outroMessage: string;
+  timezone: string;
+  collectionCron: string;
+  updatesChannelId: string;
+  reminderEnabled: boolean;
+  reminderMinutesAfter: number;
+  reminderRecurringEnabled: boolean;
+  reminderIntervalMinutes: number;
+  reminderOnlyNonResponders: boolean;
+  reminderOnSlackActive: boolean;
+  reportTriggerMode: 'scheduled' | 'all_answered' | 'timeout';
+  reportCron: string;
+  reportTimeoutMinutes: number;
+  publishStatus: 'draft' | 'published';
+  scheduleEnabled: boolean;
+  enabled: boolean;
+  participantIds: string[];
+  questions: QuestionItem[];
+};
+
+const DEFAULT_QUESTIONS: QuestionItem[] = [
+  { id: 'q1', question: 'What did you accomplish yesterday?', type: 'FREE_TEXT', isRequired: true, order: 1 },
+  { id: 'q2', question: 'What will you work on today?', type: 'FREE_TEXT', isRequired: true, order: 2 },
+  { id: 'q3', question: 'Are there any blockers in your way?', type: 'YES_NO', isRequired: true, order: 3 },
+];
+
+const defaultFormState = (): CheckInFormState => ({
+  teamId: '',
+  name: '',
+  description: '',
+  introMessage: "👋 Good morning!\n\nIt's time for your Daily Standup.\n\nLet's get started.",
+  outroMessage: 'Perfect! Your responses have been recorded successfully. ✅',
+  timezone: 'Asia/Hebron',
+  collectionCron: '40 12 * * 1-5',
+  updatesChannelId: '',
+  reminderEnabled: true,
+  reminderMinutesAfter: 30,
+  reminderRecurringEnabled: false,
+  reminderIntervalMinutes: 60,
+  reminderOnlyNonResponders: true,
+  reminderOnSlackActive: false,
+  reportTriggerMode: 'scheduled',
+  reportCron: '0 13 * * 1-5',
+  reportTimeoutMinutes: 120,
+  publishStatus: 'published',
+  scheduleEnabled: true,
+  enabled: true,
+  participantIds: [],
+  questions: [...DEFAULT_QUESTIONS],
+});
+
+interface CheckInFormDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  editingCheckIn?: any | null;
+  teams: any[];
+  onSaved: (saved?: any) => void;
+}
+
+export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
+  open,
+  onOpenChange,
+  editingCheckIn,
+  teams,
+  onSaved,
+}) => {
+  const { toast } = useToast();
+  const [form, setForm] = useState<CheckInFormState>(defaultFormState());
+  const [schedule, setSchedule] = useState<ScheduleConfig>(parseCronToSchedule('0 9 * * 1-5'));
+  const [reportSchedule, setReportSchedule] = useState<ScheduleConfig>(parseCronToSchedule('30 9 * * 1-5'));
+  const [saving, setSaving] = useState(false);
+  const [startingRun, setStartingRun] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+
+    if (editingCheckIn) {
+      setForm({
+        teamId: editingCheckIn.teamId,
+        name: editingCheckIn.name,
+        description: editingCheckIn.description || '',
+        introMessage: editingCheckIn.introMessage || '',
+        outroMessage: editingCheckIn.outroMessage || '',
+        timezone: editingCheckIn.timezone || 'Asia/Riyadh',
+        collectionCron: editingCheckIn.collectionCron || '0 9 * * 1-5',
+        updatesChannelId: editingCheckIn.updatesChannelId || '',
+        reminderEnabled: editingCheckIn.reminderEnabled ?? true,
+        reminderMinutesAfter: editingCheckIn.reminderMinutesAfter ?? 30,
+        reminderRecurringEnabled: editingCheckIn.reminderRecurringEnabled ?? false,
+        reminderIntervalMinutes: editingCheckIn.reminderIntervalMinutes ?? 60,
+        reminderOnlyNonResponders: editingCheckIn.reminderOnlyNonResponders ?? true,
+        reminderOnSlackActive: editingCheckIn.reminderOnSlackActive ?? false,
+        reportTriggerMode: editingCheckIn.reportTriggerMode || 'scheduled',
+        reportCron: editingCheckIn.reportCron || '30 9 * * 1-5',
+        reportTimeoutMinutes: editingCheckIn.reportTimeoutMinutes ?? 120,
+        publishStatus: editingCheckIn.publishStatus || 'published',
+        scheduleEnabled: editingCheckIn.scheduleEnabled ?? true,
+        enabled: editingCheckIn.enabled ?? true,
+        participantIds: (editingCheckIn.participants || []).map((p: any) => p.teamMemberId),
+        questions: editingCheckIn.questions?.length
+          ? editingCheckIn.questions.map((q: any) => ({
+              id: q.id,
+              question: q.question,
+              type: q.type || 'FREE_TEXT',
+              options: q.options || [],
+              isRequired: q.isRequired ?? true,
+              order: q.order,
+            }))
+          : [...DEFAULT_QUESTIONS],
+      });
+      setSchedule(parseCronToSchedule(editingCheckIn.collectionCron || '0 9 * * 1-5'));
+      setReportSchedule(parseCronToSchedule(editingCheckIn.reportCron || '30 9 * * 1-5'));
+    } else {
+      const firstTeam = teams[0]?.id || '';
+      setForm({ ...defaultFormState(), teamId: firstTeam });
+      setSchedule(parseCronToSchedule('0 9 * * 1-5'));
+      setReportSchedule(parseCronToSchedule('30 9 * * 1-5'));
+    }
+  }, [open, editingCheckIn, teams]);
+
+  useEffect(() => {
+    setForm((f) => ({ ...f, collectionCron: scheduleToCron(schedule) }));
+  }, [schedule]);
+
+  useEffect(() => {
+    setForm((f) => ({ ...f, reportCron: scheduleToCron(reportSchedule) }));
+  }, [reportSchedule]);
+
+  const update = <K extends keyof CheckInFormState>(key: K, value: CheckInFormState[K]) => {
+    setForm((f) => ({ ...f, [key]: value }));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+
+    const payload = {
+      ...form,
+      updatesChannelId: form.updatesChannelId.trim() || null,
+      questions: form.questions.map((q, idx) => ({
+        question: q.question,
+        type: q.type,
+        options: q.type === 'MULTIPLE_CHOICE' ? q.options : undefined,
+        isRequired: q.isRequired,
+        order: idx + 1,
+      })),
+    };
+
+    try {
+      const url = editingCheckIn ? `/api/check-ins/${editingCheckIn.id}` : '/api/check-ins';
+      const method = editingCheckIn ? 'PATCH' : 'POST';
+      const saved = await apiFetch<any>(url, {
+        method,
+        body: JSON.stringify(payload),
+      });
+
+      toast({
+        title: editingCheckIn ? 'CheckIn updated' : 'CheckIn created',
+        description: editingCheckIn
+          ? `"${saved.name}" saved. Scheduler refreshed if schedule changed.`
+          : `"${saved.name}" was created successfully.`,
+        variant: 'success',
+      });
+
+      onOpenChange(false);
+      onSaved(saved);
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : 'Failed to save CheckIn';
+      toast({ title: 'Save failed', description: message, variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleStartRun = async () => {
+    if (!editingCheckIn?.id) return;
+    setStartingRun(true);
+    try {
+      const result = await apiFetch<any>(`/api/check-ins/${editingCheckIn.id}/runs`, { method: 'POST' });
+      const delivery = result.delivery;
+      toast({
+        title: 'CheckIn run started',
+        description: delivery
+          ? `${delivery.delivered ?? 0} DM(s) sent${delivery.failed ? `, ${delivery.failed} failed` : ''}.`
+          : 'Run created successfully.',
+        variant: delivery?.failed > 0 && !delivery?.delivered ? 'destructive' : 'success',
+      });
+      onSaved();
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : 'Failed to start run';
+      toast({ title: 'Run failed', description: message, variant: 'destructive' });
+    } finally {
+      setStartingRun(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{editingCheckIn ? 'Edit CheckIn' : 'Create CheckIn'}</DialogTitle>
+          <DialogDescription>
+            Configure participants, questions, schedule, reminders, and report settings.
+          </DialogDescription>
+        </DialogHeader>
+
+        <form onSubmit={handleSubmit}>
+          <Tabs defaultValue="general" className="w-full">
+            <TabsList className="mb-6 grid w-full grid-cols-3 lg:grid-cols-6">
+              <TabsTrigger value="general">General</TabsTrigger>
+              <TabsTrigger value="questions">Questions</TabsTrigger>
+              <TabsTrigger value="schedule">Schedule</TabsTrigger>
+              <TabsTrigger value="reminders">Reminders</TabsTrigger>
+              <TabsTrigger value="reports">Reports</TabsTrigger>
+              <TabsTrigger value="participants">Participants</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="general" className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Team *</Label>
+                  <select
+                    required
+                    value={form.teamId}
+                    onChange={(e) => update('teamId', e.target.value)}
+                    className="flex h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
+                  >
+                    <option value="">Select team...</option>
+                    {teams.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <Label>CheckIn Name *</Label>
+                  <Input required value={form.name} onChange={(e) => update('name', e.target.value)} placeholder="Daily Engineering Standup" />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Description</Label>
+                <Textarea value={form.description} onChange={(e) => update('description', e.target.value)} rows={2} />
+              </div>
+              <div className="space-y-2">
+                <Label>Intro Message (DM)</Label>
+                <Textarea value={form.introMessage} onChange={(e) => update('introMessage', e.target.value)} rows={3} placeholder="First message sent in the participant's DM" />
+              </div>
+              <div className="space-y-2">
+                <Label>Outro Message (DM)</Label>
+                <Textarea value={form.outroMessage} onChange={(e) => update('outroMessage', e.target.value)} rows={2} placeholder="Sent after all questions are answered" />
+              </div>
+              <div className="space-y-2">
+                <Label>Slack Updates Channel ID (optional)</Label>
+                <Input value={form.updatesChannelId} onChange={(e) => update('updatesChannelId', e.target.value)} className="font-mono" placeholder="Channel for standup parent message & thread" />
+                <p className="text-xs text-muted-foreground">Reports and participant updates are posted inside this thread. Falls back to team channel or SLACK_UPDATES_CHANNEL_ID.</p>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="questions">
+              <QuestionBuilder questions={form.questions} onChange={(q) => update('questions', q)} />
+            </TabsContent>
+
+            <TabsContent value="schedule" className="space-y-6">
+              <div className="space-y-2">
+                <Label>Timezone</Label>
+                <select value={form.timezone} onChange={(e) => update('timezone', e.target.value)} className="flex h-10 w-full rounded-lg border border-input bg-background px-3 text-sm">
+                  {TIMEZONE_OPTIONS.map((tz) => (
+                    <option key={tz.value} value={tz.value}>{tz.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-border p-4">
+                <div>
+                  <Label>Enable Scheduling</Label>
+                  <p className="text-xs text-muted-foreground">Automatically send DMs at scheduled time</p>
+                </div>
+                <Switch checked={form.scheduleEnabled} onCheckedChange={(v) => update('scheduleEnabled', v)} />
+              </div>
+              <ScheduleBuilder value={schedule} onChange={setSchedule} cronPreview={form.collectionCron} timezone={form.timezone} />
+            </TabsContent>
+
+            <TabsContent value="reminders" className="space-y-6">
+              <Card>
+                <CardContent className="space-y-4 p-6">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label>Enable Reminders</Label>
+                      <p className="text-xs text-muted-foreground">Send reminders to participants who haven't responded</p>
+                    </div>
+                    <Switch checked={form.reminderEnabled} onCheckedChange={(v) => update('reminderEnabled', v)} />
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label>Minutes After Start</Label>
+                      <Input type="number" min={0} value={form.reminderMinutesAfter} onChange={(e) => update('reminderMinutesAfter', Number(e.target.value))} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Recurring Interval (minutes)</Label>
+                      <Input type="number" min={0} value={form.reminderIntervalMinutes} onChange={(e) => update('reminderIntervalMinutes', Number(e.target.value))} disabled={!form.reminderRecurringEnabled} />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <Label>Recurring Reminders</Label>
+                    <Switch checked={form.reminderRecurringEnabled} onCheckedChange={(v) => update('reminderRecurringEnabled', v)} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <Label>Only Non-Responders</Label>
+                    <Switch checked={form.reminderOnlyNonResponders} onCheckedChange={(v) => update('reminderOnlyNonResponders', v)} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label>Remind on Slack Activity</Label>
+                      <p className="text-xs text-muted-foreground">Send reminder when user becomes active on Slack</p>
+                    </div>
+                    <Switch checked={form.reminderOnSlackActive} onCheckedChange={(v) => update('reminderOnSlackActive', v)} />
+                  </div>
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="reports" className="space-y-6">
+              <div className="space-y-2">
+                <Label>Report Trigger</Label>
+                <select value={form.reportTriggerMode} onChange={(e) => update('reportTriggerMode', e.target.value as any)} className="flex h-10 w-full rounded-lg border border-input bg-background px-3 text-sm">
+                  <option value="scheduled">Scheduled time</option>
+                  <option value="all_answered">After everyone answered</option>
+                  <option value="timeout">After timeout</option>
+                </select>
+              </div>
+              {form.reportTriggerMode === 'scheduled' && (
+                <ScheduleBuilder value={reportSchedule} onChange={setReportSchedule} cronPreview={form.reportCron} />
+              )}
+              {form.reportTriggerMode === 'timeout' && (
+                <div className="space-y-2">
+                  <Label>Timeout (minutes after start)</Label>
+                  <Input type="number" min={1} value={form.reportTimeoutMinutes} onChange={(e) => update('reportTimeoutMinutes', Number(e.target.value))} />
+                </div>
+              )}
+              <p className="text-sm text-muted-foreground rounded-lg border border-border p-4">
+                AI reports are posted inside the CheckIn Slack thread — no separate report channel is needed.
+              </p>
+            </TabsContent>
+
+            <TabsContent value="participants">
+              {form.teamId ? (
+                <ParticipantPicker teamId={form.teamId} selectedIds={form.participantIds} onChange={(ids) => update('participantIds', ids)} />
+              ) : (
+                <p className="text-sm text-muted-foreground">Select a team first to choose participants.</p>
+              )}
+            </TabsContent>
+          </Tabs>
+
+          <DialogFooter className="mt-6 gap-2">
+            <div className="mr-auto flex items-center gap-3">
+              <Label className="text-sm">Status</Label>
+              <select
+                value={form.publishStatus}
+                onChange={(e) => update('publishStatus', e.target.value as 'draft' | 'published')}
+                className="h-9 rounded-lg border border-input bg-background px-3 text-sm"
+              >
+                <option value="draft">Save as Draft</option>
+                <option value="published">Published</option>
+              </select>
+            </div>
+            {editingCheckIn && (
+              <Button type="button" variant="outline" onClick={handleStartRun} disabled={startingRun}>
+                {startingRun ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                Start Run Now
+              </Button>
+            )}
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
+              {saving ? 'Saving...' : editingCheckIn ? 'Save Changes' : 'Create CheckIn'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+export default CheckInFormDialog;

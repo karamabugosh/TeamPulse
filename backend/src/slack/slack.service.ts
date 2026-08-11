@@ -424,11 +424,15 @@ export class SlackService
   ): Promise<string | null> {
     if (!this.webClient) {
       this.logger.error(
-        'Cannot open DM: Slack Web API is not initialized.',
+        'Cannot open DM: Slack Web API is not initialized. Check SLACK_BOT_TOKEN.',
       );
 
       return null;
     }
+
+    this.logger.log(
+      `Opening DM with Slack user ${slackUserId}...`,
+    );
 
     try {
       const result =
@@ -436,15 +440,23 @@ export class SlackService
           users: slackUserId,
         });
 
-      return result.channel?.id || null;
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : String(error);
+      const channelId = result.channel?.id || null;
 
-      this.logger.error(
-        `Failed to open DM channel for user ${slackUserId}: ${message}`,
+      if (channelId) {
+        this.logger.log(
+          `DM channel opened: ${channelId} for user ${slackUserId}`,
+        );
+      } else {
+        this.logger.error(
+          `conversations.open returned no channel for user ${slackUserId}`,
+        );
+      }
+
+      return channelId;
+    } catch (error: unknown) {
+      this.logSlackError(
+        `Failed to open DM channel for user ${slackUserId}`,
+        error,
       );
 
       return null;
@@ -496,6 +508,9 @@ export class SlackService
         await this.webClient.chat.postMessage({
           channel: channelId,
           text,
+          ...(payload.threadTs
+            ? { thread_ts: payload.threadTs }
+            : {}),
           ...(payload.blocks
             ? {
                 blocks: payload.blocks as any,
@@ -504,18 +519,14 @@ export class SlackService
         });
 
         this.logger.log(
-          `Slack message delivered to ${channelId}.`,
+          `Slack message delivered to ${channelId}: "${text.slice(0, 60)}${text.length > 60 ? '…' : ''}"`,
         );
 
         return true;
       } catch (error: unknown) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : String(error);
-
-        this.logger.error(
-          `Slack message attempt ${attempt}/${maxAttempts} failed: ${message}`,
+        this.logSlackError(
+          `Slack message attempt ${attempt}/${maxAttempts} to ${channelId}`,
+          error,
         );
 
         if (attempt === maxAttempts) {
@@ -531,5 +542,106 @@ export class SlackService
     }
 
     return false;
+  }
+
+  /**
+   * Posts a message and returns the Slack message timestamp (thread anchor).
+   */
+  public async postMessage(
+    payload: OutgoingMessageDto,
+  ): Promise<{ ok: boolean; ts?: string }> {
+    if (!this.webClient) {
+      return { ok: false };
+    }
+
+    const channelId = payload.channelId?.trim();
+    const text = payload.text?.trim();
+
+    if (!channelId || !text) {
+      return { ok: false };
+    }
+
+    try {
+      const result = await this.webClient.chat.postMessage({
+        channel: channelId,
+        text,
+        ...(payload.threadTs ? { thread_ts: payload.threadTs } : {}),
+        ...(payload.blocks ? { blocks: payload.blocks as any } : {}),
+      });
+
+      return { ok: true, ts: result.ts as string | undefined };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Slack postMessage failed: ${message}`);
+      return { ok: false };
+    }
+  }
+
+  public async updateMessage(payload: {
+    channelId: string;
+    ts: string;
+    text: string;
+    blocks?: unknown[];
+  }): Promise<boolean> {
+    if (!this.webClient) {
+      this.logger.error('Cannot update message: Slack Web API is not initialized.');
+      return false;
+    }
+
+    try {
+      await this.webClient.chat.update({
+        channel: payload.channelId,
+        ts: payload.ts,
+        text: payload.text,
+        ...(payload.blocks ? { blocks: payload.blocks as any } : {}),
+      });
+      return true;
+    } catch (error: unknown) {
+      this.logSlackError(`Failed to update message ${payload.ts}`, error);
+      return false;
+    }
+  }
+
+  public async getPermalink(
+    channelId: string,
+    messageTs: string,
+  ): Promise<string | null> {
+    if (!this.webClient) {
+      return null;
+    }
+
+    try {
+      const result = await this.webClient.chat.getPermalink({
+        channel: channelId,
+        message_ts: messageTs,
+      });
+
+      return result.permalink ?? null;
+    } catch (error: unknown) {
+      this.logSlackError(
+        `Failed to get permalink for ${channelId}/${messageTs}`,
+        error,
+      );
+      return null;
+    }
+  }
+
+  private logSlackError(context: string, error: unknown): void {
+    const err = error as { message?: string; data?: { error?: string; needed?: string; provided?: string } };
+    const slackError = err?.data?.error;
+    const needed = err?.data?.needed;
+    const provided = err?.data?.provided;
+
+    if (slackError) {
+      this.logger.error(
+        `${context}: Slack API error="${slackError}"` +
+          (needed ? ` needed="${needed}"` : '') +
+          (provided ? ` provided="${provided}"` : ''),
+      );
+      return;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    this.logger.error(`${context}: ${message}`);
   }
 }

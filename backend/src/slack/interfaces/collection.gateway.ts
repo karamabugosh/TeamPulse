@@ -24,7 +24,7 @@ export interface CollectionGateway {
   /**
    * Concludes the conversation.
    */
-  finishConversation(userId: string): Promise<void>;
+  finishConversation(userId: string): Promise<string | null>;
 
   /**
    * Returns the question the user should answer now, if any.
