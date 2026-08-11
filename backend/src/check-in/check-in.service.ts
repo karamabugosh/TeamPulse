@@ -471,125 +471,8 @@ export class CheckInService {
             }
           }
 
-          /*
-           * Replace current question configuration while
-           * preserving questions that already have answers.
-           *
-           * Answered questions are disabled rather than deleted
-           * so historical runs continue to reference valid rows.
-           */
-          if (
-            dto.questions !== undefined
-          ) {
-            const existingQuestions =
-              await tx.question.findMany({
-                where: {
-                  checkInId:
-                    id,
-                },
-
-                include: {
-                  _count: {
-                    select: {
-                      answers:
-                        true,
-                    },
-                  },
-                },
-              });
-
-            const deletableQuestionIds =
-              existingQuestions
-                .filter(
-                  (question) =>
-                    question._count.answers ===
-                    0,
-                )
-                .map(
-                  (question) =>
-                    question.id,
-                );
-
-            const historicalQuestionIds =
-              existingQuestions
-                .filter(
-                  (question) =>
-                    question._count.answers >
-                    0,
-                )
-                .map(
-                  (question) =>
-                    question.id,
-                );
-
-            if (
-              deletableQuestionIds.length >
-              0
-            ) {
-              await tx.question.deleteMany({
-                where: {
-                  id: {
-                    in:
-                      deletableQuestionIds,
-                  },
-                },
-              });
-            }
-
-            if (
-              historicalQuestionIds.length >
-              0
-            ) {
-              await tx.question.updateMany({
-                where: {
-                  id: {
-                    in:
-                      historicalQuestionIds,
-                  },
-                },
-
-                data: {
-                  isActive:
-                    false,
-                },
-              });
-            }
-
-            if (
-              dto.questions.length > 0
-            ) {
-              await tx.question.createMany({
-                data:
-                  dto.questions.map(
-                    (question) => ({
-                      checkInId:
-                        id,
-
-                      question:
-                        question.question.trim(),
-
-                      order:
-                        question.order,
-
-                      type:
-                        question.type ??
-                        QuestionType.FREE_TEXT,
-
-                      options:
-                        question.options ??
-                        Prisma.JsonNull,
-
-                      isRequired:
-                        question.isRequired ??
-                        true,
-
-                      isActive:
-                        question.isActive ??
-                        true,
-                    }),
-                  ),
-              });
-            }
+          if (dto.questions !== undefined) {
+            await this.syncCheckInQuestions(tx, id, dto.questions);
           }
 
           await tx.checkIn.update({
@@ -749,21 +632,10 @@ export class CheckInService {
     });
   }
 
-  async remove(id: string, force = false) {
+  async remove(id: string) {
     const checkIn =
       await this.prisma.checkIn.findUnique({
-        where: {
-          id,
-        },
-
-        include: {
-          _count: {
-            select: {
-              runs:
-                true,
-            },
-          },
-        },
+        where: { id },
       });
 
     if (!checkIn) {
@@ -772,41 +644,14 @@ export class CheckInService {
       );
     }
 
-    const runCount = checkIn._count.runs;
-
-    if (runCount > 0 && !force) {
-      return {
-        deleted: false,
-        canDelete: false,
-        runCount,
-        message:
-          'This CheckIn has execution history and cannot be deleted without removing all runs.',
-      };
-    }
-
     await this.prisma.$transaction(async (tx) => {
-      if (runCount > 0) {
-        await this.deleteCheckInWithRuns(tx, id);
-      } else {
-        await tx.checkInParticipant.deleteMany({
-          where: { checkInId: id },
-        });
-        await tx.question.deleteMany({
-          where: { checkInId: id },
-        });
-        await tx.checkIn.delete({
-          where: { id },
-        });
-      }
+      await this.deleteCheckInWithRuns(tx, id);
     });
 
-    await this.refreshSchedulerAfterMutation(
-      force && runCount > 0 ? `force delete ${id}` : `delete ${id}`,
-    );
+    await this.refreshSchedulerAfterMutation(`delete ${id}`);
 
     return {
       deleted: true,
-      forceDeleted: runCount > 0,
       id,
     };
   }
@@ -1047,6 +892,80 @@ export class CheckInService {
       throw new BadRequestException(
         `${fieldName} is not a valid cron expression.`,
       );
+    }
+  }
+
+  // =========================================================
+  // QUESTION SYNC
+  // =========================================================
+
+  private async syncCheckInQuestions(
+    tx: Prisma.TransactionClient,
+    checkInId: string,
+    questions: NonNullable<UpdateCheckInDto['questions']>,
+  ): Promise<void> {
+    const existingQuestions = await tx.question.findMany({
+      where: { checkInId },
+      include: {
+        _count: {
+          select: { answers: true },
+        },
+      },
+    });
+
+    const existingById = new Map(
+      existingQuestions.map((question) => [question.id, question]),
+    );
+
+    const retainedExistingIds = new Set<string>();
+
+    for (const question of questions) {
+      const data = {
+        question: question.question.trim(),
+        order: question.order,
+        type: question.type ?? QuestionType.FREE_TEXT,
+        options:
+          question.type === QuestionType.MULTIPLE_CHOICE
+            ? (question.options ?? [])
+            : Prisma.JsonNull,
+        isRequired: question.isRequired ?? true,
+        isActive: question.isActive ?? true,
+      };
+
+      if (question.id && existingById.has(question.id)) {
+        retainedExistingIds.add(question.id);
+
+        await tx.question.update({
+          where: { id: question.id },
+          data,
+        });
+        continue;
+      }
+
+      await tx.question.create({
+        data: {
+          checkInId,
+          ...data,
+        },
+      });
+    }
+
+    for (const existing of existingQuestions) {
+      if (retainedExistingIds.has(existing.id)) {
+        continue;
+      }
+
+      if (existing._count.answers > 0) {
+        await tx.question.update({
+          where: { id: existing.id },
+          data: { isActive: false },
+        });
+        continue;
+      }
+
+      await tx.question.delete({
+        where: { id: existing.id },
+      });
     }
   }
 
@@ -1334,11 +1253,20 @@ export class CheckInService {
       },
       include: this.runIncludeRelations,
       orderBy: { startedAt: 'desc' },
-      take: 20,
+      take: 50,
+    });
+
+    const seenCheckInIds = new Set<string>();
+    const dedupedRuns = runs.filter((run) => {
+      if (!run.checkInId || seenCheckInIds.has(run.checkInId)) {
+        return false;
+      }
+      seenCheckInIds.add(run.checkInId);
+      return true;
     });
 
     return Promise.all(
-      runs.map(async (run) => {
+      dedupedRuns.map(async (run) => {
         try {
           return await this.enrichRun(run);
         } catch (error: unknown) {
@@ -1380,7 +1308,7 @@ export class CheckInService {
     const skip = (page - 1) * limit;
 
     const where: Prisma.StandupRunWhereInput = {
-      status: { not: 'collecting' },
+      status: 'completed',
       checkInId: options?.checkInId
         ? options.checkInId
         : { not: null },
@@ -1584,61 +1512,112 @@ export class CheckInService {
   private resolveReportStatus(
     run: {
       status: string;
+      reportStatus?: string | null;
       reportGeneratedAt?: Date | null;
+      reportDueAt?: Date | null;
       checkIn?: { reportTriggerMode?: string | null } | null;
     },
     participantsResponded: number,
     totalParticipants: number,
   ): {
-    code: 'posted' | 'generating' | 'ready' | 'pending' | 'failed';
+    code:
+      | 'waiting'
+      | 'generating'
+      | 'ready'
+      | 'posting'
+      | 'posted'
+      | 'generation_failed'
+      | 'posting_failed';
     label: string;
     tooltip: string;
   } {
-    if (run.reportGeneratedAt) {
-      return {
+    const statusMap: Record<
+      string,
+      { code: 'waiting' | 'generating' | 'ready' | 'posting' | 'posted' | 'generation_failed' | 'posting_failed'; label: string; tooltip: string }
+    > = {
+      waiting_for_responses: {
+        code: 'waiting',
+        label: 'Waiting for Responses',
+        tooltip: 'Collecting standup answers before the AI report can be generated.',
+      },
+      generating: {
+        code: 'generating',
+        label: 'Generating AI Report',
+        tooltip: 'AI is analyzing responses and building the report.',
+      },
+      generated: {
+        code: 'ready',
+        label: 'Report Ready',
+        tooltip: 'The AI report was generated and is ready to post to Slack.',
+      },
+      posting: {
+        code: 'posting',
+        label: 'Posting to Slack Thread',
+        tooltip: 'Delivering the report into the CheckIn Slack thread.',
+      },
+      completed: {
         code: 'posted',
-        label: 'Posted to Thread',
+        label: 'Posted to Slack Thread',
         tooltip: 'AI report was generated and posted in the Slack thread.',
-      };
+      },
+      generation_failed: {
+        code: 'generation_failed',
+        label: 'Generation Failed',
+        tooltip: 'AI report generation failed. The system will retry automatically.',
+      },
+      posting_failed: {
+        code: 'posting_failed',
+        label: 'Posting Failed',
+        tooltip: 'Report was saved but Slack posting failed. The system will retry automatically.',
+      },
+    };
+
+    if (run.reportStatus && statusMap[run.reportStatus]) {
+      if (run.reportStatus === 'waiting_for_responses') {
+        const allAnswered =
+          totalParticipants > 0 &&
+          participantsResponded === totalParticipants;
+
+        if (
+          allAnswered &&
+          run.checkIn?.reportTriggerMode === 'all_answered'
+        ) {
+          return statusMap.generating;
+        }
+
+        if (
+          run.reportDueAt &&
+          run.checkIn?.reportTriggerMode === 'timeout' &&
+          run.reportDueAt <= new Date()
+        ) {
+          return statusMap.generating;
+        }
+      }
+
+      return statusMap[run.reportStatus];
+    }
+
+    if (run.reportGeneratedAt) {
+      return statusMap.completed;
     }
 
     const allAnswered =
       totalParticipants > 0 &&
       participantsResponded === totalParticipants;
 
-    if (allAnswered && run.status === 'collecting') {
-      return {
-        code: 'ready',
-        label: 'Ready',
-        tooltip: 'All participants responded. Waiting for report trigger.',
-      };
-    }
-
-    if (allAnswered) {
-      return {
-        code: 'generating',
-        label: 'Generating...',
-        tooltip: 'AI report is being generated.',
-      };
+    if (allAnswered && run.checkIn?.reportTriggerMode === 'all_answered') {
+      return statusMap.generating;
     }
 
     if (
-      run.status === 'completed' &&
-      !run.reportGeneratedAt &&
-      run.checkIn?.reportTriggerMode === 'scheduled'
+      run.reportDueAt &&
+      run.checkIn?.reportTriggerMode === 'timeout' &&
+      run.reportDueAt <= new Date()
     ) {
-      return {
-        code: 'failed',
-        label: 'Failed',
-        tooltip: 'Run completed but no report was generated.',
-      };
+      return statusMap.generating;
     }
 
-    return {
-      code: 'pending',
-      label: 'Pending',
-      tooltip: 'Report will be generated after collection completes.',
-    };
+    return statusMap.waiting_for_responses;
   }
 
   private async resolveSlackThreadUrl(

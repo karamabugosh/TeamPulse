@@ -8,6 +8,7 @@ import {
   THREAD_STATUS_DOT,
   formatStartedTime,
   normalizeRun,
+  reportStatusIcon,
 } from '@/lib/run-status';
 import { cn } from '@/lib/utils';
 
@@ -18,7 +19,9 @@ interface ActiveRunCardProps {
 
 export const ActiveRunCard: React.FC<ActiveRunCardProps> = ({ run: rawRun, compact = false }) => {
   const run = normalizeRun(rawRun);
+  const isCollecting = run.status === 'collecting';
   const threadDot = THREAD_STATUS_DOT[run.threadStatus.code as keyof typeof THREAD_STATUS_DOT] ?? '⚪';
+  const reportIcon = reportStatusIcon(run.reportStatus.code);
   const canOpenThread = run.threadStatus.code === 'active' && !!run.slackThreadUrl;
 
   return (
@@ -33,8 +36,8 @@ export const ActiveRunCard: React.FC<ActiveRunCardProps> = ({ run: rawRun, compa
           <h3 className="truncate text-sm font-medium text-foreground">
             {run.checkIn?.name ?? 'CheckIn'}
           </h3>
-          <Badge variant="success" className="shrink-0 text-[10px]">
-            Collecting
+          <Badge variant={isCollecting ? 'success' : 'secondary'} className="shrink-0 text-[10px]">
+            {isCollecting ? 'Collecting' : 'Run Complete'}
           </Badge>
         </div>
         <p className="text-xs text-muted-foreground">
@@ -42,6 +45,11 @@ export const ActiveRunCard: React.FC<ActiveRunCardProps> = ({ run: rawRun, compa
           {' · '}
           Started {formatStartedTime(run.startedAt, run.checkIn?.timezone)}
         </p>
+        {compact && (
+          <p className="text-xs font-medium text-foreground">
+            {reportIcon} {run.reportStatus.label}
+          </p>
+        )}
       </div>
 
       {!compact && (
@@ -64,7 +72,9 @@ export const ActiveRunCard: React.FC<ActiveRunCardProps> = ({ run: rawRun, compa
             <TooltipTrigger asChild>
               <div className="cursor-default">
                 <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Report</p>
-                <p className="font-medium">{run.reportStatus.label}</p>
+                <p className="font-medium">
+                  {reportIcon} {run.reportStatus.label}
+                </p>
               </div>
             </TooltipTrigger>
             <TooltipContent side="bottom" className="max-w-xs">

@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { buildSlackThreadUrl } from '../slack/slack-checkin.views';
 
 @Injectable()
 export class AdminService {
@@ -394,26 +395,390 @@ export class AdminService {
   }
 
   async getReportsList(search?: string, timeframe?: string) {
+    const where: any = {
+      run: {
+        checkInId: { not: null },
+      },
+    };
+
+    if (timeframe === 'week') {
+      const weekAgo = new Date();
+      weekAgo.setDate(weekAgo.getDate() - 7);
+      where.generatedAt = { gte: weekAgo };
+    }
+
     const digests = await this.prisma.aiDigest.findMany({
+      where,
       orderBy: { generatedAt: 'desc' },
       include: {
-        team: { select: { name: true, slackChannelId: true } },
-        run: { select: { scheduledFor: true, status: true } },
+        team: {
+          select: {
+            name: true,
+            workspace: {
+              select: {
+                slackWorkspaceId: true,
+                slackWorkspaceName: true,
+              },
+            },
+          },
+        },
+        run: {
+          select: {
+            id: true,
+            scheduledFor: true,
+            startedAt: true,
+            completedAt: true,
+            status: true,
+            reportGeneratedAt: true,
+            reportStatus: true,
+            slackChannelId: true,
+            slackThreadTs: true,
+            checkIn: {
+              select: {
+                id: true,
+                name: true,
+                timezone: true,
+              },
+            },
+            submissions: {
+              select: {
+                status: true,
+              },
+            },
+          },
+        },
       },
     });
 
-    return digests.map((d) => ({
-      id: d.id,
-      runId: d.runId,
-      teamId: d.teamId,
-      teamName: d.team?.name || 'General',
-      generatedAt: d.generatedAt.toISOString(),
-      source: d.source,
-      summary: d.summary,
-      blockers: d.blockers,
-      themes: d.themes,
-      slackChannel: d.team?.slackChannelId || '',
+    const query = search?.trim().toLowerCase() ?? '';
+
+    return digests
+      .filter((digest) => digest.run?.checkIn)
+      .filter((digest) => {
+        if (!query) return true;
+        const checkInName = digest.run?.checkIn?.name?.toLowerCase() ?? '';
+        const teamName = digest.team?.name?.toLowerCase() ?? '';
+        const summary = digest.summary.toLowerCase();
+        return (
+          checkInName.includes(query) ||
+          teamName.includes(query) ||
+          summary.includes(query)
+        );
+      })
+      .map((digest) => this.mapReportListItem(digest));
+  }
+
+  async getReportsGrouped(search?: string, timeframe?: string) {
+    const items = await this.getReportsList(search, timeframe);
+    const groups = new Map<
+      string,
+      {
+        checkInId: string;
+        checkInName: string;
+        teamName: string;
+        latestReport: Awaited<ReturnType<AdminService['getReportsList']>>[number];
+        totalReports: number;
+      }
+    >();
+
+    for (const item of items) {
+      if (!item.checkInId) continue;
+
+      const existing = groups.get(item.checkInId);
+      if (!existing) {
+        groups.set(item.checkInId, {
+          checkInId: item.checkInId,
+          checkInName: item.checkInName,
+          teamName: item.teamName,
+          latestReport: item,
+          totalReports: 1,
+        });
+      } else {
+        existing.totalReports += 1;
+      }
+    }
+
+    return Array.from(groups.values()).sort(
+      (a, b) =>
+        new Date(b.latestReport.generatedAt).getTime() -
+        new Date(a.latestReport.generatedAt).getTime(),
+    );
+  }
+
+  async getReportsForCheckIn(checkInId: string) {
+    const checkIn = await this.prisma.checkIn.findUnique({
+      where: { id: checkInId },
+      select: { id: true, name: true, team: { select: { name: true } } },
+    });
+
+    if (!checkIn) {
+      throw new NotFoundException(`CheckIn ${checkInId} was not found.`);
+    }
+
+    const digests = await this.prisma.aiDigest.findMany({
+      where: {
+        run: { checkInId },
+      },
+      orderBy: { generatedAt: 'desc' },
+      include: {
+        team: {
+          select: {
+            name: true,
+            workspace: {
+              select: {
+                slackWorkspaceId: true,
+                slackWorkspaceName: true,
+              },
+            },
+          },
+        },
+        run: {
+          select: {
+            id: true,
+            scheduledFor: true,
+            startedAt: true,
+            completedAt: true,
+            status: true,
+            reportGeneratedAt: true,
+            reportStatus: true,
+            slackChannelId: true,
+            slackThreadTs: true,
+            checkIn: {
+              select: {
+                id: true,
+                name: true,
+                timezone: true,
+              },
+            },
+            submissions: {
+              select: { status: true },
+            },
+          },
+        },
+      },
+    });
+
+    return {
+      checkInId: checkIn.id,
+      checkInName: checkIn.name,
+      teamName: checkIn.team?.name ?? 'General',
+      reports: digests
+        .filter((digest) => digest.run?.checkIn)
+        .map((digest) => this.mapReportListItem(digest)),
+    };
+  }
+
+  async getReportDetail(id: string) {
+    const digest = await this.prisma.aiDigest.findUnique({
+      where: { id },
+      include: {
+        team: {
+          select: {
+            id: true,
+            name: true,
+            workspace: {
+              select: {
+                slackWorkspaceId: true,
+                slackWorkspaceName: true,
+              },
+            },
+          },
+        },
+        run: {
+          include: {
+            checkIn: {
+              select: {
+                id: true,
+                name: true,
+                timezone: true,
+                description: true,
+              },
+            },
+            submissions: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    slackUserId: true,
+                    slackDisplayName: true,
+                  },
+                },
+                answers: {
+                  include: { question: true },
+                  orderBy: { createdAt: 'asc' },
+                },
+              },
+              orderBy: { completedAt: 'asc' },
+            },
+          },
+        },
+      },
+    });
+
+    if (!digest?.run?.checkIn) {
+      throw new NotFoundException(`Report ${id} was not found.`);
+    }
+
+    const listItem = this.mapReportListItem(digest);
+    const participantUpdates = this.buildParticipantUpdates(digest.run.submissions);
+    const reportSections = this.parseReportSections(digest.reportSections);
+
+    return {
+      ...listItem,
+      description: digest.run.checkIn.description,
+      runStatus: digest.run.status,
+      reportStatus: digest.run.reportStatus,
+      reportSections: {
+        ...reportSections,
+        participantUpdates:
+          reportSections.participantUpdates.length > 0
+            ? reportSections.participantUpdates
+            : participantUpdates,
+      },
+      participants: participantUpdates,
+      blockers: digest.blockers,
+      themes: digest.themes,
+    };
+  }
+
+  private mapReportListItem(digest: {
+    id: string;
+    runId: string;
+    teamId: string;
+    generatedAt: Date;
+    source: string;
+    summary: string;
+    blockers: unknown;
+    themes: unknown;
+    reportSections?: unknown;
+    team: {
+      name: string;
+      workspace?: {
+        slackWorkspaceId: string;
+        slackWorkspaceName: string | null;
+      } | null;
+    } | null;
+    run: {
+      id: string;
+      scheduledFor: Date;
+      startedAt: Date;
+      completedAt: Date | null;
+      status: string;
+      reportGeneratedAt: Date | null;
+      reportStatus: string;
+      slackChannelId: string | null;
+      slackThreadTs: string | null;
+      checkIn: { id: string; name: string; timezone: string } | null;
+      submissions: { status: string }[];
+    } | null;
+  }) {
+    const run = digest.run!;
+    const totalParticipants = run.submissions.length;
+    const participantsResponded = run.submissions.filter(
+      (submission) => submission.status === 'completed',
+    ).length;
+    const completionRate =
+      totalParticipants > 0
+        ? Math.round((participantsResponded / totalParticipants) * 100)
+        : 0;
+
+    const workspaceId =
+      digest.team?.workspace?.slackWorkspaceId ||
+      process.env.SLACK_TEAM_ID ||
+      '';
+    const slackThreadUrl =
+      run.slackChannelId && run.slackThreadTs
+        ? buildSlackThreadUrl(
+            workspaceId,
+            run.slackChannelId,
+            run.slackThreadTs,
+          )
+        : null;
+
+    return {
+      id: digest.id,
+      runId: digest.runId,
+      teamId: digest.teamId,
+      checkInId: run.checkIn?.id ?? null,
+      checkInName: run.checkIn?.name ?? 'CheckIn',
+      teamName: digest.team?.name ?? 'General',
+      runDate: run.startedAt.toISOString(),
+      scheduledFor: run.scheduledFor.toISOString(),
+      generatedAt: digest.generatedAt.toISOString(),
+      source: digest.source,
+      aiProvider: digest.source === 'ai' ? 'OpenAI' : 'Rules Fallback',
+      summary: digest.summary,
+      blockers: digest.blockers,
+      themes: digest.themes,
+      reportSections: this.parseReportSections(digest.reportSections),
+      totalParticipants,
+      participantsResponded,
+      completionRate,
+      runStatus: run.status,
+      reportPosted: !!run.reportGeneratedAt,
+      slackThreadUrl,
+    };
+  }
+
+  private buildParticipantUpdates(
+    submissions: Array<{
+      status: string;
+      user: {
+        slackUserId: string;
+        slackDisplayName: string;
+      };
+      answers: Array<{
+        text: string;
+        question: { question: string };
+      }>;
+    }>,
+  ) {
+    return submissions.map((submission) => ({
+      slackUserId: submission.user.slackUserId,
+      displayName: submission.user.slackDisplayName,
+      status: submission.status,
+      answers: submission.answers.map((answer) => ({
+        question: answer.question.question,
+        answer: answer.text,
+      })),
     }));
+  }
+
+  private parseReportSections(value: unknown) {
+    if (!value || typeof value !== 'object') {
+      return {
+        keyAccomplishments: [] as string[],
+        risks: [] as string[],
+        aiInsights: [] as string[],
+        actionItems: [] as string[],
+        participantUpdates: [] as Array<{
+          slackUserId: string;
+          displayName: string;
+          answers: Array<{ question: string; answer: string }>;
+        }>,
+        overallProgress: '',
+      };
+    }
+
+    const record = value as Record<string, unknown>;
+    const toStringArray = (input: unknown) =>
+      Array.isArray(input)
+        ? input.filter((item): item is string => typeof item === 'string')
+        : [];
+
+    return {
+      keyAccomplishments: toStringArray(record.keyAccomplishments),
+      risks: toStringArray(record.risks),
+      aiInsights: toStringArray(record.aiInsights),
+      actionItems: toStringArray(record.actionItems),
+      participantUpdates: Array.isArray(record.participantUpdates)
+        ? record.participantUpdates
+        : [],
+      overallProgress:
+        typeof record.overallProgress === 'string'
+          ? record.overallProgress
+          : '',
+    };
   }
 
   async exportReportCsv(id: string) {
@@ -502,13 +867,64 @@ ${JSON.stringify(digest.themes, null, 2)}
   }
 
   async getTeams() {
-    return this.prisma.team.findMany({
+    const teams = await this.prisma.team.findMany({
       include: {
         workspace: true,
-        teamMembers: { include: { user: true } },
-        checkIns: true,
+        teamMembers: {
+          include: { user: true },
+          orderBy: { joinedAt: 'asc' },
+        },
+        _count: {
+          select: {
+            checkIns: true,
+            standupRuns: {
+              where: {
+                status: 'collecting',
+                checkInId: { not: null },
+              },
+            },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
+    });
+
+    return teams.map((team) => {
+      const lead = team.teamMembers.find((member) => member.role === 'lead');
+      const memberNames = team.teamMembers.map(
+        (member) =>
+          member.user.slackDisplayName ||
+          member.user.email ||
+          member.user.slackUserId,
+      );
+
+      return {
+        id: team.id,
+        workspaceId: team.workspaceId,
+        name: team.name,
+        slackChannelId: team.slackChannelId,
+        scheduleCron: team.scheduleCron,
+        timezone: team.timezone,
+        schedulerEnabled: team.schedulerEnabled,
+        createdAt: team.createdAt,
+        updatedAt: team.updatedAt,
+        workspace: team.workspace,
+        teamMembers: team.teamMembers,
+        teamLead: lead
+          ? {
+              id: lead.id,
+              userId: lead.userId,
+              name:
+                lead.user.slackDisplayName ||
+                lead.user.email ||
+                lead.user.slackUserId,
+            }
+          : null,
+        memberCount: team.teamMembers.length,
+        memberNames,
+        checkInCount: team._count.checkIns,
+        activeRunCount: team._count.standupRuns,
+      };
     });
   }
 

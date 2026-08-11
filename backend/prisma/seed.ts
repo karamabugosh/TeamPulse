@@ -120,7 +120,48 @@ async function syncSlackMembers(workspaceId: string, teamId: string) {
   console.log(`Synced ${synced} Slack member(s) into team "${teamId}".`);
 }
 
-async function seedDefaultCheckIn(teamId: string) {
+async function resolveDefaultSlackChannelId(): Promise<string | null> {
+  const fromEnv =
+    process.env.SLACK_UPDATES_CHANNEL_ID?.trim() ||
+    process.env.SLACK_DIGEST_CHANNEL_ID?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+
+  const botToken = process.env.SLACK_BOT_TOKEN;
+  if (!botToken) {
+    return null;
+  }
+
+  const client = new WebClient(botToken);
+
+  try {
+    let cursor: string | undefined;
+
+    do {
+      const result = await client.conversations.list({
+        types: 'public_channel',
+        limit: 200,
+        cursor,
+      });
+
+      for (const channel of result.channels ?? []) {
+        if (channel.id && channel.name === 'general') {
+          console.log(`Resolved default Slack channel #general → ${channel.id}`);
+          return channel.id;
+        }
+      }
+
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+  } catch (error) {
+    console.warn('Could not resolve #general from Slack during seed.', error);
+  }
+
+  return null;
+}
+
+async function seedDefaultCheckIn(teamId: string, slackChannelId?: string | null) {
   const checkIn = await prisma.checkIn.upsert({
     where: { id: DEFAULT_CHECKIN_ID },
     update: {
@@ -140,7 +181,11 @@ async function seedDefaultCheckIn(teamId: string) {
       reminderOnlyNonResponders: true,
       reportCron: DEFAULT_REPORT_CRON,
       reportTriggerMode: 'scheduled',
-      updatesChannelId: process.env.SLACK_DIGEST_CHANNEL_ID || process.env.SLACK_UPDATES_CHANNEL_ID || null,
+      updatesChannelId:
+        slackChannelId ||
+        process.env.SLACK_DIGEST_CHANNEL_ID ||
+        process.env.SLACK_UPDATES_CHANNEL_ID ||
+        null,
     },
     create: {
       id: DEFAULT_CHECKIN_ID,
@@ -161,7 +206,11 @@ async function seedDefaultCheckIn(teamId: string) {
       reminderOnlyNonResponders: true,
       reportCron: DEFAULT_REPORT_CRON,
       reportTriggerMode: 'scheduled',
-      updatesChannelId: process.env.SLACK_DIGEST_CHANNEL_ID || process.env.SLACK_UPDATES_CHANNEL_ID || null,
+      updatesChannelId:
+        slackChannelId ||
+        process.env.SLACK_DIGEST_CHANNEL_ID ||
+        process.env.SLACK_UPDATES_CHANNEL_ID ||
+        null,
     },
   });
 
@@ -243,8 +292,21 @@ async function main() {
 
   console.log(`Team: ${team.name} (${team.id})`);
 
+  const slackChannelId = await resolveDefaultSlackChannelId();
+  if (slackChannelId) {
+    await prisma.team.update({
+      where: { id: team.id },
+      data: { slackChannelId },
+    });
+    console.log(`Team Slack channel set to ${slackChannelId}`);
+  } else {
+    console.warn(
+      'No Slack channel configured — set team.slackChannelId, CheckIn.updatesChannelId, or SLACK_UPDATES_CHANNEL_ID.',
+    );
+  }
+
   await syncSlackMembers(workspace.id, team.id);
-  await seedDefaultCheckIn(team.id);
+  await seedDefaultCheckIn(team.id, slackChannelId);
 
   console.log('Database seeding complete.');
 }

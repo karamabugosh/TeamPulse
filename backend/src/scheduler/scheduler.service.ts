@@ -9,9 +9,11 @@ import { CronJob } from 'cron';
 import {
   AiDigestResult,
   RawResponseForAnalysis,
+  EMPTY_REPORT_SECTIONS,
 } from '../ai/dto/ai-result.dto';
 import { AiService } from '../ai/ai.service';
 import { CheckInRunService } from '../check-in/check-in-run/check-in-run.service';
+import { CheckInReportService } from '../check-in/check-in-report.service';
 import { CollectionService } from '../collection/collection.service';
 import { DigestService } from '../digest/digest.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -59,6 +61,7 @@ export class SchedulerService
     private readonly reportsService: ReportsService,
     private readonly checkInRunService: CheckInRunService,
     private readonly checkInThreadService: CheckInThreadService,
+    private readonly checkInReportService: CheckInReportService,
   ) {}
 
   // =========================================================
@@ -102,6 +105,7 @@ export class SchedulerService
      * application restart.
      */
     this.registerPersistentReminderSweep();
+    this.registerPersistentReportSweep();
   }
 
   // =========================================================
@@ -264,7 +268,10 @@ export class SchedulerService
       const reportCron =
         checkIn.reportCron?.trim();
 
-      if (reportCron) {
+      if (
+        reportCron &&
+        checkIn.reportTriggerMode !== 'all_answered'
+      ) {
         this.registerCronJob({
           jobName:
             `checkin-report-${checkIn.id}`,
@@ -281,8 +288,22 @@ export class SchedulerService
             'check-in report',
 
           onTick: async () => {
-            await this.runCheckInDigest(
+            const runId =
+              await this.checkInReportService.findScheduledRunForReport(
+                checkIn.id,
+              );
+
+            if (!runId) {
+              this.logger.warn(
+                `[Scheduler] No eligible run found for scheduled report on CheckIn ${checkIn.id}`,
+              );
+              return;
+            }
+
+            await this.checkInReportService.execute(
               checkIn.id,
+              runId,
+              { skipTriggerValidation: true },
             );
           },
         });
@@ -345,7 +366,16 @@ export class SchedulerService
       return;
     }
 
-    await this.checkInThreadService.createRunThread(result.run.id);
+    const thread = await this.checkInThreadService.createRunThread(
+      result.run.id,
+    );
+
+    if (thread.ok === false) {
+      this.logger.error(
+        `[Scheduler] Aborting DM delivery for "${result.checkInName}" — public standup message was not posted: ${thread.reason}`,
+      );
+      return;
+    }
 
     if (result.run.submissions.length === 0) {
       this.logger.log(
@@ -354,15 +384,7 @@ export class SchedulerService
       return;
     }
 
-    const checkInConfig = await this.prisma.checkIn.findUnique({
-      where: { id: checkInId },
-      select: { introMessage: true },
-    });
-
-    const delivery = await this.slackGateway.deliverCheckInRun(
-      result,
-      checkInConfig?.introMessage,
-    );
+    const delivery = await this.slackGateway.deliverCheckInRun(result);
 
     this.logger.log(
       `[Scheduler] DM delivery for "${result.checkInName}": ${delivery.delivered} sent, ${delivery.failed} failed, ${delivery.skipped} skipped`,
@@ -405,6 +427,19 @@ export class SchedulerService
 
       onTick: async () => {
         await this.processDueCheckInReminders();
+      },
+    });
+  }
+
+  private registerPersistentReportSweep(): void {
+    this.registerCronJob({
+      jobName: 'checkin-report-sweep',
+      cronTime: '* * * * *',
+      timezone: 'UTC',
+      teamName: 'Pulse',
+      taskName: 'persistent report sweep',
+      onTick: async () => {
+        await this.checkInReportService.processDueReports();
       },
     });
   }
@@ -722,338 +757,54 @@ export class SchedulerService
   ): Promise<TeamDigestResult> {
     const checkIn =
       await this.prisma.checkIn.findUnique({
-        where: {
-          id:
-            checkInId,
-        },
-
-        include: {
-          team: true,
-        },
+        where: { id: checkInId },
+        include: { team: true },
       });
 
     if (!checkIn) {
       return {
         teamId: null,
-        teamName:
-          checkInId,
-        status:
-          'failed',
-        responseCount:
-          0,
-        slackDelivered:
-          false,
-        slackError:
-          `CheckIn ${checkInId} was not found.`,
-        generatedAt:
-          new Date().toISOString(),
-      };
-    }
-
-    /*
-     * Reporting is tied to one exact CheckIn run.
-     *
-     * We intentionally do not use the old
-     * "latest completed answer per user" reporting path.
-     */
-    const run = runId
-      ? await this.prisma.standupRun.findUnique({
-          where: { id: runId },
-          include: {
-            submissions: {
-              where: { status: 'completed' },
-              include: {
-                user: true,
-                answers: {
-                  include: { question: true },
-                  orderBy: { createdAt: 'asc' },
-                },
-              },
-            },
-          },
-        })
-      : await this.prisma.standupRun.findFirst({
-          where: { checkInId: checkIn.id },
-          orderBy: { scheduledFor: 'desc' },
-          include: {
-            submissions: {
-              where: { status: 'completed' },
-              include: {
-                user: true,
-                answers: {
-                  include: { question: true },
-                  orderBy: { createdAt: 'asc' },
-                },
-              },
-            },
-          },
-        });
-
-    if (!run) {
-      return {
-        teamId:
-          checkIn.team.id,
-
-        teamName:
-          checkIn.team.name,
-
-        status:
-          'skipped',
-
-        responseCount:
-          0,
-
-        slackDelivered:
-          false,
-
-        slackError:
-          'No CheckIn run exists yet.',
-
-        generatedAt:
-          new Date().toISOString(),
-      };
-    }
-
-    const responses =
-      await this.collectionService.getRunResponses(
-        run.id,
-      );
-
-    const nonResponders =
-      await this.collectionService.getRunNonResponders(
-        run.id,
-      );
-
-    let digest =
-      this.digestService.generateDailyDigest(
-        responses,
-        nonResponders,
-      );
-
-    let aiDigestForBlocks:
-      AiDigestResult | null =
-      null;
-
-    if (
-      responses.length > 0
-    ) {
-      try {
-        const aiResponses:
-          RawResponseForAnalysis[] =
-          run.submissions
-            .filter(
-              (
-                submission,
-              ) =>
-                submission.answers
-                  .length > 0,
-            )
-            .map(
-              (
-                submission,
-              ) => ({
-                userId:
-                  submission.user
-                    .slackUserId,
-
-                answers:
-                  submission.answers.map(
-                    (
-                      answer,
-                    ) => ({
-                      questionId:
-                        answer.questionId,
-
-                      questionText:
-                        answer.question
-                          .question,
-
-                      text:
-                        answer.text,
-                    }),
-                  ),
-              }),
-            );
-
-        if (
-          aiResponses.length >
-          0
-        ) {
-          const aiResult =
-            await this.getOrGenerateAiDigest(
-              checkIn.team.id,
-              run.id,
-              aiResponses,
-            );
-
-          aiDigestForBlocks =
-            aiResult;
-
-          digest =
-            this.reportsService.formatDigestForSlack(
-              aiResult,
-            );
-
-          const nonResponderSection =
-            nonResponders.length >
-            0
-              ? [
-                  '*⏳ No Response*',
-                  ...nonResponders.map(
-                    (member) =>
-                      `• ${member.name}`,
-                  ),
-                ].join(
-                  '\n',
-                )
-              : '*⏳ No Response*\n• Everyone submitted.';
-
-          digest =
-            `${digest}\n\n${nonResponderSection}`;
-        }
-      } catch (
-        error: unknown
-      ) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : String(error);
-
-        this.logger.error(
-          `AI report failed for CheckIn "${checkIn.name}". Using rules-based report: ${message}`,
-        );
-      }
-    }
-
-    if (!run.slackChannelId || !run.slackThreadTs) {
-      await this.checkInThreadService.createRunThread(run.id);
-      const refreshed = await this.prisma.standupRun.findUnique({
-        where: { id: run.id },
-        select: { slackChannelId: true, slackThreadTs: true },
-      });
-      run.slackChannelId = refreshed?.slackChannelId ?? run.slackChannelId;
-      run.slackThreadTs = refreshed?.slackThreadTs ?? run.slackThreadTs;
-    }
-
-    if (!run.slackChannelId || !run.slackThreadTs) {
-      return {
-        teamId: checkIn.team.id,
-        teamName: checkIn.team.name,
-        status: 'partial_success',
-        responseCount: responses.length,
-        digest,
+        teamName: checkInId,
+        status: 'failed',
+        responseCount: 0,
         slackDelivered: false,
-        slackError: 'CheckIn run has no Slack thread — configure updatesChannelId or SLACK_UPDATES_CHANNEL_ID.',
+        slackError: `CheckIn ${checkInId} was not found.`,
         generatedAt: new Date().toISOString(),
       };
     }
 
-    if (
-      responses.length === 0 &&
-      process.env.SEND_EMPTY_DIGEST !==
-        'true'
-    ) {
+    const resolvedRunId =
+      runId ??
+      (await this.checkInReportService.findScheduledRunForReport(
+        checkInId,
+      ));
+
+    if (!resolvedRunId) {
       return {
-        teamId:
-          checkIn.team.id,
-
-        teamName:
-          checkIn.team.name,
-
-        status:
-          'skipped',
-
-        responseCount:
-          0,
-
-        digest,
-
-        slackDelivered:
-          false,
-
-        slackError:
-          'No completed responses were found for this run.',
-
-        generatedAt:
-          new Date().toISOString(),
+        teamId: checkIn.team.id,
+        teamName: checkIn.team.name,
+        status: 'skipped',
+        responseCount: 0,
+        slackDelivered: false,
+        slackError: 'No CheckIn run exists yet.',
+        generatedAt: new Date().toISOString(),
       };
     }
 
-    if (
-      process.env.SLACK_DIGEST_ENABLED !==
-      'true'
-    ) {
-      return {
-        teamId:
-          checkIn.team.id,
-
-        teamName:
-          checkIn.team.name,
-
-        status:
-          'partial_success',
-
-        responseCount:
-          responses.length,
-
-        digest,
-
-        slackDelivered:
-          false,
-
-        slackError:
-          'SLACK_DIGEST_ENABLED is not true.',
-
-        generatedAt:
-          new Date().toISOString(),
-      };
-    }
-
-    const digestBlocks =
-      aiDigestForBlocks
-        ? this.reportsService.buildDigestBlocks(
-            aiDigestForBlocks,
-
-            nonResponders.map(
-              (member) =>
-                member.name,
-            ),
-          )
-        : undefined;
-
-    const slackDelivered =
-      await this.checkInThreadService.postAiReportToThread(
-        run.id,
-        digest,
-        digestBlocks,
-      );
+    const result = await this.checkInReportService.execute(
+      checkInId,
+      resolvedRunId,
+      { skipTriggerValidation: !!runId, allowRetry: true },
+    );
 
     return {
-      teamId:
-        checkIn.team.id,
-
-      teamName:
-        checkIn.team.name,
-
-      status:
-        slackDelivered
-          ? 'success'
-          : 'partial_success',
-
-      responseCount:
-        responses.length,
-
-      digest,
-
-      slackDelivered,
-
-      slackError:
-        slackDelivered
-          ? null
-          : 'SlackService could not deliver the CheckIn report.',
-
-      generatedAt:
-        new Date().toISOString(),
+      teamId: checkIn.team.id,
+      teamName: checkIn.team.name,
+      status: result.status,
+      responseCount: result.responseCount,
+      slackDelivered: result.slackDelivered,
+      slackError: result.slackError ?? result.message ?? null,
+      generatedAt: new Date().toISOString(),
     };
   }
 
@@ -2041,6 +1792,10 @@ export class SchedulerService
 
         themes:
           existingDigest.themes as unknown as AiDigestResult['themes'],
+
+        reportSections: this.parseStoredReportSections(
+          existingDigest.reportSections,
+        ),
       };
     }
 
@@ -2049,6 +1804,34 @@ export class SchedulerService
       runId,
       responses,
     );
+  }
+
+  private parseStoredReportSections(
+    value: unknown,
+  ): AiDigestResult['reportSections'] {
+    if (!value || typeof value !== 'object') {
+      return { ...EMPTY_REPORT_SECTIONS };
+    }
+
+    const record = value as Record<string, unknown>;
+    const toStringArray = (input: unknown) =>
+      Array.isArray(input)
+        ? input.filter((item): item is string => typeof item === 'string')
+        : [];
+
+    return {
+      keyAccomplishments: toStringArray(record.keyAccomplishments),
+      risks: toStringArray(record.risks),
+      aiInsights: toStringArray(record.aiInsights),
+      actionItems: toStringArray(record.actionItems),
+      participantUpdates: Array.isArray(record.participantUpdates)
+        ? (record.participantUpdates as AiDigestResult['reportSections']['participantUpdates'])
+        : [],
+      overallProgress:
+        typeof record.overallProgress === 'string'
+          ? record.overallProgress
+          : '',
+    };
   }
 
   // =========================================================

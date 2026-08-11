@@ -4,12 +4,15 @@ import {
   BlockerSeverity,
   ExtractedBlocker,
   ThemeSummary,
+  ReportSections,
+  EMPTY_REPORT_SECTIONS,
 } from './dto/ai-result.dto';
 
 export interface ParsedAiResponse {
   summary: string;
   blockers: ExtractedBlocker[];
   themes: ThemeSummary[];
+  reportSections: ReportSections;
 }
 
 const VALID_SEVERITIES = Object.values(
@@ -20,6 +23,12 @@ const ROOT_KEYS = new Set([
   'summary',
   'blockers',
   'themes',
+  'keyAccomplishments',
+  'risks',
+  'aiInsights',
+  'actionItems',
+  'participantUpdates',
+  'overallProgress',
 ]);
 
 const BLOCKER_KEYS = new Set([
@@ -72,6 +81,22 @@ function normaliseForComparison(
     .trim()
     .replace(/\s+/g, ' ')
     .toLowerCase();
+}
+
+function parseStringArray(
+  value: unknown,
+  fieldName: string,
+): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `AI response missing a "${fieldName}" array`,
+    );
+  }
+
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
 }
 
 export function parseAndValidateAiResponse(
@@ -329,5 +354,42 @@ export function parseAndValidateAiResponse(
     summary: parsed.summary.trim(),
     blockers,
     themes,
+    reportSections: {
+      keyAccomplishments: parseStringArray(
+        parsed.keyAccomplishments,
+        'keyAccomplishments',
+      ),
+      risks: parseStringArray(parsed.risks, 'risks'),
+      aiInsights: parseStringArray(parsed.aiInsights, 'aiInsights'),
+      actionItems: parseStringArray(parsed.actionItems, 'actionItems'),
+      participantUpdates: parseParticipantUpdates(parsed.participantUpdates),
+      overallProgress:
+        typeof parsed.overallProgress === 'string'
+          ? parsed.overallProgress.trim()
+          : '',
+    },
   };
+}
+
+function parseParticipantUpdates(value: unknown): ReportSections['participantUpdates'] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    .map((item) => ({
+      slackUserId: String(item.slackUserId ?? item.userId ?? '').trim(),
+      displayName: String(item.displayName ?? item.slackUserId ?? item.userId ?? 'Participant').trim(),
+      answers: Array.isArray(item.answers)
+        ? item.answers
+            .filter((a): a is Record<string, unknown> => typeof a === 'object' && a !== null)
+            .map((a) => ({
+              question: String(a.question ?? a.questionText ?? '').trim(),
+              answer: String(a.answer ?? a.text ?? '').trim(),
+            }))
+            .filter((a) => a.question || a.answer)
+        : [],
+    }))
+    .filter((p) => p.slackUserId || p.displayName);
 }

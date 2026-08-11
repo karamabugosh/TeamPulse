@@ -23,6 +23,7 @@ import {
   formatDuration,
   formatStartedTime,
   normalizeRun,
+  reportStatusIcon,
 } from '@/lib/run-status';
 
 type HistoryResponse = {
@@ -76,8 +77,8 @@ export const CheckInHistoryPage: React.FC = () => {
     <TooltipProvider>
       <div className="space-y-6">
         <PageHeader
-          title="CheckIn History"
-          description="Completed standup runs — including today's finished runs, Slack threads, and AI reports."
+          title="Run History"
+          description="Completed standup runs — Slack threads and AI reports."
         >
           <Button variant="outline" asChild>
             <Link to="/checkins">
@@ -173,7 +174,9 @@ export const CheckInHistoryPage: React.FC = () => {
                         <td className="px-4 py-3">
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <span className="cursor-default text-xs">{run.reportStatus.label}</span>
+                              <span className="cursor-default text-xs">
+                                {reportStatusIcon(run.reportStatus.code)} {run.reportStatus.label}
+                              </span>
                             </TooltipTrigger>
                             <TooltipContent>{run.reportStatus.tooltip}</TooltipContent>
                           </Tooltip>

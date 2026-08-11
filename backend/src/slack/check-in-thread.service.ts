@@ -2,14 +2,14 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { SlackService } from './slack.service';
+import { CreateRunThreadResult } from './check-in-thread.types';
 import {
-  buildAdditionalUpdateButtonBlocks,
   buildAdditionalUpdatePostedBlocks,
+  buildAiReportHeader,
   buildParentMessageBlocks,
   buildParentMessageText,
   buildParticipantSummaryBlocks,
   buildParticipantSummaryText,
-  formatRunDate,
 } from './slack-checkin.views';
 
 @Injectable()
@@ -22,23 +22,43 @@ export class CheckInThreadService {
     private readonly configService: ConfigService,
   ) {}
 
-  resolveUpdatesChannelId(checkIn: {
+  resolveUpdatesChannelRef(checkIn: {
     updatesChannelId?: string | null;
     team?: { slackChannelId?: string | null } | null;
-  }): string | null {
-    return (
-      checkIn.updatesChannelId?.trim() ||
-      checkIn.team?.slackChannelId?.trim() ||
-      this.configService.get<string>('SLACK_UPDATES_CHANNEL_ID')?.trim() ||
-      this.configService.get<string>('SLACK_DIGEST_CHANNEL_ID')?.trim() ||
-      null
-    );
+  }): { ref: string | null; source: string } {
+    if (checkIn.updatesChannelId?.trim()) {
+      return {
+        ref: checkIn.updatesChannelId.trim(),
+        source: 'checkIn.updatesChannelId',
+      };
+    }
+
+    if (checkIn.team?.slackChannelId?.trim()) {
+      return {
+        ref: checkIn.team.slackChannelId.trim(),
+        source: 'team.slackChannelId',
+      };
+    }
+
+    const envUpdates =
+      this.configService.get<string>('SLACK_UPDATES_CHANNEL_ID')?.trim();
+    if (envUpdates) {
+      return { ref: envUpdates, source: 'SLACK_UPDATES_CHANNEL_ID' };
+    }
+
+    const envDigest =
+      this.configService.get<string>('SLACK_DIGEST_CHANNEL_ID')?.trim();
+    if (envDigest) {
+      return { ref: envDigest, source: 'SLACK_DIGEST_CHANNEL_ID' };
+    }
+
+    return { ref: null, source: 'none' };
   }
 
   /**
    * Posts the parent message for a CheckIn run and stores thread anchor on StandupRun.
    */
-  async createRunThread(runId: string): Promise<{ channelId: string; threadTs: string } | null> {
+  async createRunThread(runId: string): Promise<CreateRunThreadResult> {
     const run = await this.prisma.standupRun.findUnique({
       where: { id: runId },
       include: {
@@ -50,23 +70,47 @@ export class CheckInThreadService {
     });
 
     if (!run?.checkIn) {
-      this.logger.error(`[Thread] Run ${runId} has no CheckIn — cannot create thread.`);
-      return null;
+      const reason = `Run ${runId} has no CheckIn — cannot create thread.`;
+      this.logger.error(`[Thread] ${reason}`);
+      return { ok: false, reason };
     }
 
     if (run.slackThreadTs && run.slackChannelId) {
       this.logger.log(
         `[Thread] Run ${runId} already has thread ${run.slackThreadTs} in ${run.slackChannelId}`,
       );
-      return { channelId: run.slackChannelId, threadTs: run.slackThreadTs };
+      return {
+        ok: true,
+        channelId: run.slackChannelId,
+        threadTs: run.slackThreadTs,
+      };
     }
 
-    const channelId = this.resolveUpdatesChannelId(run.checkIn);
+    const { ref: channelRef, source } = this.resolveUpdatesChannelRef(run.checkIn);
+
+    this.logger.log(
+      `[Thread] Channel config for "${run.checkIn.name}": source=${source}, ref=${channelRef ?? 'null'}, checkIn.updatesChannelId=${run.checkIn.updatesChannelId ?? 'null'}, team.slackChannelId=${run.checkIn.team?.slackChannelId ?? 'null'}`,
+    );
+
+    if (!channelRef) {
+      const reason =
+        `No Slack channel configured for CheckIn "${run.checkIn.name}". Set updatesChannelId on the CheckIn, team.slackChannelId on the team, or SLACK_UPDATES_CHANNEL_ID in env.`;
+      this.logger.error(`[Thread] ${reason}`);
+      return { ok: false, reason };
+    }
+
+    const channelId = await this.slackService.resolveChannelId(channelRef);
     if (!channelId) {
-      this.logger.error(
-        `[Thread] No updates channel configured for CheckIn "${run.checkIn.name}". Set updatesChannelId on the CheckIn or SLACK_UPDATES_CHANNEL_ID in env.`,
-      );
-      return null;
+      const reason = `Could not resolve Slack channel "${channelRef}" (from ${source}) to a channel ID. Use a channel ID like C0123456789 or ensure the bot can list channels.`;
+      this.logger.error(`[Thread] ${reason}`);
+      return { ok: false, reason };
+    }
+
+    const joined = await this.slackService.joinChannel(channelId);
+    if (!joined) {
+      const reason = `Bot could not join Slack channel ${channelId} (from ${source}). Invite the bot to the channel or grant channels:join scope.`;
+      this.logger.error(`[Thread] ${reason}`);
+      return { ok: false, reason };
     }
 
     const totalCount =
@@ -75,30 +119,36 @@ export class CheckInThreadService {
         where: { checkInId: run.checkInId!, isActive: true },
       }));
 
-    const dateLabel = formatRunDate(run.scheduledFor, run.checkIn.timezone);
     const blocks = buildParentMessageBlocks({
       checkInName: run.checkIn.name,
-      description: run.checkIn.description,
-      dateLabel,
       completedCount: 0,
       totalCount,
     });
 
     const text = buildParentMessageText({
       checkInName: run.checkIn.name,
-      dateLabel,
       completedCount: 0,
       totalCount,
     });
 
     this.logger.log(
-      `[Thread] Posting parent message for "${run.checkIn.name}" to channel ${channelId}`,
+      `[Thread] Posting public standup announcement for "${run.checkIn.name}" to channel ${channelId} (resolved from ${source}: "${channelRef}")`,
     );
 
     const posted = await this.slackService.postMessage({ channelId, text, blocks });
     if (!posted.ok || !posted.ts) {
-      this.logger.error(`[Thread] Failed to post parent message for run ${runId}`);
-      return null;
+      const reason = [
+        `chat.postMessage failed for run ${runId} in channel ${channelId}.`,
+        posted.slackError ? `slack_error=${posted.slackError}` : null,
+        posted.needed ? `needed=${posted.needed}` : null,
+        posted.provided ? `provided=${posted.provided}` : null,
+        posted.error ? `message=${posted.error}` : null,
+      ]
+        .filter(Boolean)
+        .join(' ');
+
+      this.logger.error(`[Thread] ${reason}`);
+      return { ok: false, reason };
     }
 
     await this.prisma.standupRun.update({
@@ -119,18 +169,11 @@ export class CheckInThreadService {
       },
     });
 
-    await this.slackService.postMessage({
-      channelId,
-      threadTs: posted.ts,
-      text: 'Participants can add additional updates after completing their check-in.',
-      blocks: buildAdditionalUpdateButtonBlocks(runId),
-    });
-
     this.logger.log(
-      `[Thread] Created thread ${posted.ts} for run ${runId} in channel ${channelId}`,
+      `[Thread] Created public thread ${posted.ts} for run ${runId} in channel ${channelId}`,
     );
 
-    return { channelId, threadTs: posted.ts };
+    return { ok: true, channelId, threadTs: posted.ts as string };
   }
 
   async refreshParentProgress(runId: string): Promise<void> {
@@ -146,19 +189,15 @@ export class CheckInThreadService {
 
     const completedCount = run.submissions.filter((s) => s.status === 'completed').length;
     const totalCount = run.submissions.length;
-    const dateLabel = formatRunDate(run.scheduledFor, run.checkIn.timezone);
 
     const blocks = buildParentMessageBlocks({
       checkInName: run.checkIn.name,
-      description: run.checkIn.description,
-      dateLabel,
       completedCount,
       totalCount,
     });
 
     const text = buildParentMessageText({
       checkInName: run.checkIn.name,
-      dateLabel,
       completedCount,
       totalCount,
     });
@@ -206,13 +245,11 @@ export class CheckInThreadService {
 
     const blocks = buildParticipantSummaryBlocks({
       displayName: submission.user.slackDisplayName,
-      checkInName: run.checkIn.name,
       qaPairs,
     });
 
     const text = buildParticipantSummaryText({
       displayName: submission.user.slackDisplayName,
-      checkInName: run.checkIn.name,
       qaPairs,
     });
 
@@ -324,12 +361,17 @@ export class CheckInThreadService {
 
     const completedCount = run.submissions.filter((s) => s.status === 'completed').length;
     const totalCount = run.submissions.length;
-    const header = `*${run.checkIn.name} Report*\n\n*Reported:* ${completedCount} of ${totalCount}\n\n${digestText}`;
+    const header = buildAiReportHeader({
+      checkInName: run.checkIn.name,
+      completedCount,
+      totalCount,
+    });
+    const body = `${header}\n\n${digestText}`;
 
     const posted = await this.slackService.postMessage({
       channelId: run.slackChannelId,
       threadTs: run.slackThreadTs,
-      text: header,
+      text: body,
       ...(blocks ? { blocks: blocks as any } : {}),
     });
 
@@ -338,6 +380,7 @@ export class CheckInThreadService {
         where: { id: runId },
         data: {
           reportGeneratedAt: new Date(),
+          reportStatus: 'completed',
           threadReplyCount: { increment: 1 },
         },
       });

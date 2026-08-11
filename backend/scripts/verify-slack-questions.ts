@@ -46,7 +46,7 @@ async function main() {
     seen.push(next.text);
     current = next;
   }
-  await collection.finishConversation(userId);
+  await collection.completeConversation(userId);
 
   if (!seen.includes(uniqueText)) {
     throw new Error(`New question never appeared in conversation. Seen: ${seen.join(' | ')}`);

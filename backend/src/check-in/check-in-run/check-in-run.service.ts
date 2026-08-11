@@ -94,6 +94,64 @@ export class CheckInRunService {
       );
     }
 
+    const runInclude = {
+      checkIn: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+      submissions: {
+        include: {
+          user: {
+            select: {
+              id: true,
+              slackUserId: true,
+              slackDisplayName: true,
+            },
+          },
+          conversationState: {
+            include: {
+              currentQuestion: true,
+            },
+          },
+        },
+      },
+    } as const;
+
+    if (triggerSource === 'scheduler') {
+      const activeRun = await this.prisma.standupRun.findFirst({
+        where: {
+          checkInId: checkIn.id,
+          status: 'collecting',
+        },
+        include: runInclude,
+        orderBy: { startedAt: 'desc' },
+      });
+
+      if (activeRun) {
+        this.logger.log(
+          `Active collecting run ${activeRun.id} already exists for "${checkIn.name}" — scheduler skipping duplicate.`,
+        );
+
+        return {
+          status: 'existing',
+          checkInId: checkIn.id,
+          checkInName: checkIn.name,
+          teamId: checkIn.team.id,
+          teamName: checkIn.team.name,
+          participantCount: activeParticipants.length,
+          totalQuestions: checkIn.questions.length,
+          createdSubmissionCount: activeRun.submissions.length,
+          skippedParticipantCount: 0,
+          queuedParticipantCount: 0,
+          skippedParticipants: [],
+          queuedParticipants: [],
+          run: activeRun,
+        };
+      }
+    }
+
     /*
      * Reminder lifecycle belongs to the run itself rather than
      * to the scheduler transport.
@@ -130,6 +188,12 @@ export class CheckInRunService {
         userId: string;
         slackUserId: string;
         reason: string;
+      }> = [];
+
+      const queuedParticipants: Array<{
+        userId: string;
+        slackUserId: string;
+        checkInName: string;
       }> = [];
 
       const run =
@@ -221,12 +285,9 @@ export class CheckInRunService {
                 participant.teamMember.user;
 
               /*
-               * A plain Slack DM does not contain a CheckIn,
-               * run, or submission identifier.
-               *
-               * Until Slack interactions carry explicit
-               * submission metadata, Pulse therefore permits
-               * only one unfinished conversation per user.
+               * Each CheckIn run gets its own submission and conversation
+               * state. Users with another active CheckIn can participate in
+               * both concurrently and choose which one to answer in Slack.
                */
               const existingConversation =
                 await tx.conversationState.findFirst({
@@ -292,7 +353,10 @@ export class CheckInRunService {
                   this.logger.warn(
                     `Released stale conversation for user ${user.slackUserId} to allow CheckIn "${checkIn.name}".`,
                   );
-                } else {
+                } else if (
+                  existingConversation.submission.run.checkInId ===
+                  checkIn.id
+                ) {
                   const existingCheckInName =
                     existingConversation
                       .submission
@@ -314,6 +378,10 @@ export class CheckInRunService {
                   );
 
                   continue;
+                } else {
+                  this.logger.log(
+                    `User ${user.slackUserId} already has another active CheckIn — creating concurrent submission for "${checkIn.name}".`,
+                  );
                 }
               }
 
@@ -357,12 +425,14 @@ export class CheckInRunService {
              * already had another active conversation, this
              * occurrence has nothing left to collect.
              *
-             * Complete it immediately and remove reminder state
-             * so the reminder worker never tries to process it.
+             * Queued submissions still count as active work for
+             * this run and must not auto-complete the run.
              */
             if (
               createdSubmissionCount ===
-              0
+                0 &&
+              queuedParticipants.length ===
+                0
             ) {
               await tx.standupRun.update({
                 where: {
@@ -430,7 +500,7 @@ export class CheckInRunService {
         0;
 
       this.logger.log(
-        `Created CheckIn run ${run?.id} for "${checkIn.name}" with ${createdCount} active submission(s); ${skippedParticipants.length} participant(s) skipped.`,
+        `Created CheckIn run ${run?.id} for "${checkIn.name}" with ${createdCount} active submission(s); ${skippedParticipants.length} participant(s) skipped; ${queuedParticipants.length} participant(s) queued.`,
       );
 
       if (
@@ -460,13 +530,21 @@ export class CheckInRunService {
         participantCount:
           activeParticipants.length,
 
+        totalQuestions:
+          checkIn.questions.length,
+
         createdSubmissionCount:
           createdCount,
 
         skippedParticipantCount:
           skippedParticipants.length,
 
+        queuedParticipantCount:
+          queuedParticipants.length,
+
         skippedParticipants,
+
+        queuedParticipants,
 
         run,
       };
@@ -544,6 +622,9 @@ export class CheckInRunService {
           participantCount:
             activeParticipants.length,
 
+          totalQuestions:
+            checkIn.questions.length,
+
           createdSubmissionCount:
             existingRun
               ?.submissions
@@ -552,7 +633,11 @@ export class CheckInRunService {
           skippedParticipantCount:
             0,
 
+          queuedParticipantCount: 0,
+
           skippedParticipants: [],
+
+          queuedParticipants: [],
 
           run:
             existingRun,
@@ -571,7 +656,10 @@ export class CheckInRunService {
           select: {
             id: true,
             name: true,
-            introMessage: true,
+            questions: {
+              where: { isActive: true },
+              select: { id: true },
+            },
           },
         },
         submissions: {
@@ -605,7 +693,7 @@ export class CheckInRunService {
 
     return {
       checkInName: run.checkIn.name,
-      introMessage: run.checkIn.introMessage,
+      totalQuestions: run.checkIn.questions.length,
       run: {
         id: run.id,
         submissions: run.submissions,
@@ -622,6 +710,7 @@ export class CheckInRunService {
       updatedAt: Date;
       submission: {
         slackDmChannelId?: string | null;
+        slackDmThreadTs?: string | null;
         run: {
           checkInId: string | null;
           status: string;
@@ -638,20 +727,15 @@ export class CheckInRunService {
       return true;
     }
 
-    // A different CheckIn's conversation should not block this one.
-    if (run.checkInId !== targetCheckInId) {
-      return true;
-    }
-
     // Stale conversations (e.g. user never replied) should not block forever.
     const ageMs = Date.now() - conversation.updatedAt.getTime();
     if (ageMs > this.staleConversationMs) {
       return true;
     }
 
-    // DM was never delivered for a collecting run — release and retry.
+    // DM thread was never created for a collecting run — release and retry.
     if (
-      !conversation.submission.slackDmChannelId &&
+      !conversation.submission.slackDmThreadTs &&
       run.status === 'collecting'
     ) {
       const runAgeMs = Date.now() - run.startedAt.getTime();

@@ -37,12 +37,14 @@ model User {
   timezone         String?
   createdAt        DateTime @default(now())
 
-  workspace          Workspace           @relation(fields: [workspaceId], references: [id])
-  teamMembers        TeamMember[]
-  answers            Answer[]
-  submissions        StandupSubmission[]
-  conversationStates ConversationState[]
-  threadUpdates      StandupThreadUpdate[]
+  focusedSubmissionId String?            @unique
+  workspace           Workspace          @relation(fields: [workspaceId], references: [id])
+  teamMembers         TeamMember[]
+  answers             Answer[]
+  submissions         StandupSubmission[]
+  conversationStates  ConversationState[]
+  threadUpdates       StandupThreadUpdate[]
+  focusedSubmission   StandupSubmission? @relation("FocusedSubmission", fields: [focusedSubmissionId], references: [id], onDelete: SetNull)
 }
 
 model Team {
@@ -179,6 +181,7 @@ model StandupRun {
 
   reportDueAt       DateTime?
   reportGeneratedAt DateTime?
+  reportStatus      String   @default("waiting_for_responses")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -196,6 +199,8 @@ model StandupRun {
   @@index([scheduledFor])
   @@index([reminderDueAt])
   @@index([reminderSentAt])
+  @@index([reportDueAt])
+  @@index([reportStatus])
 }
 
 model StandupSubmission {
@@ -206,6 +211,7 @@ model StandupSubmission {
   startedAt   DateTime?
   completedAt DateTime?
   slackDmChannelId String?
+  slackDmThreadTs  String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -214,11 +220,13 @@ model StandupSubmission {
   answers           Answer[]
   conversationState ConversationState?
   threadUpdates     StandupThreadUpdate[]
+  focusedByUser     User?              @relation("FocusedSubmission")
 
   @@unique([runId, userId])
   @@index([runId])
   @@index([userId])
   @@index([status])
+  @@index([slackDmThreadTs])
 }
 
 model Answer {
@@ -268,6 +276,7 @@ model AiDigest {
   summary     String
   blockers    Json
   themes      Json
+  reportSections Json?
   createdAt   DateTime @default(now())
 
   team Team       @relation(fields: [teamId], references: [id])

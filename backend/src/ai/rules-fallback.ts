@@ -5,6 +5,7 @@ import {
   RawResponseForAnalysis,
   ThemeSummary,
   ExtractedBlocker,
+  EMPTY_REPORT_SECTIONS,
 } from './dto/ai-result.dto';
 
 /**
@@ -62,5 +63,28 @@ export function runRulesFallback(
     summary,
     blockers,
     themes,
+    reportSections:
+      answerCount === 0
+        ? EMPTY_REPORT_SECTIONS
+        : {
+            keyAccomplishments: themes.map((theme) => theme.theme),
+            risks: [],
+            aiInsights: [
+              `Collected ${answerCount} substantive answer(s) from ${participantCount} participant(s).`,
+            ],
+            actionItems: [],
+            participantUpdates: responses.map((response) => ({
+              slackUserId: response.userId,
+              displayName: response.userId,
+              answers: response.answers.map((answer) => ({
+                question: answer.questionText,
+                answer: answer.text,
+              })),
+            })),
+            overallProgress:
+              participantCount > 0
+                ? `${participantCount} participant(s) submitted ${answerCount} answer(s).`
+                : '',
+          },
   };
 }

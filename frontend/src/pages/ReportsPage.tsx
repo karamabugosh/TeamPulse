@@ -1,247 +1,182 @@
-import React, { useEffect, useState } from 'react';
-import { FileText, Search, Eye, Sparkles, Download } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Search, Eye, Loader2, History, Sparkles } from 'lucide-react';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Separator } from '@/components/ui/separator';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
+import { apiFetch } from '@/lib/api';
+
+type ReportListItem = {
+  id: string;
+  checkInId: string | null;
+  checkInName: string;
+  teamName: string;
+  generatedAt: string;
+  aiProvider: string;
+  source: string;
+  summary: string;
+  totalParticipants: number;
+  participantsResponded: number;
+  completionRate: number;
+};
+
+type ReportGroup = {
+  checkInId: string;
+  checkInName: string;
+  teamName: string;
+  latestReport: ReportListItem;
+  totalReports: number;
+};
+
+function formatGenerated(iso: string) {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(iso));
+}
 
 export const ReportsPage: React.FC = () => {
-  const [reports, setReports] = useState<any[]>([]);
+  const [groups, setGroups] = useState<ReportGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedReport, setSelectedReport] = useState<any | null>(null);
 
-  const loadReports = () => {
-    fetch('/api/admin/reports')
-      .then((res) => res.json())
-      .then((data) => {
-        setReports(Array.isArray(data) ? data : []);
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error('Failed to load reports:', err);
-        setLoading(false);
-      });
-  };
+  const loadReports = useCallback(async () => {
+    try {
+      const params = new URLSearchParams();
+      if (searchTerm.trim()) params.set('search', searchTerm.trim());
+      const query = params.toString();
+      const data = await apiFetch<ReportGroup[]>(
+        `/api/admin/reports/grouped${query ? `?${query}` : ''}`,
+      );
+      setGroups(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error('Failed to load reports:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [searchTerm]);
 
   useEffect(() => {
-    loadReports();
-  }, []);
+    setLoading(true);
+    const timer = setTimeout(loadReports, searchTerm ? 300 : 0);
+    return () => clearTimeout(timer);
+  }, [loadReports, searchTerm]);
 
-  const handleExportCsv = (id: string) => {
-    window.open(`/api/admin/reports/${id}/export/csv`, '_blank');
-  };
-
-  const handleExportPdf = (id: string) => {
-    window.open(`/api/admin/reports/${id}/export/pdf`, '_blank');
-  };
-
-  const filteredReports = reports.filter(
-    (r) =>
-      r.teamName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      r.summary.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  useEffect(() => {
+    const interval = setInterval(loadReports, 15000);
+    return () => clearInterval(interval);
+  }, [loadReports]);
 
   return (
-    <TooltipProvider>
-      <div className="space-y-8">
-        <PageHeader
-          title="Reports"
-          description="Review AI-generated daily summaries, team blockers, and export digest history."
-        />
+    <div className="mx-auto max-w-4xl space-y-8">
+      <PageHeader
+        title="Reports"
+        description="Latest AI standup report for each CheckIn."
+      />
 
-        <Card>
-          <CardContent className="flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
-            <div className="relative w-full sm:max-w-md">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Search reports by team or keywords..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-9"
-              />
-            </div>
-            <Tabs defaultValue="all">
-              <TabsList>
-                <TabsTrigger value="all">All Time</TabsTrigger>
-                <TabsTrigger value="week">This Week</TabsTrigger>
-              </TabsList>
-            </Tabs>
+      <div className="relative max-w-md">
+        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          placeholder="Search CheckIns..."
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          className="h-10 pl-9"
+        />
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-24 text-muted-foreground">
+          <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+          Loading reports...
+        </div>
+      ) : groups.length === 0 ? (
+        <Card className="border-dashed">
+          <CardContent className="py-16 text-center text-muted-foreground">
+            <Sparkles className="mx-auto mb-3 h-8 w-8 opacity-40" />
+            <p className="font-medium text-foreground">No reports yet</p>
+            <p className="mt-1 text-sm">
+              Reports appear here after a CheckIn run completes and the AI report is generated.
+            </p>
           </CardContent>
         </Card>
+      ) : (
+        <div className="space-y-4">
+          {groups.map((group) => {
+            const report = group.latestReport;
+            const hasHistory = group.totalReports > 1;
 
-        <Card className="overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-border bg-secondary/50">
-                  <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Team</th>
-                  <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Generated At</th>
-                  <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Source</th>
-                  <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">AI Summary</th>
-                  <th className="px-6 py-4 text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredReports.length > 0 ? (
-                  filteredReports.map((report) => (
-                    <tr key={report.id} className="border-b border-border transition-colors hover:bg-secondary/30">
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-2 font-medium">
-                          <FileText className="h-4 w-4 text-primary" />
-                          {report.teamName}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-muted-foreground font-mono text-xs">
-                        {new Date(report.generatedAt).toLocaleString()}
-                      </td>
-                      <td className="px-6 py-4">
-                        <Badge variant={report.source === 'ai' ? 'default' : 'warning'}>
-                          {report.source === 'ai' ? 'AI GPT-4o' : 'Rules Fallback'}
-                        </Badge>
-                      </td>
-                      <td className="px-6 py-4 max-w-md">
-                        <p className="truncate text-muted-foreground">{report.summary}</p>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center justify-end gap-2">
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button variant="outline" size="sm" onClick={() => setSelectedReport(report)}>
-                                <Eye className="h-3.5 w-3.5" />
-                                View
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>View full digest</TooltipContent>
-                          </Tooltip>
-                          <Button variant="ghost" size="sm" onClick={() => handleExportCsv(report.id)} className="text-emerald-400">
-                            CSV
-                          </Button>
-                          <Button variant="ghost" size="sm" onClick={() => handleExportPdf(report.id)} className="text-primary">
-                            PDF
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={5} className="px-6 py-12 text-center text-muted-foreground">
-                      No reports match your filter criteria.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-
-        <Dialog open={!!selectedReport} onOpenChange={() => setSelectedReport(null)}>
-          <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-            {selectedReport && (
-              <>
-                <DialogHeader>
-                  <DialogTitle className="flex items-center gap-2">
-                    <Sparkles className="h-5 w-5 text-primary" />
-                    Standup Digest — {selectedReport.teamName}
-                  </DialogTitle>
-                  <DialogDescription>
-                    Generated: {new Date(selectedReport.generatedAt).toLocaleString()}
-                  </DialogDescription>
-                </DialogHeader>
-
-                <Card className="border-primary/20 bg-primary/5">
-                  <CardContent className="p-5 space-y-2">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-primary">Executive Summary</h3>
-                    <p className="text-base leading-relaxed text-muted-foreground">{selectedReport.summary}</p>
-                  </CardContent>
-                </Card>
-
-                <div className="space-y-3">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400">Extracted Blockers</h3>
-                  {Array.isArray(selectedReport.blockers) && selectedReport.blockers.length > 0 ? (
-                    selectedReport.blockers.map((b: any, idx: number) => (
-                      <Card key={idx}>
-                        <CardContent className="p-4 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm font-medium">User: {b.userId}</span>
-                            <Badge variant="warning">Severity: {b.severity || 'Medium'}</Badge>
-                          </div>
-                          <p className="text-sm text-muted-foreground">{b.description}</p>
-                          {b.dependency && <p className="text-xs text-muted-foreground">Dependency: {b.dependency}</p>}
-                        </CardContent>
-                      </Card>
-                    ))
-                  ) : (
-                    <Card>
-                      <CardContent className="p-4 text-sm italic text-muted-foreground">
-                        No blockers reported for this standup run.
-                      </CardContent>
-                    </Card>
-                  )}
-                </div>
-
-                <div className="space-y-3">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-primary">Themes & Topics</h3>
-                  {Array.isArray(selectedReport.themes) && selectedReport.themes.length > 0 ? (
-                    selectedReport.themes.map((t: any, idx: number) => (
-                      <Card key={idx}>
-                        <CardContent className="p-4 space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-primary">{t.theme}</span>
-                            <span className="text-xs text-muted-foreground">Mentions: {t.mentionCount}</span>
-                          </div>
-                          <p className="text-sm text-muted-foreground">{t.summary}</p>
-                        </CardContent>
-                      </Card>
-                    ))
-                  ) : (
-                    <Card>
-                      <CardContent className="p-4 text-sm italic text-muted-foreground">
-                        No specific themes categorized.
-                      </CardContent>
-                    </Card>
-                  )}
-                </div>
-
-                <Separator />
-
-                <DialogFooter className="flex-col sm:flex-row gap-2">
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => handleExportCsv(selectedReport.id)}>
-                      <Download className="h-3.5 w-3.5" />
-                      CSV
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => handleExportPdf(selectedReport.id)}>
-                      <Download className="h-3.5 w-3.5" />
-                      PDF
-                    </Button>
+            return (
+              <Card key={group.checkInId} className="overflow-hidden">
+                <CardContent className="p-0">
+                  <div className="border-b border-border/60 px-6 py-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h2 className="text-lg font-semibold tracking-tight">
+                          {group.checkInName}
+                        </h2>
+                        <p className="text-sm text-muted-foreground">{group.teamName}</p>
+                      </div>
+                      <Badge variant={report.source === 'ai' ? 'default' : 'secondary'}>
+                        {report.aiProvider}
+                      </Badge>
+                    </div>
                   </div>
-                  <Button onClick={() => setSelectedReport(null)}>Close</Button>
-                </DialogFooter>
-              </>
-            )}
-          </DialogContent>
-        </Dialog>
-      </div>
-    </TooltipProvider>
+
+                  <div className="space-y-4 px-6 py-5">
+                    <div>
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        Latest Report
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Generated {formatGenerated(report.generatedAt)}
+                      </p>
+                    </div>
+
+                    <p className="line-clamp-2 text-sm leading-relaxed text-foreground/90">
+                      {report.summary}
+                    </p>
+
+                    <p className="text-sm text-muted-foreground">
+                      Participants{' '}
+                      <span className="font-medium text-foreground">
+                        {report.participantsResponded}/{report.totalParticipants}
+                      </span>
+                      {report.completionRate < 100 && (
+                        <span className="ml-1">({report.completionRate}%)</span>
+                      )}
+                    </p>
+
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <Button asChild size="sm">
+                        <Link to={`/reports/${report.id}`}>
+                          <Eye className="h-3.5 w-3.5" />
+                          View Report
+                        </Link>
+                      </Button>
+                      {hasHistory && (
+                        <Button asChild variant="outline" size="sm">
+                          <Link to={`/reports/checkins/${group.checkInId}/history`}>
+                            <History className="h-3.5 w-3.5" />
+                            History
+                            <span className="ml-1 text-muted-foreground">
+                              ({group.totalReports})
+                            </span>
+                          </Link>
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 };
 

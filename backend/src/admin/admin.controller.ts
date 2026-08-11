@@ -34,6 +34,19 @@ export class AdminController {
     return this.adminService.getReportsList(search, timeframe);
   }
 
+  @Get('reports/grouped')
+  getReportsGrouped(
+    @Query('search') search?: string,
+    @Query('timeframe') timeframe?: string,
+  ) {
+    return this.adminService.getReportsGrouped(search, timeframe);
+  }
+
+  @Get('reports/by-checkin/:checkInId')
+  getReportsForCheckIn(@Param('checkInId') checkInId: string) {
+    return this.adminService.getReportsForCheckIn(checkInId);
+  }
+
   @Get('reports/:id/export/csv')
   @Header('Content-Type', 'text/csv')
   @Header('Content-Disposition', 'attachment; filename="report-export.csv"')
@@ -46,6 +59,11 @@ export class AdminController {
   @Header('Content-Disposition', 'attachment; filename="report-export.txt"')
   exportPdf(@Param('id') id: string) {
     return this.adminService.exportReportPdf(id);
+  }
+
+  @Get('reports/:id')
+  getReport(@Param('id') id: string) {
+    return this.adminService.getReportDetail(id);
   }
 
   @Get('settings')

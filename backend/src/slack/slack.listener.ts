@@ -130,7 +130,45 @@ export class SlackListener implements OnModuleInit {
           }
         }
 
-        this.logger.debug(
+        if (existingEvent.status === 'processing') {
+          const staleEvent = await this.prisma.inboundEvent.findUnique({
+            where: { id: existingEvent.id },
+            select: { receivedAt: true },
+          });
+          const ageMs = staleEvent
+            ? Date.now() - staleEvent.receivedAt.getTime()
+            : 0;
+
+          if (ageMs > 120_000) {
+            const reclaimed =
+              await this.prisma.inboundEvent.updateMany({
+                where: {
+                  id: existingEvent.id,
+                  status: 'processing',
+                },
+                data: {
+                  status: 'processing',
+                  errorMessage: null,
+                  processedAt: null,
+                  receivedAt: new Date(),
+                  externalEventId: externalEventId || null,
+                },
+              });
+
+            if (reclaimed.count === 1) {
+              this.logger.warn(
+                `Reclaimed stale processing Slack event ${idempotencyKey} (age ${Math.round(ageMs / 1000)}s).`,
+              );
+
+              return {
+                claimed: true,
+                eventId: existingEvent.id,
+              };
+            }
+          }
+        }
+
+        this.logger.warn(
           `Ignoring duplicate Slack event ${idempotencyKey} with status ${existingEvent.status}.`,
         );
 
@@ -205,9 +243,20 @@ export class SlackListener implements OnModuleInit {
       msg: any,
       client: any,
     ) => {
-      const msgIdentifier =
-        msg.client_msg_id ||
-        `${msg.user}-${msg.ts}`;
+      // Slack `ts` is server-assigned and unique per message. `client_msg_id` can be
+      // reused across consecutive replies in the same DM compose session, which caused
+      // Q2+ answers to be silently dropped as duplicates of Q1.
+      const idempotencyKey = msg.ts
+        ? `slack:message:${msg.channel}:${msg.ts}`
+        : msg.client_msg_id
+          ? `slack:message:${msg.channel}:client:${msg.client_msg_id}`
+          : null;
+
+      this.logger.log(
+        `[Slack Event] Received message user=${msg.user ?? 'unknown'} channel=${msg.channel ?? 'unknown'}` +
+          ` ts=${msg.ts ?? 'none'} thread_ts=${msg.thread_ts ?? 'none'}` +
+          ` client_msg_id=${msg.client_msg_id ?? 'none'} subtype=${msg.subtype ?? 'none'}`,
+      );
 
       if (
         msg.bot_id ||
@@ -216,7 +265,7 @@ export class SlackListener implements OnModuleInit {
         msg.subtype === 'message_deleted'
       ) {
         this.logger.debug(
-          'Ignored bot message or message modification event.',
+          `[Slack Event] Ignored bot/modification message ts=${msg.ts ?? 'none'}`,
         );
 
         return;
@@ -224,19 +273,18 @@ export class SlackListener implements OnModuleInit {
 
       if (!msg.user || !msg.channel) {
         this.logger.warn(
-          'Ignored Slack message without a user or channel.',
+          `[Slack Event] Ignored message without user or channel ts=${msg.ts ?? 'none'}`,
         );
 
         return;
       }
 
-      /*
-       * Do not log msg.text.
-       * Standup answers may contain private employee information.
-       */
-      this.logger.log(
-        `Processing incoming Slack message from user ${msg.user} in channel ${msg.channel}.`,
-      );
+      if (!idempotencyKey) {
+        this.logger.error(
+          `[Slack Event] Cannot process message without ts or client_msg_id from user ${msg.user}`,
+        );
+        return;
+      }
 
       let inboundEventId: string | undefined;
 
@@ -248,12 +296,15 @@ export class SlackListener implements OnModuleInit {
         const claim =
           await this.claimInboundEvent(
             msg.user,
-            `slack:message:${msgIdentifier}`,
+            idempotencyKey,
             'message',
-            msg.client_msg_id || msg.ts,
+            msg.ts ?? msg.client_msg_id,
           );
 
         if (!claim.claimed) {
+          this.logger.warn(
+            `[Slack Event] Dropped duplicate message event key=${idempotencyKey} user=${msg.user}`,
+          );
           return;
         }
 
@@ -294,7 +345,7 @@ export class SlackListener implements OnModuleInit {
         };
 
         this.logger.log(
-          `Sending incoming message from user ${msg.user} to SlackGateway.`,
+          `[Slack Event] Dispatching to SlackGateway user=${msg.user} ts=${msg.ts}`,
         );
 
         await this.slackGateway.handleIncomingMessage(
@@ -303,6 +354,10 @@ export class SlackListener implements OnModuleInit {
 
         await this.markInboundEventProcessed(
           inboundEventId,
+        );
+
+        this.logger.log(
+          `[Slack Event] Completed processing user=${msg.user} ts=${msg.ts}`,
         );
       } catch (error: unknown) {
         await this.markInboundEventFailed(
@@ -335,16 +390,6 @@ export class SlackListener implements OnModuleInit {
       async ({ message, client }) => {
         await handleIncomingSlackMessage(
           message,
-          client,
-        );
-      },
-    );
-
-    app.event(
-      'message',
-      async ({ event, client }) => {
-        await handleIncomingSlackMessage(
-          event,
           client,
         );
       },

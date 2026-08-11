@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CheckCircle, Loader2, Play } from 'lucide-react';
 import {
   Dialog,
@@ -47,6 +47,19 @@ export type CheckInFormState = {
   questions: QuestionItem[];
 };
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const mapQuestionFromApi = (q: any): QuestionItem => ({
+  id: q.id,
+  question: q.question,
+  type: q.type || 'FREE_TEXT',
+  options: Array.isArray(q.options) ? q.options : [],
+  isRequired: q.isRequired ?? true,
+  enabled: q.isActive !== false,
+  order: q.order,
+});
+
 const DEFAULT_QUESTIONS: QuestionItem[] = [
   { id: 'q1', question: 'What did you accomplish yesterday?', type: 'FREE_TEXT', isRequired: true, order: 1 },
   { id: 'q2', question: 'What will you work on today?', type: 'FREE_TEXT', isRequired: true, order: 2 },
@@ -86,6 +99,37 @@ interface CheckInFormDialogProps {
   onSaved: (saved?: any) => void;
 }
 
+function buildFormFromCheckIn(checkIn: any): CheckInFormState {
+  return {
+    teamId: checkIn.teamId,
+    name: checkIn.name,
+    description: checkIn.description || '',
+    introMessage: checkIn.introMessage || '',
+    outroMessage: checkIn.outroMessage || '',
+    timezone: checkIn.timezone || 'Asia/Riyadh',
+    collectionCron: checkIn.collectionCron || '0 9 * * 1-5',
+    updatesChannelId: checkIn.updatesChannelId || '',
+    reminderEnabled: checkIn.reminderEnabled ?? true,
+    reminderMinutesAfter: checkIn.reminderMinutesAfter ?? 30,
+    reminderRecurringEnabled: checkIn.reminderRecurringEnabled ?? false,
+    reminderIntervalMinutes: checkIn.reminderIntervalMinutes ?? 60,
+    reminderOnlyNonResponders: checkIn.reminderOnlyNonResponders ?? true,
+    reminderOnSlackActive: checkIn.reminderOnSlackActive ?? false,
+    reportTriggerMode: checkIn.reportTriggerMode || 'scheduled',
+    reportCron: checkIn.reportCron || '30 9 * * 1-5',
+    reportTimeoutMinutes: checkIn.reportTimeoutMinutes ?? 120,
+    publishStatus: checkIn.publishStatus || 'published',
+    scheduleEnabled: checkIn.scheduleEnabled ?? true,
+    enabled: checkIn.enabled ?? true,
+    participantIds: (checkIn.participants || []).map((p: any) => p.teamMemberId),
+    questions: checkIn.questions?.length
+      ? checkIn.questions
+          .filter((q: any) => q.isActive !== false)
+          .map(mapQuestionFromApi)
+      : [...DEFAULT_QUESTIONS],
+  };
+}
+
 export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
   open,
   onOpenChange,
@@ -99,53 +143,75 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
   const [reportSchedule, setReportSchedule] = useState<ScheduleConfig>(parseCronToSchedule('30 9 * * 1-5'));
   const [saving, setSaving] = useState(false);
   const [startingRun, setStartingRun] = useState(false);
+  const [loadingForm, setLoadingForm] = useState(false);
+  const initializedKeyRef = useRef<string | null>(null);
 
+  const applyFormState = useCallback((nextForm: CheckInFormState) => {
+    setForm(nextForm);
+    setSchedule(parseCronToSchedule(nextForm.collectionCron || '0 9 * * 1-5'));
+    setReportSchedule(parseCronToSchedule(nextForm.reportCron || '30 9 * * 1-5'));
+  }, []);
+
+  // Initialize form ONLY when the dialog opens — never on background refetches.
   useEffect(() => {
-    if (!open) return;
-
-    if (editingCheckIn) {
-      setForm({
-        teamId: editingCheckIn.teamId,
-        name: editingCheckIn.name,
-        description: editingCheckIn.description || '',
-        introMessage: editingCheckIn.introMessage || '',
-        outroMessage: editingCheckIn.outroMessage || '',
-        timezone: editingCheckIn.timezone || 'Asia/Riyadh',
-        collectionCron: editingCheckIn.collectionCron || '0 9 * * 1-5',
-        updatesChannelId: editingCheckIn.updatesChannelId || '',
-        reminderEnabled: editingCheckIn.reminderEnabled ?? true,
-        reminderMinutesAfter: editingCheckIn.reminderMinutesAfter ?? 30,
-        reminderRecurringEnabled: editingCheckIn.reminderRecurringEnabled ?? false,
-        reminderIntervalMinutes: editingCheckIn.reminderIntervalMinutes ?? 60,
-        reminderOnlyNonResponders: editingCheckIn.reminderOnlyNonResponders ?? true,
-        reminderOnSlackActive: editingCheckIn.reminderOnSlackActive ?? false,
-        reportTriggerMode: editingCheckIn.reportTriggerMode || 'scheduled',
-        reportCron: editingCheckIn.reportCron || '30 9 * * 1-5',
-        reportTimeoutMinutes: editingCheckIn.reportTimeoutMinutes ?? 120,
-        publishStatus: editingCheckIn.publishStatus || 'published',
-        scheduleEnabled: editingCheckIn.scheduleEnabled ?? true,
-        enabled: editingCheckIn.enabled ?? true,
-        participantIds: (editingCheckIn.participants || []).map((p: any) => p.teamMemberId),
-        questions: editingCheckIn.questions?.length
-          ? editingCheckIn.questions.map((q: any) => ({
-              id: q.id,
-              question: q.question,
-              type: q.type || 'FREE_TEXT',
-              options: q.options || [],
-              isRequired: q.isRequired ?? true,
-              order: q.order,
-            }))
-          : [...DEFAULT_QUESTIONS],
-      });
-      setSchedule(parseCronToSchedule(editingCheckIn.collectionCron || '0 9 * * 1-5'));
-      setReportSchedule(parseCronToSchedule(editingCheckIn.reportCron || '30 9 * * 1-5'));
-    } else {
-      const firstTeam = teams[0]?.id || '';
-      setForm({ ...defaultFormState(), teamId: firstTeam });
-      setSchedule(parseCronToSchedule('0 9 * * 1-5'));
-      setReportSchedule(parseCronToSchedule('30 9 * * 1-5'));
+    if (!open) {
+      initializedKeyRef.current = null;
+      return;
     }
-  }, [open, editingCheckIn, teams]);
+
+    const initKey = editingCheckIn?.id ?? 'new';
+    if (initializedKeyRef.current === initKey) {
+      return;
+    }
+    initializedKeyRef.current = initKey;
+
+    let cancelled = false;
+
+    const load = async () => {
+      if (editingCheckIn?.id) {
+        setLoadingForm(true);
+        try {
+          const fresh = await apiFetch<any>(`/api/check-ins/${editingCheckIn.id}`);
+          if (!cancelled) {
+            applyFormState(buildFormFromCheckIn(fresh));
+          }
+        } catch (error) {
+          if (!cancelled) {
+            const message = error instanceof ApiError ? error.message : 'Failed to load CheckIn';
+            toast({ title: 'Could not load CheckIn', description: message, variant: 'destructive' });
+            applyFormState(buildFormFromCheckIn(editingCheckIn));
+          }
+        } finally {
+          if (!cancelled) {
+            setLoadingForm(false);
+          }
+        }
+        return;
+      }
+
+      applyFormState({
+        ...defaultFormState(),
+        teamId: teams[0]?.id || '',
+      });
+    };
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, editingCheckIn?.id, applyFormState, toast]);
+
+  // If teams load after opening the create dialog, set teamId once without resetting questions.
+  useEffect(() => {
+    if (!open || editingCheckIn?.id || form.teamId || !teams[0]?.id) {
+      return;
+    }
+    if (initializedKeyRef.current !== 'new') {
+      return;
+    }
+    setForm((current) => ({ ...current, teamId: teams[0].id }));
+  }, [open, editingCheckIn?.id, teams, form.teamId]);
 
   useEffect(() => {
     setForm((f) => ({ ...f, collectionCron: scheduleToCron(schedule) }));
@@ -167,10 +233,12 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
       ...form,
       updatesChannelId: form.updatesChannelId.trim() || null,
       questions: form.questions.map((q, idx) => ({
-        question: q.question,
+        ...(UUID_RE.test(q.id) ? { id: q.id } : {}),
+        question: q.question.trim(),
         type: q.type,
-        options: q.type === 'MULTIPLE_CHOICE' ? q.options : undefined,
+        options: q.type === 'MULTIPLE_CHOICE' ? (q.options ?? []) : undefined,
         isRequired: q.isRequired,
+        isActive: q.enabled !== false,
         order: idx + 1,
       })),
     };
@@ -183,16 +251,21 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
         body: JSON.stringify(payload),
       });
 
+      const checkInId = editingCheckIn?.id ?? saved?.id;
+      const resolved = checkInId
+        ? await apiFetch<any>(`/api/check-ins/${checkInId}`)
+        : saved;
+
       toast({
-        title: editingCheckIn ? 'CheckIn updated' : 'CheckIn created',
+        title: editingCheckIn ? 'CheckIn updated successfully.' : 'CheckIn created',
         description: editingCheckIn
-          ? `"${saved.name}" saved. Scheduler refreshed if schedule changed.`
-          : `"${saved.name}" was created successfully.`,
+          ? `"${resolved.name}" was saved with ${resolved.questions?.length ?? 0} question(s).`
+          : `"${resolved.name}" was created successfully.`,
         variant: 'success',
       });
 
       onOpenChange(false);
-      onSaved(saved);
+      onSaved(resolved);
     } catch (error) {
       const message = error instanceof ApiError ? error.message : 'Failed to save CheckIn';
       toast({ title: 'Save failed', description: message, variant: 'destructive' });
@@ -234,6 +307,13 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
         </DialogHeader>
 
         <form onSubmit={handleSubmit}>
+          {loadingForm && (
+            <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading CheckIn...
+            </div>
+          )}
+          <div className={loadingForm ? 'pointer-events-none opacity-60' : undefined}>
           <Tabs defaultValue="general" className="w-full">
             <TabsList className="mb-6 grid w-full grid-cols-3 lg:grid-cols-6">
               <TabsTrigger value="general">General</TabsTrigger>
@@ -377,6 +457,7 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
               )}
             </TabsContent>
           </Tabs>
+          </div>
 
           <DialogFooter className="mt-6 gap-2">
             <div className="mr-auto flex items-center gap-3">
@@ -399,9 +480,9 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
               Cancel
             </Button>
-            <Button type="submit" disabled={saving}>
+            <Button type="submit" disabled={saving || loadingForm}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
-              {saving ? 'Saving...' : editingCheckIn ? 'Save Changes' : 'Create CheckIn'}
+              {saving ? 'Saving...' : editingCheckIn ? 'Save CheckIn' : 'Create CheckIn'}
             </Button>
           </DialogFooter>
         </form>

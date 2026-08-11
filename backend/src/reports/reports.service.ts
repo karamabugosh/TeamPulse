@@ -88,51 +88,64 @@ export class ReportsService {
     formatDigestForSlack(
     digest: AiDigestResult,
   ): string {
-    const blockerText =
-      digest.blockers.length > 0
-        ? digest.blockers
-            .map((blocker) => {
-              const dependency =
-                blocker.dependency
-                  ? ` | Dependency: ${blocker.dependency}`
-                  : '';
+    const sections = digest.reportSections ?? {
+      keyAccomplishments: [],
+      risks: [],
+      aiInsights: [],
+      actionItems: [],
+      participantUpdates: [],
+      overallProgress: '',
+    };
 
-              return (
-                `• <@${blocker.userId}> — ${blocker.description}` +
-                `\n  Severity: ${blocker.severity}` +
-                dependency
-              );
-            })
-            .join('\n')
-        : 'No blockers reported.';
+    const listSection = (
+      title: string,
+      items: string[],
+      emptyText: string,
+    ) => [
+      `*${title}*`,
+      items.length > 0
+        ? items.map((item) => `• ${item}`).join('\n')
+        : emptyText,
+    ].join('\n');
 
-    const themeText =
-      digest.themes.length > 0
-        ? digest.themes
-            .map(
-              (theme) =>
-                `• *${theme.theme}* (${theme.mentionCount}) — ${theme.summary}`,
-            )
-            .join('\n')
-        : 'No common themes reported.';
-
-    return [
-      '*📊 Pulse Standup Report*',
-      `*Run:* ${digest.runId}`,
-      `*Generated:* ${this.formatDate(
-        digest.generatedAt,
-      )}`,
-      `*Source:* ${digest.source}`,
-      '',
+    const parts = [
       '*Summary*',
       digest.summary,
       '',
-      '*Blockers*',
-      blockerText,
+      listSection(
+        'Blockers',
+        digest.blockers.length > 0
+          ? digest.blockers.map(
+              (blocker) =>
+                `<@${blocker.userId}> — ${blocker.description} (${blocker.severity})`,
+            )
+          : [],
+        'No blockers reported.',
+      ),
       '',
-      '*Themes*',
-      themeText,
-    ].join('\n');
+      listSection('Insights', sections.aiInsights, 'No additional insights.'),
+      '',
+      listSection('Action Items', sections.actionItems, 'No action items suggested.'),
+    ];
+
+    if (sections.participantUpdates?.length) {
+      parts.push(
+        '',
+        '*Participant Updates*',
+        ...sections.participantUpdates.map(
+          (participant) =>
+            `• *${participant.displayName}*\n${participant.answers
+              .map((a) => `  - ${a.question}: ${a.answer}`)
+              .join('\n')}`,
+        ),
+      );
+    }
+
+    if (sections.overallProgress) {
+      parts.push('', '*Overall Progress*', sections.overallProgress);
+    }
+
+    return parts.join('\n');
   }
 
   buildDigestBlocks(
@@ -167,13 +180,20 @@ export class ReportsService {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*Summary*\n${digest.summary}`,
+          text: `*Executive Summary*\n${digest.summary}`,
         },
       },
       {
         type: 'divider',
       },
     ];
+
+    this.appendListBlock(
+      blocks,
+      '✅ Key Accomplishments',
+      digest.reportSections?.keyAccomplishments ?? [],
+      'No accomplishments reported.',
+    );
 
     if (digest.blockers.length > 0) {
       blocks.push({
@@ -206,50 +226,33 @@ export class ReportsService {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text:
-            '*🚧 Blockers*\n✅ No blockers reported.',
+          text: '*🚧 Blockers*\n✅ No blockers reported.',
         },
       });
     }
 
-    blocks.push({
-      type: 'divider',
-    });
+    blocks.push({ type: 'divider' });
 
-    if (digest.themes.length > 0) {
-      blocks.push({
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: '*🧭 Themes*',
-        },
-      });
+    this.appendListBlock(
+      blocks,
+      '⚠️ Risks',
+      digest.reportSections?.risks ?? [],
+      'No risks identified.',
+    );
+    this.appendListBlock(
+      blocks,
+      '💡 AI Insights',
+      digest.reportSections?.aiInsights ?? [],
+      'No additional insights.',
+    );
+    this.appendListBlock(
+      blocks,
+      '📝 Action Items',
+      digest.reportSections?.actionItems ?? [],
+      'No action items suggested.',
+    );
 
-      for (const theme of digest.themes) {
-        blocks.push({
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text:
-              `*${theme.theme}* (${theme.mentionCount})\n` +
-              `${theme.summary}`,
-          },
-        });
-      }
-    } else {
-      blocks.push({
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text:
-            '*🧭 Themes*\nNo common themes reported.',
-        },
-      });
-    }
-
-    blocks.push({
-      type: 'divider',
-    });
+    blocks.push({ type: 'divider' });
 
     blocks.push({
       type: 'section',
@@ -259,15 +262,32 @@ export class ReportsService {
           nonResponderNames.length > 0
             ? [
                 '*⏳ No Response*',
-                ...nonResponderNames.map(
-                  (name) => `• ${name}`,
-                ),
+                ...nonResponderNames.map((name) => `• ${name}`),
               ].join('\n')
             : '*⏳ No Response*\n✅ Everyone submitted.',
       },
     });
 
     return blocks;
+  }
+
+  private appendListBlock(
+    blocks: unknown[],
+    title: string,
+    items: string[],
+    emptyText: string,
+  ): void {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          items.length > 0
+            ? `*${title}*\n${items.map((item) => `• ${item}`).join('\n')}`
+            : `*${title}*\n${emptyText}`,
+      },
+    });
+    blocks.push({ type: 'divider' });
   }
  
   formatHistoryForSlack(
@@ -567,6 +587,7 @@ export class ReportsService {
     summary: string;
     blockers: unknown;
     themes: unknown;
+    reportSections?: unknown;
   }): AiDigestResult {
     return {
       teamId: digest.teamId,
@@ -586,6 +607,44 @@ export class ReportsService {
         this.parseStoredThemes(
           digest.themes,
         ),
+      reportSections: this.parseStoredReportSections(
+        digest.reportSections,
+      ),
+    };
+  }
+
+  private parseStoredReportSections(
+    value: unknown,
+  ): AiDigestResult['reportSections'] {
+    if (!value || typeof value !== 'object') {
+      return {
+        keyAccomplishments: [],
+        risks: [],
+        aiInsights: [],
+        actionItems: [],
+        participantUpdates: [],
+        overallProgress: '',
+      };
+    }
+
+    const record = value as Record<string, unknown>;
+    const toStringArray = (input: unknown) =>
+      Array.isArray(input)
+        ? input.filter((item): item is string => typeof item === 'string')
+        : [];
+
+    return {
+      keyAccomplishments: toStringArray(record.keyAccomplishments),
+      risks: toStringArray(record.risks),
+      aiInsights: toStringArray(record.aiInsights),
+      actionItems: toStringArray(record.actionItems),
+      participantUpdates: Array.isArray(record.participantUpdates)
+        ? (record.participantUpdates as AiDigestResult['reportSections']['participantUpdates'])
+        : [],
+      overallProgress:
+        typeof record.overallProgress === 'string'
+          ? record.overallProgress
+          : '',
     };
   }
 

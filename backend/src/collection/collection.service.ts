@@ -4,7 +4,6 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { ModuleRef } from '@nestjs/core';
 import {
   Prisma,
   QuestionType,
@@ -16,12 +15,31 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { QuestionPayloadDto } from '../slack/dto/question-payload.dto';
 import { CollectionGateway } from '../slack/interfaces/collection.gateway';
-import { SchedulerService } from '../scheduler/scheduler.service';
 
 export type AppHomeSummary = {
   activeQuestionCount: number;
   status: 'not_started' | 'in_progress' | 'completed';
   lastCompletedAt: Date | null;
+  activeCheckIns: ActiveCheckInOption[];
+  focusedCheckInName: string | null;
+};
+
+export type ActiveCheckInOption = {
+  index: number;
+  submissionId: string;
+  runId: string;
+  checkInName: string;
+  questionNumber: number;
+  totalQuestions: number;
+  currentQuestionText: string;
+};
+
+export type DmThreadContext = {
+  submissionId: string;
+  runId: string;
+  threadTs: string;
+  channelId: string;
+  checkInName: string;
 };
 
 type ValidatedAnswer = {
@@ -40,7 +58,6 @@ export class CollectionService
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly moduleRef: ModuleRef,
   ) {}
 
   private async getOrCreateUser(
@@ -109,35 +126,186 @@ export class CollectionService
     return user.id;
   }
 
-  private async getActiveConversationState(
-    userId: string,
-    questionId?: string,
-  ) {
-    return this.prisma.conversationState.findFirst({
-      where: {
-        userId,
-        isCompleted: false,
-
-        ...(questionId
-          ? {
-              currentQuestionId:
-                questionId,
-            }
-          : {}),
-      },
-
-      orderBy: {
-        updatedAt: 'desc',
-      },
-
+  private incompleteSessionInclude = {
+    submission: {
       include: {
-        submission: {
+        run: {
           include: {
-            run: true,
+            checkIn: {
+              select: {
+                id: true,
+                name: true,
+                introMessage: true,
+                outroMessage: true,
+              },
+            },
           },
         },
       },
+    },
+  } as const;
+
+  private async getIncompleteConversationStates(userId: string) {
+    return this.prisma.conversationState.findMany({
+      where: {
+        userId,
+        isCompleted: false,
+        submission: {
+          status: { in: ['pending', 'in_progress'] },
+          run: { status: 'collecting' },
+        },
+      },
+      orderBy: { updatedAt: 'asc' },
+      include: this.incompleteSessionInclude,
     });
+  }
+
+  async setFocusedSubmission(
+    userIdentifier: string,
+    submissionId: string,
+  ): Promise<void> {
+    const user = await this.getOrCreateUser(userIdentifier);
+
+    const session = await this.prisma.conversationState.findFirst({
+      where: {
+        userId: user.id,
+        submissionId,
+        isCompleted: false,
+      },
+    });
+
+    if (!session) {
+      throw new BadRequestException(
+        'That CheckIn is not active for you anymore.',
+      );
+    }
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { focusedSubmissionId: submissionId },
+    });
+
+    await this.prisma.conversationState.update({
+      where: { id: session.id },
+      data: { updatedAt: new Date() },
+    });
+  }
+
+  async clearFocusedSubmission(userId: string): Promise<void> {
+    await this.prisma.user.updateMany({
+      where: { id: userId },
+      data: { focusedSubmissionId: null },
+    });
+  }
+
+  parseNumericCheckInSelection(
+    message: string,
+    optionCount: number,
+  ): number | null {
+    const trimmed = message.trim();
+    if (!/^[1-9]\d*$/.test(trimmed)) {
+      return null;
+    }
+
+    const selected = Number.parseInt(trimmed, 10);
+    if (selected < 1 || selected > optionCount) {
+      return null;
+    }
+
+    return selected - 1;
+  }
+
+  async getActiveCheckInOptions(
+    userIdentifier: string,
+  ): Promise<ActiveCheckInOption[]> {
+    const user = await this.getOrCreateUser(userIdentifier);
+    const sessions = await this.getIncompleteConversationStates(user.id);
+
+    const options: ActiveCheckInOption[] = [];
+
+    for (const [index, session] of sessions.entries()) {
+      if (!session.submission?.run.checkIn) {
+        continue;
+      }
+
+      const checkInId = session.submission.run.checkInId;
+      const activeQuestions = await this.getQuestionsForConversation(checkInId);
+      if (activeQuestions.length === 0) {
+        continue;
+      }
+
+      const answers = await this.prisma.answer.findMany({
+        where: { submissionId: session.submissionId },
+        select: { questionId: true },
+      });
+      const answeredIds = new Set(answers.map((answer) => answer.questionId));
+      const nextIndex = activeQuestions.findIndex(
+        (question) => !answeredIds.has(question.id),
+      );
+      const questionIndex = nextIndex === -1 ? activeQuestions.length - 1 : nextIndex;
+      const currentQuestion = activeQuestions[questionIndex];
+
+      options.push({
+        index: index + 1,
+        submissionId: session.submissionId,
+        runId: session.submission.runId,
+        checkInName: session.submission.run.checkIn.name,
+        questionNumber: questionIndex + 1,
+        totalQuestions: activeQuestions.length,
+        currentQuestionText: currentQuestion.question,
+      });
+    }
+
+    return options;
+  }
+
+  private async getActiveConversationState(
+    userId: string,
+    questionId?: string,
+    autoFocus = true,
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { focusedSubmissionId: true },
+    });
+
+    const sessions = await this.getIncompleteConversationStates(userId);
+
+    if (sessions.length === 0) {
+      if (user?.focusedSubmissionId) {
+        await this.clearFocusedSubmission(userId);
+      }
+      return null;
+    }
+
+    let focusedSession =
+      user?.focusedSubmissionId
+        ? sessions.find(
+            (session) =>
+              session.submissionId === user.focusedSubmissionId,
+          ) ?? null
+        : null;
+
+    if (!focusedSession && autoFocus && sessions.length === 1) {
+      focusedSession = sessions[0];
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { focusedSubmissionId: focusedSession.submissionId },
+      });
+    }
+
+    if (!focusedSession) {
+      return null;
+    }
+
+    if (
+      questionId &&
+      focusedSession.currentQuestionId !== questionId
+    ) {
+      return null;
+    }
+
+    return focusedSession;
   }
 
   private async getQuestionsForConversation(
@@ -581,12 +749,14 @@ export class CollectionService
         userIdentifier,
       );
 
+    const activeCheckIns =
+      await this.getActiveCheckInOptions(userIdentifier);
+
     const activeQuestionCount =
-      await this.prisma.question.count({
-        where: {
-          isActive: true,
-        },
-      });
+      activeCheckIns.reduce(
+        (total, option) => total + option.totalQuestions,
+        0,
+      );
 
     const session =
       await this.prisma.conversationState.findFirst({
@@ -604,16 +774,22 @@ export class CollectionService
       AppHomeSummary['status'] =
       'not_started';
 
-    if (
+    if (activeCheckIns.length > 0) {
+      status = 'in_progress';
+    } else if (
       session?.isCompleted
     ) {
       status = 'completed';
-    } else if (
-      session?.currentQuestionId
-    ) {
-      status =
-        'in_progress';
     }
+
+    const focusedCheckInName =
+      user.focusedSubmissionId
+        ? activeCheckIns.find(
+            (option) =>
+              option.submissionId ===
+              user.focusedSubmissionId,
+          )?.checkInName ?? null
+        : null;
 
     return {
       activeQuestionCount,
@@ -621,6 +797,8 @@ export class CollectionService
       lastCompletedAt:
         session?.completedAt ??
         null,
+      activeCheckIns,
+      focusedCheckInName,
     };
   }
 
@@ -759,11 +937,84 @@ export class CollectionService
     );
   }
 
+  private async getUnansweredQuestionState(
+    submissionId: string,
+    checkInId: string | null,
+  ): Promise<{
+    question: {
+      id: string;
+      question: string;
+      type: QuestionType;
+      options: Prisma.JsonValue | null;
+    };
+    questionNumber: number;
+    totalQuestions: number;
+  } | null> {
+    const activeQuestions =
+      await this.getQuestionsForConversation(checkInId);
+
+    if (activeQuestions.length === 0) {
+      return null;
+    }
+
+    const answers = await this.prisma.answer.findMany({
+      where: { submissionId },
+      select: { questionId: true },
+    });
+
+    const answeredIds = new Set(
+      answers.map((answer) => answer.questionId),
+    );
+
+    const nextIndex = activeQuestions.findIndex(
+      (question) => !answeredIds.has(question.id),
+    );
+
+    if (nextIndex === -1) {
+      return null;
+    }
+
+    return {
+      question: activeQuestions[nextIndex],
+      questionNumber: nextIndex + 1,
+      totalQuestions: activeQuestions.length,
+    };
+  }
+
+  private async syncCurrentQuestionPointer(
+    conversationStateId: string,
+    submissionId: string,
+    checkInId: string | null,
+  ): Promise<QuestionPayloadDto | null> {
+    const next = await this.getUnansweredQuestionState(
+      submissionId,
+      checkInId,
+    );
+
+    await this.prisma.conversationState.update({
+      where: { id: conversationStateId },
+      data: {
+        currentQuestionId: next?.question.id ?? null,
+      },
+    });
+
+    if (!next) {
+      return null;
+    }
+
+    return this.toQuestionPayload(
+      next.question,
+      next.questionNumber,
+      next.totalQuestions,
+    );
+  }
+
   async submitAnswer(
     userIdentifier: string,
     questionId: string,
     answer: string,
-  ): Promise<void> {
+    submissionId?: string,
+  ): Promise<QuestionPayloadDto | null> {
     const normalizedAnswer =
       answer?.trim();
 
@@ -787,11 +1038,14 @@ export class CollectionService
       `Submitting answer for question ${questionId} from user ${userId} (identifier: ${userIdentifier})`,
     );
 
-    const session =
-      await this.getActiveConversationState(
-        userId,
-        questionId,
-      );
+    const session = submissionId
+      ? await this.getConversationStateForSubmission(
+          userId,
+          submissionId,
+        )
+      : await this.getActiveConversationState(
+          userId,
+        );
 
     if (
       !session ||
@@ -810,6 +1064,28 @@ export class CollectionService
     const checkInId =
       session.submission.run
         .checkInId;
+
+    const expectedQuestion =
+      await this.getUnansweredQuestionState(
+        session.submissionId,
+        checkInId,
+      );
+
+    if (
+      !expectedQuestion ||
+      expectedQuestion.question.id !== questionId
+    ) {
+      this.logger.warn(
+        `[Conversation] Answer rejected for submission ${session.submissionId}: expected question ${expectedQuestion?.question.id ?? 'none'}, received ${questionId}`,
+      );
+      throw new BadRequestException(
+        'This reply does not match the user\'s active check-in question.',
+      );
+    }
+
+    this.logger.log(
+      `[Conversation] Answering question #${expectedQuestion.questionNumber}/${expectedQuestion.totalQuestions} (${questionId}) for submission ${session.submissionId}`,
+    );
 
     const question =
       await this.prisma.question.findFirst({
@@ -851,81 +1127,93 @@ export class CollectionService
         normalizedAnswer,
       );
 
-    await this.prisma.answer.upsert({
-      where: {
-        submissionId_questionId: {
-          submissionId:
-            session.submissionId,
-          questionId,
-        },
-      },
-
-      update: {
-        text:
-          validatedAnswer.text,
-
-        structuredValue:
-          validatedAnswer
-            .structuredValue,
-      },
-
-      create: {
-        userId,
-        questionId,
-
-        submissionId:
-          session.submissionId,
-
-        text:
-          validatedAnswer.text,
-
-        structuredValue:
-          validatedAnswer
-            .structuredValue,
-      },
-    });
-
-    await this.prisma.conversationState.update({
-      where: {
-        id: session.id,
-      },
-
-      data: {
-        currentQuestionId:
-          questionId,
-      },
-    });
-
-    if (
-      session.submission
-        .status ===
-      'pending'
-    ) {
-      await this.prisma.standupSubmission.update({
+    const nextQuestion = await this.prisma.$transaction(async (tx) => {
+      await tx.answer.upsert({
         where: {
-          id:
-            session.submission.id,
+          submissionId_questionId: {
+            submissionId: session.submissionId,
+            questionId,
+          },
         },
-
-        data: {
-          status:
-            'in_progress',
-
-          startedAt:
-            session.submission
-              .startedAt ??
-            new Date(),
+        update: {
+          text: validatedAnswer.text,
+          structuredValue: validatedAnswer.structuredValue,
+        },
+        create: {
+          userId,
+          questionId,
+          submissionId: session.submissionId,
+          text: validatedAnswer.text,
+          structuredValue: validatedAnswer.structuredValue,
         },
       });
-    }
+
+      if (session.submission.status === 'pending') {
+        await tx.standupSubmission.update({
+          where: { id: session.submission.id },
+          data: {
+            status: 'in_progress',
+            startedAt: session.submission.startedAt ?? new Date(),
+          },
+        });
+      }
+
+      const answers = await tx.answer.findMany({
+        where: { submissionId: session.submissionId },
+        select: { questionId: true },
+      });
+      const answeredIds = new Set(answers.map((answer) => answer.questionId));
+      const activeQuestions = await tx.question.findMany({
+        where: { isActive: true, checkInId },
+        orderBy: { order: 'asc' },
+      });
+      const nextIndex = activeQuestions.findIndex(
+        (activeQuestion) => !answeredIds.has(activeQuestion.id),
+      );
+
+      const nextQuestionId =
+        nextIndex === -1 ? null : activeQuestions[nextIndex].id;
+
+      await tx.conversationState.update({
+        where: { id: session.id },
+        data: { currentQuestionId: nextQuestionId },
+      });
+
+      if (nextIndex === -1) {
+        return null;
+      }
+
+      const next = activeQuestions[nextIndex];
+      this.logger.log(
+        `[Pipeline] nextQuestion queried submission=${session.submissionId} answered=${answeredIds.size}/${activeQuestions.length} next=#${nextIndex + 1} id=${next.id}`,
+      );
+      return this.toQuestionPayload(
+        next,
+        nextIndex + 1,
+        activeQuestions.length,
+      );
+    });
 
     this.logger.log(
       `[Answer Saved] Answer saved for question ${questionId} by user ${userId} in submission ${session.submissionId}.`,
     );
+
+    if (nextQuestion) {
+      this.logger.log(
+        `[Conversation] Advanced submission ${session.submissionId} to question #${nextQuestion.questionNumber}/${nextQuestion.totalQuestions} (${nextQuestion.questionId})`,
+      );
+    } else {
+      this.logger.log(
+        `[Conversation] Submission ${session.submissionId} has no more questions after ${questionId}`,
+      );
+    }
+
+    return nextQuestion;
   }
 
   async getNextQuestion(
     userIdentifier: string,
+    submissionId?: string,
   ): Promise<QuestionPayloadDto | null> {
     const user =
       await this.getOrCreateUser(
@@ -935,10 +1223,9 @@ export class CollectionService
     const userId =
       user.id;
 
-    const session =
-      await this.getActiveConversationState(
-        userId,
-      );
+    const session = submissionId
+      ? await this.getConversationStateForSubmission(userId, submissionId)
+      : await this.getActiveConversationState(userId);
 
     if (
       !session ||
@@ -948,111 +1235,172 @@ export class CollectionService
       return null;
     }
 
-    const activeQuestions =
-      await this.getQuestionsForConversation(
-        session.submission
-          .run.checkInId,
-      );
-
-    if (
-      activeQuestions.length ===
-      0
-    ) {
-      await this.finishConversationState(
-        session.id,
-      );
-
-      return null;
-    }
-
-    const answers =
-      await this.prisma.answer.findMany({
-        where: {
-          submissionId:
-            session.submissionId,
-        },
-
-        select: {
-          questionId: true,
-        },
-      });
-
-    const answeredQuestionIds =
-      new Set(
-        answers.map(
-          (answer) =>
-            answer.questionId,
-        ),
-      );
-
-    const nextIndex =
-      activeQuestions.findIndex(
-        (question) =>
-          !answeredQuestionIds.has(
-            question.id,
-          ),
-      );
-
-    if (
-      nextIndex === -1
-    ) {
-      await this.finishConversationState(
-        session.id,
-      );
-
-      return null;
-    }
-
-    const nextQuestion =
-      activeQuestions[
-        nextIndex
-      ];
-
-    await this.prisma.conversationState.update({
-      where: {
-        id:
-          session.id,
-      },
-
-      data: {
-        currentQuestionId:
-          nextQuestion.id,
-      },
-    });
-
-    return this.toQuestionPayload(
-      nextQuestion,
-      nextIndex + 1,
-      activeQuestions.length,
+    return this.syncCurrentQuestionPointer(
+      session.id,
+      session.submissionId,
+      session.submission.run.checkInId,
     );
   }
 
   async finishConversation(
     userIdentifier: string,
   ): Promise<string | null> {
+    const result =
+      await this.completeConversation(
+        userIdentifier,
+      );
+
+    return result?.submissionId ?? null;
+  }
+
+  async completeConversation(
+    userIdentifier: string,
+    submissionId?: string,
+  ): Promise<{
+    submissionId: string;
+    checkInName: string | null;
+  } | null> {
     const user =
       await this.getOrCreateUser(
         userIdentifier,
       );
 
-    const session =
-      await this.getActiveConversationState(
-        user.id,
-      );
+    const session = submissionId
+      ? await this.getConversationStateForSubmission(user.id, submissionId)
+      : await this.getActiveConversationState(user.id);
 
     if (!session) {
-      throw new BadRequestException(
-        'No active conversation exists for this user.',
-      );
+      return null;
     }
 
-    const submissionId = session.submissionId;
+    let checkInName: string | null = null;
+    const checkInId =
+      session.submission.run.checkInId;
+
+    if (checkInId) {
+      const checkIn =
+        await this.prisma.checkIn.findUnique({
+          where: { id: checkInId },
+          select: { name: true },
+        });
+
+      checkInName = checkIn?.name ?? null;
+    }
+
+    const completedSubmissionId = session.submissionId;
 
     await this.finishConversationState(
       session.id,
     );
 
-    return submissionId;
+    return {
+      submissionId: completedSubmissionId,
+      checkInName,
+    };
+  }
+
+  async activateNextQueuedSubmission(
+    userIdentifier: string,
+  ): Promise<{
+    submissionId: string;
+    slackUserId: string;
+    displayName: string;
+    checkInName: string;
+    firstQuestionText: string;
+    totalQuestions: number;
+  } | null> {
+    const user =
+      await this.getOrCreateUser(
+        userIdentifier,
+      );
+
+    const activeSession =
+      await this.getActiveConversationState(
+        user.id,
+      );
+
+    if (activeSession) {
+      return null;
+    }
+
+    const queuedSubmission =
+      await this.prisma.standupSubmission.findFirst({
+        where: {
+          userId: user.id,
+          status: 'queued',
+          run: {
+            status: 'collecting',
+          },
+        },
+        orderBy: {
+          createdAt: 'asc',
+        },
+        include: {
+          user: true,
+          run: {
+            include: {
+              checkIn: {
+                include: {
+                  questions: {
+                    where: { isActive: true },
+                    orderBy: { order: 'asc' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+    if (
+      !queuedSubmission?.run.checkIn ||
+      queuedSubmission.run.checkIn.questions.length === 0
+    ) {
+      return null;
+    }
+
+    const firstQuestion =
+      queuedSubmission.run.checkIn.questions[0];
+
+    await this.prisma.$transaction(
+      async (tx) => {
+        await tx.standupSubmission.update({
+          where: {
+            id: queuedSubmission.id,
+          },
+          data: {
+            status: 'pending',
+          },
+        });
+
+        await tx.conversationState.create({
+          data: {
+            userId: user.id,
+            submissionId: queuedSubmission.id,
+            currentQuestionId: firstQuestion.id,
+            isCompleted: false,
+          },
+        });
+      },
+    );
+
+    this.logger.log(
+      `Activated queued CheckIn "${queuedSubmission.run.checkIn.name}" for user ${user.slackUserId}.`,
+    );
+
+    return {
+      submissionId: queuedSubmission.id,
+      slackUserId: user.slackUserId,
+      displayName:
+        user.slackDisplayName ||
+        user.slackUserId,
+      checkInName:
+        queuedSubmission.run.checkIn.name,
+      firstQuestionText:
+        firstQuestion.question,
+      totalQuestions:
+        queuedSubmission.run.checkIn.questions.length,
+    };
   }
 
   private async finishConversationState(
@@ -1112,6 +1460,16 @@ export class CollectionService
             completedAt,
           },
         });
+
+        await tx.user.updateMany({
+          where: {
+            id: session.userId,
+            focusedSubmissionId: session.submissionId,
+          },
+          data: {
+            focusedSubmissionId: null,
+          },
+        });
       },
     );
 
@@ -1147,39 +1505,6 @@ export class CollectionService
           completedAt,
         },
       });
-
-      await this.maybeTriggerReportForCompletedRun(runId);
-    }
-  }
-
-  private async maybeTriggerReportForCompletedRun(runId: string): Promise<void> {
-    try {
-      const run = await this.prisma.standupRun.findUnique({
-        where: { id: runId },
-        include: {
-          checkIn: {
-            select: {
-              id: true,
-              reportTriggerMode: true,
-            },
-          },
-        },
-      });
-
-      if (
-        !run?.checkIn ||
-        run.checkIn.reportTriggerMode !== 'all_answered' ||
-        run.reportGeneratedAt
-      ) {
-        return;
-      }
-
-      const schedulerService = this.moduleRef.get(SchedulerService, { strict: false });
-
-      await schedulerService.runCheckInDigest(run.checkIn.id, runId);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Failed to trigger report for run ${runId}: ${message}`);
     }
   }
 
@@ -1977,6 +2302,223 @@ export class CollectionService
       );
   }
 
+  private async getConversationStateForSubmission(
+    userId: string,
+    submissionId: string,
+    questionId?: string,
+  ) {
+    const session = await this.prisma.conversationState.findFirst({
+      where: {
+        submissionId,
+        isCompleted: false,
+        ...(questionId ? { currentQuestionId: questionId } : {}),
+      },
+      include: {
+        submission: {
+          include: {
+            run: true,
+          },
+        },
+      },
+    });
+
+    if (!session || session.submission.userId !== userId) {
+      return null;
+    }
+
+    return session;
+  }
+
+  async resolveDmThreadContext(
+    slackUserId: string,
+    threadTs: string,
+    channelId?: string,
+  ): Promise<DmThreadContext | null> {
+    return this.resolveActiveDmSubmissionContext(
+      slackUserId,
+      channelId,
+      threadTs,
+    );
+  }
+
+  /**
+   * Resolves the active CheckIn DM submission for a user.
+   * Matches by thread anchor first, then falls back to the DM channel so
+   * replies without thread_ts (common after the 2nd+ in-thread message) still route correctly.
+   */
+  async resolveActiveDmSubmissionContext(
+    slackUserId: string,
+    channelId?: string,
+    threadTs?: string,
+  ): Promise<DmThreadContext | null> {
+    const user = await this.getOrCreateUser(slackUserId);
+
+    const submissionInclude = {
+      run: {
+        include: {
+          checkIn: {
+            select: { name: true },
+          },
+        },
+      },
+    } as const;
+
+    const activeStatuses = ['pending', 'in_progress'];
+
+    if (threadTs?.trim()) {
+      const byThread = await this.prisma.standupSubmission.findFirst({
+        where: {
+          userId: user.id,
+          slackDmThreadTs: threadTs.trim(),
+          status: { in: activeStatuses },
+          run: { status: 'collecting' },
+        },
+        include: submissionInclude,
+      });
+
+      if (byThread?.slackDmChannelId && byThread.slackDmThreadTs) {
+        this.logger.log(
+          `[DM Context] Matched submission ${byThread.id} by thread ${byThread.slackDmThreadTs}`,
+        );
+        return {
+          submissionId: byThread.id,
+          runId: byThread.runId,
+          threadTs: byThread.slackDmThreadTs,
+          channelId: byThread.slackDmChannelId,
+          checkInName: byThread.run.checkIn?.name ?? 'CheckIn',
+        };
+      }
+    }
+
+    if (channelId?.trim()) {
+      const byChannel = await this.prisma.standupSubmission.findFirst({
+        where: {
+          userId: user.id,
+          slackDmChannelId: channelId.trim(),
+          status: { in: activeStatuses },
+          run: { status: 'collecting' },
+        },
+        orderBy: { createdAt: 'desc' },
+        include: submissionInclude,
+      });
+
+      if (byChannel?.slackDmChannelId && byChannel.slackDmThreadTs) {
+        this.logger.log(
+          `[DM Context] Matched submission ${byChannel.id} by channel ${byChannel.slackDmChannelId}` +
+            (threadTs ? ` (reply thread_ts ${threadTs} did not match anchor ${byChannel.slackDmThreadTs})` : ' (no thread_ts on reply)'),
+        );
+        return {
+          submissionId: byChannel.id,
+          runId: byChannel.runId,
+          threadTs: byChannel.slackDmThreadTs,
+          channelId: byChannel.slackDmChannelId,
+          checkInName: byChannel.run.checkIn?.name ?? 'CheckIn',
+        };
+      }
+    }
+
+    this.logger.warn(
+      `[DM Context] No active submission for user ${slackUserId}` +
+        (channelId ? ` in channel ${channelId}` : '') +
+        (threadTs ? ` thread ${threadTs}` : ''),
+    );
+
+    return null;
+  }
+
+  async getCurrentQuestionForSubmission(
+    submissionId: string,
+  ): Promise<QuestionPayloadDto | null> {
+    const session = await this.prisma.conversationState.findFirst({
+      where: {
+        submissionId,
+        isCompleted: false,
+      },
+      include: {
+        submission: {
+          include: { run: true },
+        },
+      },
+    });
+
+    if (!session?.submission) {
+      this.logger.warn(
+        `[Conversation] No active ConversationState for submission ${submissionId}`,
+      );
+      return null;
+    }
+
+    const next = await this.getUnansweredQuestionState(
+      submissionId,
+      session.submission.run.checkInId,
+    );
+
+    if (!next) {
+      this.logger.log(
+        `[Conversation] Submission ${submissionId} has no remaining questions`,
+      );
+      return null;
+    }
+
+    this.logger.log(
+      `[Conversation] Current question for submission ${submissionId}: #${next.questionNumber}/${next.totalQuestions} (${next.question.id})`,
+    );
+
+    return this.toQuestionPayload(
+      next.question,
+      next.questionNumber,
+      next.totalQuestions,
+    );
+  }
+
+  async getCheckInConfigForSubmission(submissionId: string) {
+    const submission = await this.prisma.standupSubmission.findUnique({
+      where: { id: submissionId },
+      select: {
+        run: {
+          select: {
+            checkIn: {
+              select: {
+                id: true,
+                name: true,
+                introMessage: true,
+                outroMessage: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return submission?.run.checkIn ?? null;
+  }
+
+  async setSubmissionDmAnchor(
+    submissionId: string,
+    dmChannelId: string,
+    threadTs: string,
+  ): Promise<void> {
+    await this.prisma.standupSubmission.update({
+      where: { id: submissionId },
+      data: {
+        slackDmChannelId: dmChannelId,
+        slackDmThreadTs: threadTs,
+      },
+    });
+
+    const submission = await this.prisma.standupSubmission.findUnique({
+      where: { id: submissionId },
+      select: { userId: true },
+    });
+
+    if (submission) {
+      await this.prisma.user.update({
+        where: { id: submission.userId },
+        data: { focusedSubmissionId: submissionId },
+      });
+    }
+  }
+
   async setSubmissionDmChannel(submissionId: string, dmChannelId: string): Promise<void> {
     await this.prisma.standupSubmission.update({
       where: { id: submissionId },
@@ -2001,6 +2543,62 @@ export class CollectionService
     });
   }
 
+  async getActiveSubmissionDmChannel(slackUserId: string): Promise<string | null> {
+    const user = await this.getOrCreateUser(slackUserId);
+
+    const submission = await this.prisma.standupSubmission.findFirst({
+      where: {
+        userId: user.id,
+        status: { in: ['pending', 'in_progress'] },
+        slackDmChannelId: { not: null },
+        run: { status: 'collecting' },
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: { slackDmChannelId: true },
+    });
+
+    return submission?.slackDmChannelId ?? null;
+  }
+
+  async countOtherActiveCheckIns(
+    userIdentifier: string,
+    excludeSubmissionId?: string,
+  ): Promise<number> {
+    const user = await this.getOrCreateUser(userIdentifier);
+    const sessions = await this.getIncompleteConversationStates(user.id);
+
+    return sessions.filter(
+      (session) => session.submissionId !== excludeSubmissionId,
+    ).length;
+  }
+
+  async selectCheckInByIndex(
+    userIdentifier: string,
+    selectedIndex: number,
+  ): Promise<{
+    option: ActiveCheckInOption;
+    currentQuestion: QuestionPayloadDto;
+  } | null> {
+    const options = await this.getActiveCheckInOptions(userIdentifier);
+    const option = options[selectedIndex];
+
+    if (!option) {
+      return null;
+    }
+
+    await this.setFocusedSubmission(
+      userIdentifier,
+      option.submissionId,
+    );
+
+    const currentQuestion = await this.getCurrentQuestion(userIdentifier);
+    if (!currentQuestion) {
+      return null;
+    }
+
+    return { option, currentQuestion };
+  }
+
   async getPendingRunMembers(
     runId: string,
   ): Promise<
@@ -2023,8 +2621,7 @@ export class CollectionService
           submissions: {
             where: {
               status: {
-                not:
-                  'completed',
+                in: ['pending', 'in_progress'],
               },
             },
 

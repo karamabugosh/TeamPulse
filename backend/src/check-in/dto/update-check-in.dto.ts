@@ -2,6 +2,7 @@ import { QuestionType } from '@prisma/client';
 import { ReportTriggerMode } from './create-check-in.dto';
 
 export type UpdateCheckInQuestionDto = {
+  id?: string;
   question: string;
   order: number;
   type?: QuestionType;

@@ -13,6 +13,7 @@ import {
 } from './eval-dataset';
 import {
   AiDigestResult,
+  EMPTY_REPORT_SECTIONS,
   ExtractedBlocker,
   ThemeSummary,
 } from '../dto/ai-result.dto';
@@ -425,6 +426,7 @@ async function main(): Promise<void> {
             summary: '',
             blockers: [],
             themes: [],
+            reportSections: EMPTY_REPORT_SECTIONS,
           },
         });
 

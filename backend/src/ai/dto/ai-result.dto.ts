@@ -21,6 +21,21 @@ export interface ThemeSummary {
   summary: string;
 }
 
+export interface ParticipantUpdateSummary {
+  slackUserId: string;
+  displayName: string;
+  answers: Array<{ question: string; answer: string }>;
+}
+
+export interface ReportSections {
+  keyAccomplishments: string[];
+  risks: string[];
+  aiInsights: string[];
+  actionItems: string[];
+  participantUpdates: ParticipantUpdateSummary[];
+  overallProgress: string;
+}
+
 export interface RawResponseForAnalysis {
   userId: string;
   answers: {
@@ -45,4 +60,14 @@ export interface AiDigestResult {
   summary: string;
   blockers: ExtractedBlocker[];
   themes: ThemeSummary[];
+  reportSections: ReportSections;
 }
+
+export const EMPTY_REPORT_SECTIONS: ReportSections = {
+  keyAccomplishments: [],
+  risks: [],
+  aiInsights: [],
+  actionItems: [],
+  participantUpdates: [],
+  overallProgress: '',
+};

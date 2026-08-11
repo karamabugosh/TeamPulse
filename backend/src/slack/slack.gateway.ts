@@ -1,21 +1,44 @@
 import { Injectable, Logger } from '@nestjs/common';
 
-import { IncomingMessageDto } from './dto/incoming-message.dto';
+import { QuestionType } from '@prisma/client';
 
-import { SlackService } from './slack.service';
+import { DmThreadContext, CollectionService } from '../collection/collection.service';
+
+import { CheckInThreadService } from './check-in-thread.service';
+
+import { IncomingMessageDto } from './dto/incoming-message.dto';
 
 import { QuestionPayloadDto } from './dto/question-payload.dto';
 
-import { CollectionService } from '../collection/collection.service';
-import { CheckInThreadService } from './check-in-thread.service';
+import {
 
-const ACK_MESSAGES = ['Great! ✅', 'Awesome.', 'Got it! 👍', 'Perfect!', 'Thanks! ✅'];
+  buildDmQuestionMessage,
+
+  buildDmThreadCompletionText,
+
+  buildReplyInThreadReminderText,
+
+  mapDbQuestionToPayload,
+
+  validateSlackBlocks,
+
+} from './slack-checkin.views';
+
+import { SlackService } from './slack.service';
+
+
+
+const DM_ONLY_REPLY =
+
+  'Please answer your CheckIn inside the dedicated thread in our direct message conversation.';
 
 
 
 export type CheckInRunDeliveryPayload = {
 
   checkInName: string;
+
+  totalQuestions?: number;
 
   run?: {
 
@@ -27,9 +50,25 @@ export type CheckInRunDeliveryPayload = {
 
       slackDmChannelId?: string | null;
 
+      slackDmThreadTs?: string | null;
+
       user: { slackUserId: string | null; slackDisplayName: string | null };
 
-      conversationState?: { currentQuestion?: { question: string } | null } | null;
+      conversationState?: {
+
+        currentQuestion?: {
+
+          id: string;
+
+          question: string;
+
+          type: import('@prisma/client').QuestionType;
+
+          options: unknown;
+
+        } | null;
+
+      } | null;
 
     }>;
 
@@ -52,14 +91,16 @@ export class SlackGateway {
     private readonly slackService: SlackService,
 
     private readonly collectionService: CollectionService,
+
     private readonly threadService: CheckInThreadService,
+
   ) {}
 
 
 
   /**
 
-   * Geekbot-style DM kickoff: intro + first question in ONE continuous DM thread.
+   * Creates one parent DM message that becomes the thread anchor for this Standup run.
 
    */
 
@@ -69,21 +110,15 @@ export class SlackGateway {
 
     slackUserId: string;
 
-    displayName: string;
-
     checkInName: string;
 
-    introMessage?: string | null;
-
-    firstQuestionText: string;
-
-    questionNumber: number;
+    question: QuestionPayloadDto;
 
   }): Promise<string | null> {
 
     this.logger.log(
 
-      `[DM] Starting delivery for ${params.displayName} (${params.slackUserId}) — CheckIn "${params.checkInName}"`,
+      `[DM] Creating thread for ${params.slackUserId} — CheckIn "${params.checkInName}"`,
 
     );
 
@@ -93,9 +128,29 @@ export class SlackGateway {
 
     if (!dmChannelId) {
 
+      this.logger.error(`[DM] Failed to open DM for ${params.slackUserId}`);
+
+      return null;
+
+    }
+
+
+
+    const posted = await this.postDmQuestionMessage({
+      channelId: dmChannelId,
+      submissionId: params.submissionId,
+      question: params.question,
+      checkInName: params.checkInName,
+      isParent: true,
+    });
+
+
+
+    if (!posted.ok || !posted.ts) {
+
       this.logger.error(
 
-        `[DM] Failed to open DM for ${params.slackUserId} — check bot token and im:write scope`,
+        `[DM] Failed to create thread parent for ${params.slackUserId}: ${posted.error ?? 'unknown error'}`,
 
       );
 
@@ -105,55 +160,21 @@ export class SlackGateway {
 
 
 
-    const firstName = params.displayName.split(' ')[0] || params.displayName;
+    await this.collectionService.setSubmissionDmAnchor(
 
-    const intro =
+      params.submissionId,
 
-      params.introMessage?.trim() ||
+      dmChannelId,
 
-      `👋 Good morning ${firstName}!\n\nIt's time for your *${params.checkInName}*.\n\nLet's get started.`;
+      posted.ts,
 
-
-
-    const introSent = await this.slackService.sendMessage({ channelId: dmChannelId, text: intro });
-
-    if (!introSent) {
-
-      this.logger.error(`[DM] Intro message failed for ${params.slackUserId} in channel ${dmChannelId}`);
-
-      return null;
-
-    }
-
-
-
-    const questionSent = await this.slackService.sendMessage({
-
-      channelId: dmChannelId,
-
-      text: `*Question ${params.questionNumber}:*\n${params.firstQuestionText}`,
-
-    });
-
-
-
-    if (!questionSent) {
-
-      this.logger.error(`[DM] Question 1 failed for ${params.slackUserId} in channel ${dmChannelId}`);
-
-      return null;
-
-    }
-
-
-
-    await this.collectionService.setSubmissionDmChannel(params.submissionId, dmChannelId);
+    );
 
 
 
     this.logger.log(
 
-      `[DM] Successfully delivered intro + Q1 to ${params.displayName} (${params.slackUserId}) in ${dmChannelId}`,
+      `[DM] Created thread ${posted.ts} for "${params.checkInName}" in ${dmChannelId}`,
 
     );
 
@@ -165,19 +186,9 @@ export class SlackGateway {
 
 
 
-  /**
-
-   * Deliver Geekbot-style DMs to all submissions on a run.
-
-   * Skips submissions that already have a DM channel (already delivered).
-
-   */
-
   async deliverCheckInRun(
 
     result: CheckInRunDeliveryPayload,
-
-    introMessage?: string | null,
 
   ): Promise<{ delivered: number; failed: number; skipped: number }> {
 
@@ -191,11 +202,7 @@ export class SlackGateway {
 
     if (!result.run?.submissions.length) {
 
-      this.logger.warn(
-
-        `[DM] No submissions to deliver for CheckIn "${result.checkInName}"`,
-
-      );
+      this.logger.warn(`[DM] No submissions to deliver for CheckIn "${result.checkInName}"`);
 
       return { delivered, failed, skipped };
 
@@ -219,11 +226,11 @@ export class SlackGateway {
 
 
 
-      if (submission.slackDmChannelId) {
+      if (submission.slackDmThreadTs) {
 
         this.logger.log(
 
-          `[DM] Skipping ${slackUserId} — already delivered to ${submission.slackDmChannelId}`,
+          `[DM] Skipping ${slackUserId} — thread already created (${submission.slackDmThreadTs})`,
 
         );
 
@@ -251,21 +258,27 @@ export class SlackGateway {
 
 
 
+      const questionPayload = mapDbQuestionToPayload(
+
+        currentQuestion,
+
+        1,
+
+        result.totalQuestions ?? 1,
+
+      );
+
+
+
       const dmChannelId = await this.deliverCheckInToParticipant({
 
         submissionId: submission.id,
 
         slackUserId,
 
-        displayName: submission.user.slackDisplayName || slackUserId,
-
         checkInName: result.checkInName,
 
-        introMessage,
-
-        firstQuestionText: currentQuestion.question,
-
-        questionNumber: 1,
+        question: questionPayload,
 
       });
 
@@ -281,7 +294,7 @@ export class SlackGateway {
 
     this.logger.log(
 
-      `[DM] Delivery complete for "${result.checkInName}": ${delivered} sent, ${failed} failed, ${skipped} already delivered`,
+      `[DM] Delivery complete for "${result.checkInName}": ${delivered} sent, ${failed} failed, ${skipped} skipped`,
 
     );
 
@@ -294,28 +307,128 @@ export class SlackGateway {
 
 
   async handleIncomingMessage(payload: IncomingMessageDto): Promise<void> {
-
     this.logger.log(
-
-      `Received message from user ${payload.userId} in channel ${payload.channelId}`,
-
+      `[DM Reply] Received from user ${payload.userId} in channel ${payload.channelId}` +
+        (payload.threadTs ? ` thread_ts=${payload.threadTs}` : ' (no thread_ts)'),
     );
 
+    try {
+      await this.syncUserDisplayName(payload.userId);
 
+      if (!payload.channelId.startsWith('D')) {
+        await this.slackService.sendMessage({
+          channelId: payload.channelId,
+          text: DM_ONLY_REPLY,
+        });
+        return;
+      }
+
+      const context =
+        await this.collectionService.resolveActiveDmSubmissionContext(
+          payload.userId,
+          payload.channelId,
+          payload.threadTs,
+        );
+
+      if (!context) {
+        if (!payload.threadTs) {
+          await this.handleMainDmMessage(payload);
+          return;
+        }
+
+        await this.slackService.postMessage({
+          channelId: payload.channelId,
+          threadTs: payload.threadTs,
+          text: 'This CheckIn thread is no longer active.',
+        });
+        return;
+      }
+
+      this.logger.log(
+        `[DM Reply] Matched submission ${context.submissionId} — thread anchor ${context.threadTs}`,
+      );
+
+      const currentQuestion =
+        await this.collectionService.getCurrentQuestionForSubmission(
+          context.submissionId,
+        );
+
+      if (!currentQuestion) {
+        this.logger.warn(
+          `[DM Reply] Submission ${context.submissionId} has no remaining questions`,
+        );
+        await this.slackService.postMessage({
+          channelId: context.channelId,
+          threadTs: context.threadTs,
+          text: 'This CheckIn has no remaining questions.',
+        });
+        return;
+      }
+
+      this.logger.log(
+        `[DM Reply] Processing answer for question #${currentQuestion.questionNumber}/${currentQuestion.totalQuestions} (${currentQuestion.questionId})`,
+      );
+
+      await this.processTextAnswer(payload, currentQuestion, context);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Error handling message for ${payload.userId}: ${message}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+
+      await this.slackService.sendMessage({
+        channelId: payload.channelId,
+        ...(payload.threadTs ? { threadTs: payload.threadTs } : {}),
+        text: '❌ An error occurred processing your request.',
+      });
+    }
+  }
+
+
+
+  async handleInteractiveAnswer(params: {
+
+    slackUserId: string;
+
+    submissionId: string;
+
+    questionId: string;
+
+    answer: string;
+
+    channelId: string;
+
+    threadTs: string;
+
+  }): Promise<void> {
 
     try {
 
-      await this.syncUserDisplayName(payload.userId);
+      await this.syncUserDisplayName(params.slackUserId);
 
 
 
-      const currentQuestion = await this.collectionService.getCurrentQuestion(payload.userId);
+      const context =
+        await this.collectionService.resolveActiveDmSubmissionContext(
+          params.slackUserId,
+          params.channelId,
+          params.threadTs,
+        );
 
 
 
-      if (currentQuestion) {
+      if (!context || context.submissionId !== params.submissionId) {
 
-        await this.processAnswer(payload, currentQuestion);
+        await this.slackService.postMessage({
+
+          channelId: params.channelId,
+
+          threadTs: params.threadTs,
+
+          text: 'This CheckIn thread is no longer active.',
+
+        });
 
         return;
 
@@ -323,11 +436,33 @@ export class SlackGateway {
 
 
 
-      const normalizedMessage = payload.message.trim().toLowerCase();
+      const currentQuestion =
 
-      if (['start', 'hi', 'hello'].includes(normalizedMessage)) {
+        await this.collectionService.getCurrentQuestionForSubmission(
 
-        await this.startConversationFlow(payload.userId, payload.channelId);
+          params.submissionId,
+
+        );
+
+
+
+      if (
+
+        !currentQuestion ||
+
+        currentQuestion.questionId !== params.questionId
+
+      ) {
+
+        await this.slackService.postMessage({
+
+          channelId: params.channelId,
+
+          threadTs: params.threadTs,
+
+          text: 'This question is no longer active. Please answer the latest question above.',
+
+        });
 
         return;
 
@@ -335,31 +470,216 @@ export class SlackGateway {
 
 
 
-      this.logger.debug(`No active conversation for user ${payload.userId}.`);
+      const nextQuestion = await this.submitAnswerOrThrow(
+        params.slackUserId,
+        params.questionId,
+        params.answer,
+        params.submissionId,
+      );
 
-      await this.slackService.sendMessage({
+      const confirmation = await this.slackService.postMessage({
+        channelId: params.channelId,
+        threadTs: params.threadTs,
+        text: `✅ *${params.answer.trim()}*`,
+      });
 
-        channelId: payload.channelId,
+      if (!confirmation.ok) {
+        this.logger.warn(
+          `[DM] Could not post answer confirmation in thread ${params.threadTs}: ${confirmation.error ?? confirmation.slackError ?? 'unknown error'}`,
+        );
+      }
 
-        text: "You don't have an active check-in right now. Check-ins start automatically at their scheduled time.",
-
+      await this.advanceAfterAnswer({
+        slackUserId: params.slackUserId,
+        submissionId: params.submissionId,
+        channelId: params.channelId,
+        threadTs: params.threadTs,
+        checkInName: context.checkInName,
+        nextQuestion,
       });
 
     } catch (error: unknown) {
 
       const message = error instanceof Error ? error.message : String(error);
 
-      this.logger.error(`Error handling message for ${payload.userId}: ${message}`, error instanceof Error ? error.stack : undefined);
+      this.logger.error(
+        `[Pipeline] interactive answer FAILED user=${params.slackUserId} submission=${params.submissionId}: ${message}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+
+
+
+      await this.slackService.postMessage({
+
+        channelId: params.channelId,
+
+        threadTs: params.threadTs,
+
+        text: `❌ ${message}`,
+
+      });
+
+    }
+
+  }
+
+
+
+  private async handleMainDmMessage(payload: IncomingMessageDto): Promise<void> {
+
+    const activeOptions = await this.collectionService.getActiveCheckInOptions(
+
+      payload.userId,
+
+    );
+
+
+
+    if (activeOptions.length === 0) {
+
+      const normalizedMessage = payload.message.trim().toLowerCase();
+
+      if (['start', 'hi', 'hello'].includes(normalizedMessage)) {
+
+        await this.slackService.sendMessage({
+
+          channelId: payload.channelId,
+
+          text: "You don't have an active CheckIn right now. CheckIns start automatically at their scheduled time.",
+
+        });
+
+        return;
+
+      }
+
+
 
       await this.slackService.sendMessage({
 
         channelId: payload.channelId,
 
-        text: '❌ An error occurred processing your request.',
+        text: "You don't have an active CheckIn right now. CheckIns start automatically at their scheduled time.",
 
       });
 
+      return;
+
     }
+
+
+
+    if (activeOptions.length === 1) {
+
+      await this.slackService.sendMessage({
+
+        channelId: payload.channelId,
+
+        text: buildReplyInThreadReminderText({
+
+          checkInName: activeOptions[0].checkInName,
+
+        }),
+
+      });
+
+      return;
+
+    }
+
+
+
+    const list = activeOptions
+
+      .map((option) => `• *${option.checkInName}* — open its 📋 thread and reply there`)
+
+      .join('\n');
+
+
+
+    await this.slackService.sendMessage({
+
+      channelId: payload.channelId,
+
+      text: [
+
+        'You have multiple active CheckIns.',
+
+        '',
+
+        list,
+
+        '',
+
+        'Please reply inside the correct CheckIn thread.',
+
+      ].join('\n'),
+
+    });
+
+  }
+
+
+
+  async sendStandupReminder(
+
+    userId: string,
+
+    channelId: string,
+
+    checkInName: string,
+
+    _questionText: string,
+
+  ): Promise<void> {
+
+    await this.slackService.sendMessage({
+
+      channelId,
+
+      text:
+
+        `⏰ *Reminder — ${checkInName}*\n\n` +
+
+        'Please open the 📋 CheckIn thread in our DM and complete your answers there.',
+
+    });
+
+  }
+
+
+
+  async triggerAutomaticStandupForUser(userId: string, channelId: string): Promise<void> {
+
+    await this.handleMainDmMessage({
+
+      userId,
+
+      channelId,
+
+      message: 'hello',
+
+      timestamp: String(Date.now()),
+
+    });
+
+  }
+
+
+
+  async startConversationFlow(userId: string, channelId: string): Promise<void> {
+
+    await this.handleMainDmMessage({
+
+      userId,
+
+      channelId,
+
+      message: 'start',
+
+      timestamp: String(Date.now()),
+
+    });
 
   }
 
@@ -375,142 +695,300 @@ export class SlackGateway {
 
 
 
-  async sendStandupReminder(userId: string, channelId: string, checkInName: string, questionText: string): Promise<void> {
-
-    await this.slackService.sendMessage({
-
-      channelId,
-
-      text: `⏰ *Reminder — ${checkInName}*\n\n${questionText}\n\n_Reply here to continue your check-in._`,
-
-    });
-
+  private async submitAnswerOrThrow(
+    slackUserId: string,
+    questionId: string,
+    answer: string,
+    submissionId: string,
+  ): Promise<QuestionPayloadDto | null> {
+    return this.collectionService.submitAnswer(
+      slackUserId,
+      questionId,
+      answer,
+      submissionId,
+    );
   }
 
+  private async processTextAnswer(
+    payload: IncomingMessageDto,
+    currentQuestion: QuestionPayloadDto,
+    context: DmThreadContext,
+  ): Promise<void> {
+    this.logger.log(
+      `[Pipeline] submitAnswer START submission=${context.submissionId} question=${currentQuestion.questionId} (#${currentQuestion.questionNumber}/${currentQuestion.totalQuestions})`,
+    );
 
+    let nextQuestion: QuestionPayloadDto | null;
 
-  /** Legacy V1: open DM and start standup if user has an active check-in. */
-
-  async triggerAutomaticStandupForUser(userId: string, channelId: string): Promise<void> {
-
-    await this.startConversationFlow(userId, channelId);
-
-  }
-
-
-
-  async startConversationFlow(userId: string, channelId: string): Promise<void> {
-
-    const firstQuestion = await this.collectionService.startConversation(userId);
-
-    if (firstQuestion) {
-
-      await this.slackService.sendMessage({
-
-        channelId,
-
-        text: `*Question ${firstQuestion.questionNumber || 1}:*\n${firstQuestion.text}`,
-
+    try {
+      nextQuestion = await this.submitAnswerOrThrow(
+        payload.userId,
+        currentQuestion.questionId,
+        payload.message,
+        context.submissionId,
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `[Pipeline] submitAnswer FAILED submission=${context.submissionId} question=${currentQuestion.questionId}: ${message}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      await this.slackService.postMessage({
+        channelId: context.channelId,
+        threadTs: context.threadTs,
+        text: `❌ ${message}`,
       });
-
       return;
-
     }
 
-    await this.slackService.sendMessage({
+    this.logger.log(
+      `[Pipeline] submitAnswer DONE submission=${context.submissionId} nextQuestion=${nextQuestion?.questionId ?? 'COMPLETE'}`,
+    );
 
-      channelId,
+    try {
+      await this.sendNextQuestionOrComplete({
+        slackUserId: payload.userId,
+        submissionId: context.submissionId,
+        channelId: context.channelId,
+        threadTs: context.threadTs,
+        checkInName: context.checkInName,
+        nextQuestion,
+      });
+      this.logger.log(
+        `[Pipeline] sendNextQuestionOrComplete DONE submission=${context.submissionId}`,
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `[Pipeline] sendNextQuestionOrComplete FAILED submission=${context.submissionId}: ${message}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      await this.slackService.postMessage({
+        channelId: context.channelId,
+        threadTs: context.threadTs,
+        text: `❌ Failed to continue CheckIn: ${message}`,
+      });
+      throw error;
+    }
+  }
 
-      text: '✅ There are no questions for you right now.',
+  private async sendNextQuestionOrComplete(params: {
+    slackUserId: string;
+    submissionId: string;
+    channelId: string;
+    threadTs: string;
+    checkInName: string;
+    nextQuestion: QuestionPayloadDto | null;
+  }): Promise<void> {
+    const checkInConfig =
+      await this.collectionService.getCheckInConfigForSubmission(
+        params.submissionId,
+      );
 
+    if (params.nextQuestion) {
+      this.logger.log(
+        `[Pipeline] sendNextQuestion START submission=${params.submissionId} question=${params.nextQuestion.questionId} (#${params.nextQuestion.questionNumber}/${params.nextQuestion.totalQuestions}) thread=${params.threadTs}`,
+      );
+      await this.postQuestionInThread(
+        params.channelId,
+        params.threadTs,
+        params.submissionId,
+        params.nextQuestion,
+      );
+      this.logger.log(
+        `[Pipeline] sendNextQuestion DONE submission=${params.submissionId} question=${params.nextQuestion.questionId}`,
+      );
+      return;
+    }
+
+    this.logger.log(
+      `[Pipeline] completeConversation START submission=${params.submissionId}`,
+    );
+
+    const completed = await this.collectionService.completeConversation(
+      params.slackUserId,
+      params.submissionId,
+    );
+
+    if (completed) {
+      await this.postParticipantSummaryWithRetry(completed.submissionId);
+    }
+
+    const checkInName =
+      completed?.checkInName ||
+      checkInConfig?.name ||
+      params.checkInName;
+
+    const outro =
+      checkInConfig?.outroMessage?.trim() ||
+      buildDmThreadCompletionText({ checkInName });
+
+    const outroResult = await this.slackService.postMessage({
+      channelId: params.channelId,
+      threadTs: params.threadTs,
+      text: outro,
     });
 
+    if (!outroResult.ok) {
+      throw new Error(
+        outroResult.error ??
+          outroResult.slackError ??
+          'Failed to post CheckIn completion message to Slack.',
+      );
+    }
+
+    this.logger.log(
+      `[Pipeline] completeConversation DONE submission=${params.submissionId}`,
+    );
+  }
+
+  private async postDmQuestionMessage(params: {
+    channelId: string;
+    threadTs?: string;
+    submissionId: string;
+    question: QuestionPayloadDto;
+    checkInName?: string;
+    isParent?: boolean;
+  }): Promise<{
+    ok: boolean;
+    ts?: string;
+    error?: string;
+    slackError?: string;
+  }> {
+    const message = buildDmQuestionMessage({
+      question: params.question,
+      submissionId: params.submissionId,
+      checkInName: params.checkInName,
+      isParent: params.isParent,
+    });
+
+    const debugContext = `question=${params.question.questionId} type=${params.question.type}`;
+
+    if (message.usedBlocks) {
+      const validation = validateSlackBlocks(message.blocks);
+      if (!validation.valid) {
+        this.logger.warn(
+          `[Pipeline] Block validation failed for ${debugContext}: ${validation.errors.join('; ')}`,
+        );
+      }
+    } else if (
+      params.question.type &&
+      params.question.type !== QuestionType.FREE_TEXT
+    ) {
+      this.logger.log(
+        `[Pipeline] Using plain-text fallback for ${debugContext} (no interactive blocks).`,
+      );
+    }
+
+    let posted = await this.slackService.postMessage({
+      channelId: params.channelId,
+      threadTs: params.threadTs,
+      text: message.text,
+      ...(message.usedBlocks ? { blocks: message.blocks } : {}),
+      debugContext,
+    });
+
+    if (
+      !posted.ok &&
+      posted.slackError === 'invalid_blocks' &&
+      message.usedBlocks
+    ) {
+      this.logger.error(
+        `[Pipeline] Slack rejected blocks for ${debugContext}; retrying as plain text.`,
+      );
+      const fallbackText = message.text.includes('reply with your answer')
+        ? message.text
+        : `${message.text}\n\n_Please reply with your answer in this thread._`;
+
+      posted = await this.slackService.postMessage({
+        channelId: params.channelId,
+        threadTs: params.threadTs,
+        text: fallbackText,
+        debugContext: `${debugContext} fallback`,
+      });
+    }
+
+    return posted;
+  }
+
+  private async postQuestionInThread(
+    channelId: string,
+    threadTs: string,
+    submissionId: string,
+    question: QuestionPayloadDto,
+  ): Promise<void> {
+    const posted = await this.postDmQuestionMessage({
+      channelId,
+      threadTs,
+      submissionId,
+      question,
+    });
+
+    if (!posted.ok) {
+      const detail =
+        posted.error ??
+        posted.slackError ??
+        'unknown Slack API error';
+      throw new Error(
+        `Failed to post question ${question.questionId} in thread ${threadTs}: ${detail}`,
+      );
+    }
+
+    this.logger.log(
+      `[Pipeline] Slack postMessage OK question=${question.questionId} ts=${posted.ts ?? 'unknown'}`,
+    );
+  }
+
+  private async advanceAfterAnswer(params: {
+    slackUserId: string;
+    submissionId: string;
+    channelId: string;
+    threadTs: string;
+    checkInName: string;
+    nextQuestion: QuestionPayloadDto | null;
+  }): Promise<void> {
+    await this.sendNextQuestionOrComplete(params);
   }
 
 
 
-  /**
+  private async postParticipantSummaryWithRetry(
 
-   * Geekbot-style: acknowledge answer → ask next question → outro when done.
+    submissionId: string,
 
-   * All messages stay in the same DM channel (payload.channelId).
-
-   */
-
-  private async processAnswer(
-
-    payload: IncomingMessageDto,
-
-    currentQuestion: QuestionPayloadDto,
+    attempts = 3,
 
   ): Promise<void> {
 
-    const channelId = payload.channelId;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
 
+      try {
 
+        await this.threadService.postParticipantSummary(submissionId);
 
-    try {
+        return;
 
-      await this.collectionService.submitAnswer(
+      } catch (error: unknown) {
 
-        payload.userId,
+        const message = error instanceof Error ? error.message : String(error);
 
-        currentQuestion.questionId,
+        if (attempt >= attempts) {
 
-        payload.message,
+          this.logger.error(
 
-      );
+            `[Thread] Failed to post participant summary for ${submissionId} after ${attempts} attempts: ${message}`,
 
-    } catch (error: unknown) {
+          );
 
-      const message = error instanceof Error ? error.message : String(error);
+          return;
 
-      await this.slackService.sendMessage({ channelId, text: `❌ ${message}` });
+        }
 
-      return;
+        await new Promise((resolve) => setTimeout(resolve, attempt * 500));
 
-    }
-
-
-
-    const checkInConfig = await this.collectionService.getActiveCheckInConfigForUser(payload.userId);
-
-    const nextQuestion = await this.collectionService.getNextQuestion(payload.userId);
-
-
-
-    if (nextQuestion) {
-
-      const ack = ACK_MESSAGES[Math.floor(Math.random() * ACK_MESSAGES.length)];
-
-      await this.slackService.sendMessage({ channelId, text: ack });
-
-      await this.slackService.sendMessage({
-
-        channelId,
-
-        text: `*Question ${nextQuestion.questionNumber}:*\n${nextQuestion.text}`,
-
-      });
-
-      return;
+      }
 
     }
-
-
-
-    const submissionId = await this.collectionService.finishConversation(payload.userId);
-    if (submissionId) {
-      await this.threadService.postParticipantSummary(submissionId);
-    }
-
-    const outro =
-
-      checkInConfig?.outroMessage?.trim() ||
-
-      'Perfect! Your responses have been recorded successfully. ✅';
-
-    await this.slackService.sendMessage({ channelId, text: outro });
 
   }
 
@@ -519,5 +997,4 @@ export class SlackGateway {
 
 
 export default SlackGateway;
-
 

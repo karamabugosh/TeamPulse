@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   CheckSquare,
   Users,
@@ -29,6 +29,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
+import { apiFetch } from '@/lib/api';
+import { EnrichedRun, normalizeRun, reportStatusIcon } from '@/lib/run-status';
 
 const chartTooltipStyle = {
   backgroundColor: '#111827',
@@ -39,19 +41,33 @@ const chartTooltipStyle = {
 
 export const OverviewPage: React.FC = () => {
   const [data, setData] = useState<any>(null);
-  const [activeRuns, setActiveRuns] = useState<any[]>([]);
+  const [activeRuns, setActiveRuns] = useState<EnrichedRun[]>([]);
+
+  const loadActiveRuns = useCallback(async () => {
+    try {
+      const runs = await apiFetch<EnrichedRun[]>('/api/check-ins/runs/active');
+      setActiveRuns(Array.isArray(runs) ? runs.map(normalizeRun) : []);
+    } catch (error) {
+      console.error(error);
+    }
+  }, []);
 
   useEffect(() => {
-    fetch('/api/admin/overview')
-      .then((res) => res.json())
-      .then((resData) => setData(resData))
-      .catch(console.error);
+    const loadOverview = () => {
+      apiFetch('/api/admin/overview')
+        .then((resData) => setData(resData))
+        .catch(console.error);
+    };
 
-    fetch('/api/check-ins/runs/active')
-      .then((res) => res.json())
-      .then((runs) => setActiveRuns(Array.isArray(runs) ? runs : []))
-      .catch(console.error);
-  }, []);
+    loadOverview();
+    loadActiveRuns();
+    const runsInterval = setInterval(loadActiveRuns, 10000);
+    const overviewInterval = setInterval(loadOverview, 30000);
+    return () => {
+      clearInterval(runsInterval);
+      clearInterval(overviewInterval);
+    };
+  }, [loadActiveRuns]);
 
   const stats = {
     activeCheckIns: data?.stats?.activeCheckIns ?? 0,
@@ -107,25 +123,30 @@ export const OverviewPage: React.FC = () => {
       {activeRuns.length > 0 && (
         <Card className="border-primary/30">
           <CardHeader>
-            <CardTitle>Active CheckIns</CardTitle>
-            <CardDescription>Live collection status across your workspace</CardDescription>
+            <CardTitle>Active Runs</CardTitle>
+            <CardDescription>Standups currently collecting responses</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2">
             {activeRuns.map((run) => {
-              const completed = run.submissions?.filter((s: any) => s.status === 'completed').length || 0;
-              const total = run.submissions?.length || 0;
-              const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+              const pct = run.totalParticipants > 0
+                ? Math.round((run.participantsResponded / run.totalParticipants) * 100)
+                : 0;
               return (
                 <div key={run.id} className="rounded-xl border border-border bg-secondary/30 p-5 space-y-3">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <p className="font-semibold">{run.checkIn?.name}</p>
-                    <Badge variant="success">Live</Badge>
+                    <Badge variant="success">Collecting</Badge>
                   </div>
                   <p className="text-sm text-muted-foreground">{run.team?.name}</p>
                   <div className="h-2 overflow-hidden rounded-full bg-secondary">
                     <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
                   </div>
-                  <p className="text-xs text-muted-foreground">{completed}/{total} responses · {pct}% complete</p>
+                  <p className="text-xs text-muted-foreground">
+                    {run.participantsResponded}/{run.totalParticipants} responses · {pct}% complete
+                  </p>
+                  <p className="text-sm font-medium">
+                    {reportStatusIcon(run.reportStatus.code)} {run.reportStatus.label}
+                  </p>
                 </div>
               );
             })}

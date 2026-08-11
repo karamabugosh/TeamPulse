@@ -87,17 +87,28 @@ export class CheckInController {
     );
 
     if (result.run) {
-      await this.checkInThreadService.createRunThread(result.run.id);
-    }
+      const thread = await this.checkInThreadService.createRunThread(result.run.id);
 
-    if (result.run?.submissions.length) {
-      const checkIn = await this.checkInService.findOne(id);
-      const delivery = await this.slackGateway.deliverCheckInRun(
-        result,
-        checkIn.introMessage,
-      );
+      if (thread.ok === false) {
+        return {
+          ...result,
+          thread,
+          delivery: {
+            delivered: 0,
+            failed: 0,
+            skipped: 0,
+            aborted: true,
+            reason: thread.reason,
+          },
+        };
+      }
 
-      return { ...result, delivery };
+      if (result.run.submissions.length) {
+        const delivery = await this.slackGateway.deliverCheckInRun(result);
+        return { ...result, thread, delivery };
+      }
+
+      return { ...result, thread };
     }
 
     return result;
@@ -107,13 +118,25 @@ export class CheckInController {
   async deliverRun(
     @Param('runId') runId: string,
   ) {
-    await this.checkInThreadService.createRunThread(runId);
+    const thread = await this.checkInThreadService.createRunThread(runId);
+
+    if (thread.ok === false) {
+      return {
+        runId,
+        thread,
+        delivery: {
+          delivered: 0,
+          failed: 0,
+          skipped: 0,
+          aborted: true,
+          reason: thread.reason,
+        },
+      };
+    }
+
     const run = await this.checkInRunService.getRunForDelivery(runId);
-    const delivery = await this.slackGateway.deliverCheckInRun(
-      run,
-      run.introMessage,
-    );
-    return { runId, delivery };
+    const delivery = await this.slackGateway.deliverCheckInRun(run);
+    return { runId, thread, delivery };
   }
 
   @Post(':id/duplicate')
@@ -122,10 +145,7 @@ export class CheckInController {
   }
 
   @Delete(':id')
-  remove(
-    @Param('id') id: string,
-    @Query('force') force?: string,
-  ) {
-    return this.checkInService.remove(id, force === 'true');
+  remove(@Param('id') id: string) {
+    return this.checkInService.remove(id);
   }
 }

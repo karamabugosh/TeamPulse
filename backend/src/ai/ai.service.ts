@@ -4,6 +4,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import {
   AiDigestResult,
   RawResponseForAnalysis,
+  EMPTY_REPORT_SECTIONS,
 } from './dto/ai-result.dto';
 import { AI_PROMPT } from './prompts/pulse-ai.prompts';
 import { runRulesFallback } from './rules-fallback';
@@ -156,6 +157,7 @@ export class AiService {
            */
           blockers: result.blockers as any,
           themes: result.themes as any,
+          reportSections: result.reportSections as any,
         },
       });
 
@@ -285,6 +287,7 @@ export class AiService {
       summary: parsed.summary,
       blockers: parsed.blockers,
       themes: parsed.themes,
+      reportSections: parsed.reportSections,
     };
   }
 

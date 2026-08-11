@@ -13,8 +13,9 @@ export interface CollectionGateway {
 
   /**
    * Submits an answer for a specific question.
+   * Returns the next unanswered question, or null when the CheckIn is complete.
    */
-  submitAnswer(userId: string, questionId: string, answer: string): Promise<void>;
+  submitAnswer(userId: string, questionId: string, answer: string): Promise<QuestionPayloadDto | null>;
 
   /**
    * Retrieves the next question in the sequence for the user.
@@ -25,6 +26,16 @@ export interface CollectionGateway {
    * Concludes the conversation.
    */
   finishConversation(userId: string): Promise<string | null>;
+
+  /**
+   * Finalizes the active conversation and returns submission metadata.
+   */
+  completeConversation(
+    userId: string,
+  ): Promise<{
+    submissionId: string;
+    checkInName: string | null;
+  } | null>;
 
   /**
    * Returns the question the user should answer now, if any.

@@ -549,32 +549,181 @@ export class SlackService
    */
   public async postMessage(
     payload: OutgoingMessageDto,
-  ): Promise<{ ok: boolean; ts?: string }> {
+  ): Promise<{
+    ok: boolean;
+    ts?: string;
+    error?: string;
+    slackError?: string;
+    needed?: string;
+    provided?: string;
+  }> {
     if (!this.webClient) {
-      return { ok: false };
+      return {
+        ok: false,
+        error: 'Slack WebClient is not initialized (missing SLACK_BOT_TOKEN).',
+      };
     }
 
     const channelId = payload.channelId?.trim();
     const text = payload.text?.trim();
 
     if (!channelId || !text) {
-      return { ok: false };
+      return {
+        ok: false,
+        error: 'channelId and text are required for chat.postMessage.',
+      };
     }
 
+    const apiPayload: Record<string, unknown> = {
+      channel: channelId,
+      text,
+      ...(payload.threadTs ? { thread_ts: payload.threadTs } : {}),
+      ...(payload.blocks ? { blocks: payload.blocks } : {}),
+    };
+
+    const logLabel = payload.debugContext
+      ? `[Slack] chat.postMessage (${payload.debugContext})`
+      : '[Slack] chat.postMessage';
+
+    this.logger.log(
+      `${logLabel} payload: ${JSON.stringify(apiPayload, null, 2)}`,
+    );
+
     try {
-      const result = await this.webClient.chat.postMessage({
-        channel: channelId,
-        text,
-        ...(payload.threadTs ? { thread_ts: payload.threadTs } : {}),
-        ...(payload.blocks ? { blocks: payload.blocks as any } : {}),
-      });
+      const result = await this.webClient.chat.postMessage(apiPayload as any);
+
+      if (!result.ok) {
+        const slackError = (result as { error?: string }).error;
+        this.logger.error(
+          `${logLabel} returned ok=false: ${JSON.stringify(result)}`,
+        );
+        if (slackError === 'invalid_blocks' && payload.blocks) {
+          this.logger.error(
+            `${logLabel} invalid_blocks payload: ${JSON.stringify(apiPayload, null, 2)}`,
+          );
+        }
+        return {
+          ok: false,
+          error: 'Slack API returned ok=false.',
+          slackError,
+        };
+      }
 
       return { ok: true, ts: result.ts as string | undefined };
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Slack postMessage failed: ${message}`);
-      return { ok: false };
+      const details = this.extractSlackError(error);
+      this.logSlackError(
+        `chat.postMessage to channel ${channelId}`,
+        error,
+      );
+      if (details.slackError === 'invalid_blocks' && payload.blocks) {
+        this.logger.error(
+          `${logLabel} invalid_blocks payload: ${JSON.stringify(apiPayload, null, 2)}`,
+        );
+      }
+      return { ok: false, ...details };
     }
+  }
+
+  /**
+   * Resolves a channel reference to a Slack channel ID.
+   * Accepts raw IDs (C…/G…), #channel-name, or plain channel names.
+   */
+  public async resolveChannelId(
+    channelRef: string,
+  ): Promise<string | null> {
+    const trimmed = channelRef.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    if (/^[CG][A-Z0-9]+$/i.test(trimmed)) {
+      return trimmed;
+    }
+
+    if (!this.webClient) {
+      this.logger.error(
+        'Cannot resolve Slack channel name — WebClient is not initialized.',
+      );
+      return null;
+    }
+
+    const targetName = trimmed.replace(/^#/, '').toLowerCase();
+
+    try {
+      let cursor: string | undefined;
+
+      do {
+        const result = await this.webClient.conversations.list({
+          types: 'public_channel,private_channel',
+          limit: 200,
+          cursor,
+        });
+
+        for (const channel of result.channels ?? []) {
+          if (
+            channel.id &&
+            channel.name?.toLowerCase() === targetName
+          ) {
+            this.logger.log(
+              `Resolved Slack channel "${trimmed}" → ${channel.id}`,
+            );
+            return channel.id;
+          }
+        }
+
+        cursor = result.response_metadata?.next_cursor || undefined;
+      } while (cursor);
+
+      this.logger.error(
+        `Could not resolve Slack channel "${trimmed}" — not found in workspace.`,
+      );
+      return null;
+    } catch (error: unknown) {
+      this.logSlackError(`resolveChannelId("${trimmed}")`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Ensures the bot is a member of the channel before posting.
+   */
+  public async joinChannel(channelId: string): Promise<boolean> {
+    if (!this.webClient) {
+      return false;
+    }
+
+    try {
+      await this.webClient.conversations.join({ channel: channelId });
+      this.logger.log(`Joined Slack channel ${channelId}.`);
+      return true;
+    } catch (error: unknown) {
+      const details = this.extractSlackError(error);
+      if (details.slackError === 'already_in_channel') {
+        return true;
+      }
+      this.logSlackError(`conversations.join(${channelId})`, error);
+      return false;
+    }
+  }
+
+  private extractSlackError(error: unknown): {
+    error: string;
+    slackError?: string;
+    needed?: string;
+    provided?: string;
+  } {
+    const err = error as {
+      message?: string;
+      data?: { error?: string; needed?: string; provided?: string };
+    };
+
+    return {
+      error: err?.message || String(error),
+      slackError: err?.data?.error,
+      needed: err?.data?.needed,
+      provided: err?.data?.provided,
+    };
   }
 
   public async updateMessage(payload: {

@@ -236,6 +236,7 @@ Return JSON matching exactly this shape:
 
 {
   "summary": "string",
+  "keyAccomplishments": ["string"],
   "blockers": [
     {
       "userId": "string",
@@ -246,6 +247,17 @@ Return JSON matching exactly this shape:
       "confidence": 0.0
     }
   ],
+  "risks": ["string"],
+  "aiInsights": ["string"],
+  "actionItems": ["string"],
+  "participantUpdates": [
+    {
+      "slackUserId": "string",
+      "displayName": "string",
+      "answers": [{ "question": "string", "answer": "string" }]
+    }
+  ],
+  "overallProgress": "string",
   "themes": [
     {
       "theme": "string",
@@ -254,6 +266,15 @@ Return JSON matching exactly this shape:
     }
   ]
 }
+
+Section guidance:
+- summary: executive summary (1-2 sentences)
+- keyAccomplishments: concrete accomplishments reported by the team
+- risks: potential risks or concerns inferred from the data
+- aiInsights: useful observations for managers
+- actionItems: suggested follow-ups based on the standup data
+- participantUpdates: one entry per participant with their submitted answers preserved
+- overallProgress: team-level progress assessment based on all responses
 
 Before returning the JSON, internally verify that:
 - every blocker is active rather than resolved;

@@ -16,15 +16,6 @@ import { EnrichedRun, normalizeRun } from '@/lib/run-status';
 type DeleteTarget = {
   id: string;
   name: string;
-  runCount: number;
-};
-
-type DeleteResult = {
-  deleted: boolean;
-  canDelete?: boolean;
-  forceDeleted?: boolean;
-  runCount?: number;
-  message?: string;
 };
 
 export const CheckInsPage: React.FC = () => {
@@ -39,9 +30,6 @@ export const CheckInsPage: React.FC = () => {
   const [runsLoading, setRunsLoading] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [archiving, setArchiving] = useState(false);
-  const [togglingId, setTogglingId] = useState<string | null>(null);
-  const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
   const [runningId, setRunningId] = useState<string | null>(null);
 
   const loadActiveRuns = useCallback(async () => {
@@ -56,8 +44,8 @@ export const CheckInsPage: React.FC = () => {
     }
   }, []);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const loadData = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoading(true);
     try {
       const [checkInsData, teamsData] = await Promise.all([
         apiFetch<any[]>('/api/check-ins'),
@@ -69,13 +57,19 @@ export const CheckInsPage: React.FC = () => {
       const message = error instanceof ApiError ? error.message : 'Failed to load CheckIns';
       toast({ title: 'Could not load data', description: message, variant: 'destructive' });
     } finally {
-      setLoading(false);
+      if (!options?.silent) setLoading(false);
     }
   }, [toast]);
 
   useEffect(() => {
     loadData();
     loadActiveRuns();
+    const runsInterval = setInterval(loadActiveRuns, 10000);
+    const dataInterval = setInterval(() => loadData({ silent: true }), 30000);
+    return () => {
+      clearInterval(runsInterval);
+      clearInterval(dataInterval);
+    };
   }, [loadData, loadActiveRuns]);
 
   const filteredCheckIns = useMemo(() => {
@@ -87,118 +81,6 @@ export const CheckInsPage: React.FC = () => {
         (c.description && c.description.toLowerCase().includes(query)),
     );
   }, [checkIns, searchTerm]);
-
-  const handleToggleEnabled = async (id: string, currentStatus: boolean) => {
-    setTogglingId(id);
-    const nextEnabled = !currentStatus;
-    try {
-      const updated = await apiFetch<any>(`/api/check-ins/${id}/enabled`, {
-        method: 'PATCH',
-        body: JSON.stringify({ enabled: nextEnabled }),
-      });
-      setCheckIns((current) =>
-        current.map((checkIn) =>
-          checkIn.id === id ? { ...checkIn, ...updated, enabled: nextEnabled } : checkIn,
-        ),
-      );
-      toast({
-        title: nextEnabled ? 'CheckIn enabled' : 'CheckIn archived',
-        description: nextEnabled
-          ? 'Scheduled runs will resume.'
-          : 'The CheckIn is disabled but history is preserved.',
-        variant: 'success',
-      });
-    } catch (error) {
-      const message = error instanceof ApiError ? error.message : 'Failed to update status';
-      toast({ title: 'Update failed', description: message, variant: 'destructive' });
-    } finally {
-      setTogglingId(null);
-    }
-  };
-
-  const handleDuplicate = async (id: string) => {
-    setDuplicatingId(id);
-    try {
-      const created = await apiFetch<any>(`/api/check-ins/${id}/duplicate`, { method: 'POST' });
-      setCheckIns((current) => [created, ...current]);
-      toast({
-        title: 'CheckIn duplicated',
-        description: `"${created.name}" was created.`,
-        variant: 'success',
-      });
-    } catch (error) {
-      const message = error instanceof ApiError ? error.message : 'Failed to duplicate';
-      toast({ title: 'Duplicate failed', description: message, variant: 'destructive' });
-    } finally {
-      setDuplicatingId(null);
-    }
-  };
-
-  const closeDeleteDialog = () => {
-    if (!deleting && !archiving) {
-      setDeleteTarget(null);
-    }
-  };
-
-  const handleArchive = async () => {
-    if (!deleteTarget) return;
-    setArchiving(true);
-    try {
-      const updated = await apiFetch<any>(`/api/check-ins/${deleteTarget.id}/enabled`, {
-        method: 'PATCH',
-        body: JSON.stringify({ enabled: false }),
-      });
-      setCheckIns((current) =>
-        current.map((c) =>
-          c.id === deleteTarget.id ? { ...c, ...updated, enabled: false } : c,
-        ),
-      );
-      toast({
-        title: 'CheckIn archived',
-        description: `"${deleteTarget.name}" is disabled. Run history is preserved.`,
-        variant: 'success',
-      });
-      setDeleteTarget(null);
-    } catch (error) {
-      const message = error instanceof ApiError ? error.message : 'Failed to archive';
-      toast({ title: 'Archive failed', description: message, variant: 'destructive' });
-    } finally {
-      setArchiving(false);
-    }
-  };
-
-  const handleDelete = async (force: boolean) => {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    try {
-      const url = force
-        ? `/api/check-ins/${deleteTarget.id}?force=true`
-        : `/api/check-ins/${deleteTarget.id}`;
-      const result = await apiFetch<DeleteResult>(url, { method: 'DELETE' });
-
-      if (result.deleted) {
-        setCheckIns((current) => current.filter((c) => c.id !== deleteTarget.id));
-        toast({
-          title: result.forceDeleted ? 'CheckIn and history deleted' : 'CheckIn deleted',
-          description: `"${deleteTarget.name}" was permanently removed.`,
-          variant: 'success',
-        });
-        setDeleteTarget(null);
-        await loadActiveRuns();
-      } else if (result.canDelete === false) {
-        toast({
-          title: 'Cannot delete',
-          description: result.message ?? 'This CheckIn has execution history.',
-          variant: 'destructive',
-        });
-      }
-    } catch (error) {
-      const message = error instanceof ApiError ? error.message : 'Failed to delete';
-      toast({ title: 'Delete failed', description: message, variant: 'destructive' });
-    } finally {
-      setDeleting(false);
-    }
-  };
 
   const handleStartRun = async (id: string, name: string) => {
     setRunningId(id);
@@ -221,26 +103,52 @@ export const CheckInsPage: React.FC = () => {
     }
   };
 
+  const closeDeleteDialog = () => {
+    if (!deleting) setDeleteTarget(null);
+  };
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await apiFetch(`/api/check-ins/${deleteTarget.id}`, { method: 'DELETE' });
+      setCheckIns((current) => current.filter((c) => c.id !== deleteTarget.id));
+      toast({
+        title: 'CheckIn deleted',
+        description: `"${deleteTarget.name}" and all related data were removed.`,
+        variant: 'success',
+      });
+      setDeleteTarget(null);
+      await loadActiveRuns();
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : 'Failed to delete';
+      toast({ title: 'Delete failed', description: message, variant: 'destructive' });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const handleCheckInSaved = (saved?: any) => {
     if (saved?.id) {
       setCheckIns((current) => {
         const exists = current.some((c) => c.id === saved.id);
+        const merged = {
+          ...(exists ? current.find((c) => c.id === saved.id) : {}),
+          ...saved,
+          _count: saved._count ?? (exists ? current.find((c) => c.id === saved.id)?._count : { runs: 0 }),
+        };
         return exists
-          ? current.map((c) => (c.id === saved.id ? { ...c, ...saved } : c))
-          : [{ ...saved, _count: saved._count ?? { runs: 0 } }, ...current];
+          ? current.map((c) => (c.id === saved.id ? merged : c))
+          : [merged, ...current];
       });
     } else {
-      loadData();
+      void loadData({ silent: true });
     }
-    loadActiveRuns();
+    void loadActiveRuns();
   };
 
   const openDeleteDialog = (checkIn: any) => {
-    setDeleteTarget({
-      id: checkIn.id,
-      name: checkIn.name,
-      runCount: checkIn._count?.runs ?? 0,
-    });
+    setDeleteTarget({ id: checkIn.id, name: checkIn.name });
   };
 
   return (
@@ -331,13 +239,9 @@ export const CheckInsPage: React.FC = () => {
               <CheckInCard
                 key={checkIn.id}
                 checkIn={checkIn}
-                isToggling={togglingId === checkIn.id}
-                isDuplicating={duplicatingId === checkIn.id}
                 isRunning={runningId === checkIn.id}
-                onToggle={() => handleToggleEnabled(checkIn.id, checkIn.enabled)}
                 onRun={() => handleStartRun(checkIn.id, checkIn.name)}
                 onEdit={() => { setEditingCheckIn(checkIn); setIsModalOpen(true); }}
-                onDuplicate={() => handleDuplicate(checkIn.id)}
                 onDelete={() => openDeleteDialog(checkIn)}
               />
             ))}
@@ -356,12 +260,9 @@ export const CheckInsPage: React.FC = () => {
       <DeleteCheckInDialog
         open={!!deleteTarget}
         checkInName={deleteTarget?.name ?? ''}
-        runCount={deleteTarget?.runCount ?? 0}
         deleting={deleting}
-        archiving={archiving}
         onOpenChange={(open) => { if (!open) closeDeleteDialog(); }}
-        onDelete={handleDelete}
-        onArchive={handleArchive}
+        onConfirm={handleDelete}
       />
     </div>
   );
