@@ -1,7 +1,7 @@
 import {
   Injectable,
   Logger,
-  OnModuleInit,
+  OnApplicationBootstrap,
 } from '@nestjs/common';
 import { AuthService } from '../auth/auth.service';
 import { CollectionService } from '../collection/collection.service';
@@ -14,7 +14,7 @@ import { buildAppHomeBlocks } from './slack-app-home.view';
 import { SlackService } from './slack.service';
 
 @Injectable()
-export class SlackListener implements OnModuleInit {
+export class SlackListener implements OnApplicationBootstrap {
   private readonly logger = new Logger(SlackListener.name);
 
   constructor(
@@ -26,9 +26,9 @@ export class SlackListener implements OnModuleInit {
     private readonly prisma: PrismaService,
   ) {}
 
-  onModuleInit(): void {
+  onApplicationBootstrap(): void {
     this.logger.log(
-      'SlackListener onModuleInit() is executing...',
+      'SlackListener onApplicationBootstrap() is executing...',
     );
 
     this.registerListeners();

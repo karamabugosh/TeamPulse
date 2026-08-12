@@ -1,6 +1,8 @@
 // backend/src/ai/prompts/pulse-ai.prompts.ts
 
 import { RawResponseForAnalysis } from '../dto/ai-result.dto';
+import { QuestionType } from '@prisma/client';
+import { buildSemanticAggregates } from '../../common/question-semantics';
 
 const SYSTEM_PROMPT = `You are a summarisation assistant inside an internal team-standup tool.
 
@@ -18,7 +20,11 @@ Your job has three parts:
    - describe team-level progress, not evaluate individuals;
    - prioritise meaningful progress, blockers, and dependencies;
    - avoid repeating every answer;
-   - distinguish active blockers from issues that were already resolved.
+   - use semanticInterpretation when present instead of counting raw Yes/No
+     answers literally (e.g. "3 team members reported blockers" rather than
+     "3 people answered Yes");
+   - treat formattedAnswer and semanticInterpretation as the intended meaning
+     of yes/no style questions.
 
 2. THEMES
    Group related work into a short list of useful themes.
@@ -212,14 +218,29 @@ export function buildUserPrompt(
         .map((answer) => ({
           questionId: answer.questionId,
           questionText: answer.questionText,
+          questionType: answer.questionType,
           text: answer.text.trim(),
+          formattedAnswer: answer.formattedAnswer,
+          semanticInterpretation: answer.semanticInterpretation,
+          sentiment: answer.sentiment,
         })),
     }))
     .filter((response) => response.answers.length > 0);
 
+  const semanticAggregates = buildSemanticAggregates(
+    filteredResponses.map((response) => ({
+      answers: response.answers.map((answer) => ({
+        questionText: answer.questionText,
+        questionType: answer.questionType ?? QuestionType.FREE_TEXT,
+        text: answer.text,
+      })),
+    })),
+  );
+
   const payload = {
     teamId,
     runId,
+    semanticAggregates,
     responses: filteredResponses,
   };
 

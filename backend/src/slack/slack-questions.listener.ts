@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { SlackService } from './slack.service';
 import { AuthService } from '../auth/auth.service';
 import { QuestionsService } from '../questions/questions.service';
@@ -9,7 +9,7 @@ import {
 } from './slack-questions.views';
 
 @Injectable()
-export class SlackQuestionsListener implements OnModuleInit {
+export class SlackQuestionsListener implements OnApplicationBootstrap {
   private readonly logger = new Logger(SlackQuestionsListener.name);
 
   constructor(
@@ -18,8 +18,8 @@ export class SlackQuestionsListener implements OnModuleInit {
     private readonly questionsService: QuestionsService
   ) {}
 
-  onModuleInit() {
-    this.logger.log('SlackQuestionsListener onModuleInit() is executing...');
+  onApplicationBootstrap() {
+    this.logger.log('SlackQuestionsListener onApplicationBootstrap() is executing...');
     this.registerListeners();
   }
 

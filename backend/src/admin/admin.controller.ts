@@ -47,6 +47,11 @@ export class AdminController {
     return this.adminService.getReportsForCheckIn(checkInId);
   }
 
+  @Get('reports/by-run/:runId')
+  getReportByRun(@Param('runId') runId: string) {
+    return this.adminService.getReportByRunId(runId);
+  }
+
   @Get('reports/:id/export/csv')
   @Header('Content-Type', 'text/csv')
   @Header('Content-Disposition', 'attachment; filename="report-export.csv"')

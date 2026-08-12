@@ -1,5 +1,8 @@
 // backend/src/ai/dto/ai-result.dto.ts
 
+import { QuestionType } from '@prisma/client';
+import type { SemanticSentiment } from '../../common/question-semantics';
+
 export enum BlockerSeverity {
   LOW = 'low',
   MEDIUM = 'medium',
@@ -24,7 +27,13 @@ export interface ThemeSummary {
 export interface ParticipantUpdateSummary {
   slackUserId: string;
   displayName: string;
-  answers: Array<{ question: string; answer: string }>;
+  answers: Array<{
+    question: string;
+    answer: string;
+    formattedAnswer?: string;
+    sentiment?: SemanticSentiment;
+    semanticInterpretation?: string | null;
+  }>;
 }
 
 export interface ReportSections {
@@ -41,7 +50,11 @@ export interface RawResponseForAnalysis {
   answers: {
     questionId: string;
     questionText: string;
+    questionType?: QuestionType;
     text: string;
+    formattedAnswer?: string;
+    semanticInterpretation?: string | null;
+    sentiment?: SemanticSentiment;
   }[];
 }
 

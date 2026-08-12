@@ -34,7 +34,7 @@ export class AiService {
     teamId: string,
     runId: string,
     responses: RawResponseForAnalysis[],
-    persist = true,
+    persist = false,
   ): Promise<AiDigestResult> {
     let result: AiDigestResult;
 
@@ -140,21 +140,22 @@ export class AiService {
     result: AiDigestResult,
   ): Promise<void> {
     try {
-      await this.prisma.aiDigest.create({
-        data: {
+      await this.prisma.aiDigest.upsert({
+        where: { runId: result.runId },
+        create: {
           teamId: result.teamId,
           runId: result.runId,
-          generatedAt: new Date(
-            result.generatedAt,
-          ),
+          generatedAt: new Date(result.generatedAt),
           source: result.source,
           summary: result.summary,
-
-          /*
-           * Prisma stores these fields as JSON.
-           * We will improve this typing separately after
-           * reviewing the Prisma AiDigest model.
-           */
+          blockers: result.blockers as any,
+          themes: result.themes as any,
+          reportSections: result.reportSections as any,
+        },
+        update: {
+          generatedAt: new Date(result.generatedAt),
+          source: result.source,
+          summary: result.summary,
           blockers: result.blockers as any,
           themes: result.themes as any,
           reportSections: result.reportSections as any,

@@ -7,20 +7,10 @@ import {
   ExtractedBlocker,
   EMPTY_REPORT_SECTIONS,
 } from './dto/ai-result.dto';
+import { QuestionType } from '@prisma/client';
+import { buildSemanticAggregates } from '../common/question-semantics';
 
-/**
- * Rules-based fallback used when the AI layer is disabled,
- * unavailable, or fails.
- *
- * Standup answers are stored as free text, so reliably identifying
- * blockers, dependencies, severity, or themes requires semantic
- * language understanding.
- *
- * This fallback therefore does not attempt keyword-based blocker
- * detection or theme extraction. Instead, it returns a deterministic
- * summary of the amount of standup data that was collected and leaves
- * semantic fields empty.
- */
+/** Rules-based fallback when the AI layer is disabled or fails. */
 export function runRulesFallback(
   teamId: string,
   runId: string,
@@ -49,11 +39,33 @@ export function runRulesFallback(
   );
 
   const participantCount = participantsWithAnswers.length;
+  const semanticAggregates = buildSemanticAggregates(
+    participantsWithAnswers.map((response) => ({
+      answers: response.answers.map((answer) => ({
+        questionText: answer.questionText,
+        questionType: answer.questionType ?? QuestionType.FREE_TEXT,
+        text: answer.text,
+      })),
+    })),
+  );
+
+  const semanticSummary =
+    semanticAggregates.length > 0
+      ? semanticAggregates
+          .map(({ label, count }) => {
+            const memberLabel =
+              count === 1 ? 'team member' : 'team members';
+            return `${count} ${memberLabel} ${label.toLowerCase()}.`;
+          })
+          .join(' ')
+      : null;
 
   const summary =
     answerCount === 0
       ? 'AI analysis is unavailable. No substantive standup answers were available for analysis.'
-      : `AI analysis is unavailable. Collected ${answerCount} substantive standup answer(s) from ${participantCount} participant(s). No blockers or themes were extracted because semantic analysis requires the AI layer.`;
+      : semanticSummary
+        ? `AI analysis is unavailable. ${semanticSummary}`
+        : `AI analysis is unavailable. Collected ${answerCount} substantive standup answer(s) from ${participantCount} participant(s).`;
 
   return {
     teamId,
@@ -67,9 +79,16 @@ export function runRulesFallback(
       answerCount === 0
         ? EMPTY_REPORT_SECTIONS
         : {
-            keyAccomplishments: themes.map((theme) => theme.theme),
-            risks: [],
+            keyAccomplishments: [],
+            risks: semanticAggregates
+              .filter(({ label }) =>
+                /blocked|concern|not reviewed|needs help|uncertain/i.test(
+                  label,
+                ),
+              )
+              .map(({ label, count }) => `${count} ${label.toLowerCase()}`),
             aiInsights: [
+              ...(semanticSummary ? [semanticSummary] : []),
               `Collected ${answerCount} substantive answer(s) from ${participantCount} participant(s).`,
             ],
             actionItems: [],
@@ -79,6 +98,9 @@ export function runRulesFallback(
               answers: response.answers.map((answer) => ({
                 question: answer.questionText,
                 answer: answer.text,
+                formattedAnswer: answer.formattedAnswer,
+                sentiment: answer.sentiment,
+                semanticInterpretation: answer.semanticInterpretation,
               })),
             })),
             overallProgress:

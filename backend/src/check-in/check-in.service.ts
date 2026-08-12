@@ -1291,7 +1291,7 @@ export class CheckInService {
             ),
             slackThreadUrl: null,
             durationMinutes: null,
-            aiReport: run.aiDigests?.[0] ?? null,
+            aiReport: run.aiDigest ?? null,
           };
         }
       }),
@@ -1343,7 +1343,7 @@ export class CheckInService {
             reportStatus: this.resolveReportStatus(run, 0, run.submissions?.length ?? 0),
             slackThreadUrl: null,
             durationMinutes: null,
-            aiReport: run.aiDigests?.[0] ?? null,
+            aiReport: run.aiDigest ?? null,
           };
         }
       }),
@@ -1393,9 +1393,7 @@ export class CheckInService {
         },
       },
     },
-    aiDigests: {
-      orderBy: { generatedAt: 'desc' as const },
-      take: 1,
+    aiDigest: {
       select: {
         id: true,
         generatedAt: true,
@@ -1452,7 +1450,7 @@ export class CheckInService {
       reportStatus,
       slackThreadUrl,
       durationMinutes,
-      aiReport: run.aiDigests?.[0] ?? null,
+      aiReport: run.aiDigest ?? null,
     };
   }
 

@@ -1259,6 +1259,7 @@ export class CollectionService
   ): Promise<{
     submissionId: string;
     checkInName: string | null;
+    runId: string;
   } | null> {
     const user =
       await this.getOrCreateUser(
@@ -1296,6 +1297,7 @@ export class CollectionService
     return {
       submissionId: completedSubmissionId,
       checkInName,
+      runId: session.submission.runId,
     };
   }
 

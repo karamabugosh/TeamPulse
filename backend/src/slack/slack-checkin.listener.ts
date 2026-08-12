@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 
 import { CheckInThreadService } from './check-in-thread.service';
 
@@ -24,7 +24,7 @@ import {
 
 @Injectable()
 
-export class SlackCheckInListener implements OnModuleInit {
+export class SlackCheckInListener implements OnApplicationBootstrap {
 
   private readonly logger = new Logger(SlackCheckInListener.name);
 
@@ -42,7 +42,7 @@ export class SlackCheckInListener implements OnModuleInit {
 
 
 
-  onModuleInit(): void {
+  onApplicationBootstrap(): void {
 
     this.registerListeners();
 
@@ -257,15 +257,16 @@ export class SlackCheckInListener implements OnModuleInit {
 
 
       if (!posted) {
-
         this.logger.error(
-
           `Additional update failed for user ${slackUserId} on run ${runId}`,
-
         );
-
+        return;
       }
 
+      await this.threadService.postAdditionalUpdateButtonForUser({
+        runId,
+        slackUserId,
+      });
     });
 
 

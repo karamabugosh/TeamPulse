@@ -41,6 +41,7 @@ export class AiController {
       body.teamId.trim(),
       body.runId.trim(),
       body.responses,
+      false,
     );
   }
 }

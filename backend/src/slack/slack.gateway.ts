@@ -11,17 +11,11 @@ import { IncomingMessageDto } from './dto/incoming-message.dto';
 import { QuestionPayloadDto } from './dto/question-payload.dto';
 
 import {
-
   buildDmQuestionMessage,
-
   buildDmThreadCompletionText,
-
   buildReplyInThreadReminderText,
-
   mapDbQuestionToPayload,
-
   validateSlackBlocks,
-
 } from './slack-checkin.views';
 
 import { SlackService } from './slack.service';
@@ -835,6 +829,13 @@ export class SlackGateway {
           outroResult.slackError ??
           'Failed to post CheckIn completion message to Slack.',
       );
+    }
+
+    if (completed?.runId) {
+      await this.threadService.postAdditionalUpdateButtonForUser({
+        runId: completed.runId,
+        slackUserId: params.slackUserId,
+      });
     }
 
     this.logger.log(

@@ -396,6 +396,7 @@ export class AdminService {
 
   async getReportsList(search?: string, timeframe?: string) {
     const where: any = {
+      slackReportText: { not: null },
       run: {
         checkInId: { not: null },
       },
@@ -409,7 +410,7 @@ export class AdminService {
 
     const digests = await this.prisma.aiDigest.findMany({
       where,
-      orderBy: { generatedAt: 'desc' },
+      orderBy: { run: { startedAt: 'desc' } },
       include: {
         team: {
           select: {
@@ -500,8 +501,8 @@ export class AdminService {
 
     return Array.from(groups.values()).sort(
       (a, b) =>
-        new Date(b.latestReport.generatedAt).getTime() -
-        new Date(a.latestReport.generatedAt).getTime(),
+        new Date(b.latestReport.runDate).getTime() -
+        new Date(a.latestReport.runDate).getTime(),
     );
   }
 
@@ -517,9 +518,10 @@ export class AdminService {
 
     const digests = await this.prisma.aiDigest.findMany({
       where: {
+        slackReportText: { not: null },
         run: { checkInId },
       },
-      orderBy: { generatedAt: 'desc' },
+      orderBy: { run: { startedAt: 'desc' } },
       include: {
         team: {
           select: {
@@ -566,6 +568,18 @@ export class AdminService {
         .filter((digest) => digest.run?.checkIn)
         .map((digest) => this.mapReportListItem(digest)),
     };
+  }
+
+  async getReportByRunId(runId: string) {
+    const digest = await this.prisma.aiDigest.findUnique({
+      where: { runId },
+    });
+
+    if (!digest?.slackReportText) {
+      throw new NotFoundException('Report is not generated yet.');
+    }
+
+    return this.getReportDetail(digest.id);
   }
 
   async getReportDetail(id: string) {
@@ -619,23 +633,25 @@ export class AdminService {
       throw new NotFoundException(`Report ${id} was not found.`);
     }
 
+    if (!digest.slackReportText) {
+      throw new NotFoundException('Report is not generated yet.');
+    }
+
     const listItem = this.mapReportListItem(digest);
-    const participantUpdates = this.buildParticipantUpdates(digest.run.submissions);
     const reportSections = this.parseReportSections(digest.reportSections);
+    const nonResponderNames = Array.isArray(digest.nonResponderNames)
+      ? (digest.nonResponderNames as string[])
+      : [];
 
     return {
       ...listItem,
       description: digest.run.checkIn.description,
       runStatus: digest.run.status,
       reportStatus: digest.run.reportStatus,
-      reportSections: {
-        ...reportSections,
-        participantUpdates:
-          reportSections.participantUpdates.length > 0
-            ? reportSections.participantUpdates
-            : participantUpdates,
-      },
-      participants: participantUpdates,
+      nonResponderNames,
+      slackReportText: digest.slackReportText ?? null,
+      reportSections,
+      participants: reportSections.participantUpdates,
       blockers: digest.blockers,
       themes: digest.themes,
     };
@@ -651,6 +667,7 @@ export class AdminService {
     blockers: unknown;
     themes: unknown;
     reportSections?: unknown;
+    slackReportText?: string | null;
     team: {
       name: string;
       workspace?: {
@@ -715,7 +732,7 @@ export class AdminService {
       participantsResponded,
       completionRate,
       runStatus: run.status,
-      reportPosted: !!run.reportGeneratedAt,
+      reportPosted: !!run.reportGeneratedAt && !!digest.slackReportText,
       slackThreadUrl,
     };
   }

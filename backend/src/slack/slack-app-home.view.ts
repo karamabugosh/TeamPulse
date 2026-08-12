@@ -1,4 +1,4 @@
-import type { KnownBlock } from '@slack/bolt';
+import type { KnownBlock } from '@slack/types';
 import type { AppHomeSummary } from '../collection/collection.service';
 
 function formatStatus(summary: AppHomeSummary): string {

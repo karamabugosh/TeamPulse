@@ -1,6 +1,13 @@
-import { KnownBlock } from '@slack/bolt';
+import type { KnownBlock } from '@slack/types';
 import { QuestionType } from '@prisma/client';
 import { QuestionPayloadDto } from './dto/question-payload.dto';
+import {
+  formatColoredYesNoAnswer,
+  getSemanticSentiment,
+  getSlackButtonLabel,
+  getSlackButtonStyle,
+  inferYesNoPolarity,
+} from '../common/question-semantics';
 
 export const CHECKIN_ANSWER_ACTION = 'checkin_answer';
 export const CHECKIN_ANSWER_SELECT_ACTION = 'checkin_answer_select';
@@ -252,7 +259,21 @@ function buildQuestionInteractiveBlocks(
   );
 
   switch (question.type) {
-    case QuestionType.YES_NO:
+    case QuestionType.YES_NO: {
+      const polarity = inferYesNoPolarity(question.text);
+      const yesSentiment =
+        polarity === 'yes_negative'
+          ? 'negative'
+          : polarity === 'yes_positive'
+            ? 'positive'
+            : 'neutral';
+      const noSentiment =
+        polarity === 'yes_negative'
+          ? 'positive'
+          : polarity === 'yes_positive'
+            ? 'negative'
+            : 'neutral';
+
       return [
         {
           type: 'actions',
@@ -260,31 +281,58 @@ function buildQuestionInteractiveBlocks(
           elements: [
             {
               type: 'button',
-              text: { type: 'plain_text', text: '✅ Yes', emoji: true },
+              text: {
+                type: 'plain_text',
+                text: getSlackButtonLabel('yes', yesSentiment),
+                emoji: true,
+              },
               action_id: buildCheckinAnswerActionId(
                 submissionId,
                 questionId,
                 'yes',
               ),
               value: 'Yes',
-              style: 'primary',
+              ...(getSlackButtonStyle(yesSentiment)
+                ? { style: getSlackButtonStyle(yesSentiment) }
+                : {}),
             },
             {
               type: 'button',
-              text: { type: 'plain_text', text: '❌ No', emoji: true },
+              text: {
+                type: 'plain_text',
+                text: getSlackButtonLabel('no', noSentiment),
+                emoji: true,
+              },
               action_id: buildCheckinAnswerActionId(
                 submissionId,
                 questionId,
                 'no',
               ),
               value: 'No',
-              style: 'danger',
+              ...(getSlackButtonStyle(noSentiment)
+                ? { style: getSlackButtonStyle(noSentiment) }
+                : {}),
             },
           ],
         },
       ];
+    }
 
-    case QuestionType.YES_NO_MAYBE:
+    case QuestionType.YES_NO_MAYBE: {
+      const polarity = inferYesNoPolarity(question.text);
+      const yesSentiment =
+        polarity === 'yes_negative'
+          ? 'negative'
+          : polarity === 'yes_positive'
+            ? 'positive'
+            : 'neutral';
+      const noSentiment =
+        polarity === 'yes_negative'
+          ? 'positive'
+          : polarity === 'yes_positive'
+            ? 'negative'
+            : 'neutral';
+
       return [
         {
           type: 'actions',
@@ -292,18 +340,28 @@ function buildQuestionInteractiveBlocks(
           elements: [
             {
               type: 'button',
-              text: { type: 'plain_text', text: '✅ Yes', emoji: true },
+              text: {
+                type: 'plain_text',
+                text: getSlackButtonLabel('yes', yesSentiment),
+                emoji: true,
+              },
               action_id: buildCheckinAnswerActionId(
                 submissionId,
                 questionId,
                 'yes',
               ),
               value: 'Yes',
-              style: 'primary',
+              ...(getSlackButtonStyle(yesSentiment)
+                ? { style: getSlackButtonStyle(yesSentiment) }
+                : {}),
             },
             {
               type: 'button',
-              text: { type: 'plain_text', text: '🤔 Maybe', emoji: true },
+              text: {
+                type: 'plain_text',
+                text: getSlackButtonLabel('maybe', 'neutral'),
+                emoji: true,
+              },
               action_id: buildCheckinAnswerActionId(
                 submissionId,
                 questionId,
@@ -313,18 +371,25 @@ function buildQuestionInteractiveBlocks(
             },
             {
               type: 'button',
-              text: { type: 'plain_text', text: '❌ No', emoji: true },
+              text: {
+                type: 'plain_text',
+                text: getSlackButtonLabel('no', noSentiment),
+                emoji: true,
+              },
               action_id: buildCheckinAnswerActionId(
                 submissionId,
                 questionId,
                 'no',
               ),
               value: 'No',
-              style: 'danger',
+              ...(getSlackButtonStyle(noSentiment)
+                ? { style: getSlackButtonStyle(noSentiment) }
+                : {}),
             },
           ],
         },
       ];
+    }
 
     case QuestionType.SCALE_1_5:
       return [
@@ -524,9 +589,140 @@ export function formatRunDate(date: Date, timezone: string): string {
   }
 }
 
+export function formatRunDateShort(date: Date, timezone: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      timeZone: timezone,
+    }).format(date);
+  } catch {
+    return date.toISOString().slice(0, 10);
+  }
+}
+
+export type ParticipantSummaryQaPair = {
+  question: string;
+  answer: string;
+  type: QuestionType;
+  structuredValue?: unknown;
+};
+
+function normalizeQuestionLabel(question: string): string {
+  return question.replace(/\?+$/, '').trim();
+}
+
+function quoteAnswerLines(answer: string): string {
+  const lines = answer.split('\n').map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    return '>_No answer_';
+  }
+  return lines.map((line) => `>${line}`).join('\n');
+}
+
+/** Formats an answer for the public thread summary based on question type. */
+export function formatSummaryAnswer(params: {
+  question?: string;
+  type: QuestionType;
+  text: string;
+  structuredValue?: unknown;
+}): string {
+  const { type, text, structuredValue, question } = params;
+
+  switch (type) {
+    case QuestionType.YES_NO:
+    case QuestionType.YES_NO_MAYBE:
+      return formatColoredYesNoAnswer({
+        question: question ?? '',
+        type,
+        text,
+        structuredValue,
+      });
+
+    case QuestionType.SCALE_1_5: {
+      const value = (structuredValue as { value?: number } | null)?.value;
+      const rating =
+        typeof value === 'number' && value >= 1 && value <= 5
+          ? value
+          : Number.parseInt(text, 10);
+
+      if (Number.isFinite(rating) && rating >= 1 && rating <= 5) {
+        const filled = '⭐'.repeat(rating);
+        const empty = '☆'.repeat(5 - rating);
+        return `${filled}${empty} (${rating}/5)`;
+      }
+      return text.trim();
+    }
+
+    case QuestionType.MULTIPLE_CHOICE:
+    case QuestionType.FREE_TEXT:
+    default:
+      return text.trim() || '_No answer_';
+  }
+}
+
+function formatQaPairForSummary(pair: ParticipantSummaryQaPair): string {
+  const question = normalizeQuestionLabel(pair.question);
+  const answer = formatSummaryAnswer({
+    question: pair.question,
+    type: pair.type,
+    text: pair.answer,
+    structuredValue: pair.structuredValue,
+  });
+
+  return `*${question}*\n${quoteAnswerLines(answer)}`;
+}
+
+function buildParticipantSummaryContentBlocks(
+  qaPairs: ParticipantSummaryQaPair[],
+): KnownBlock[] {
+  if (qaPairs.length === 0) {
+    return [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '_No answers recorded._',
+        },
+      },
+    ];
+  }
+
+  const blocks: KnownBlock[] = [];
+  let current = '';
+
+  for (const pair of qaPairs) {
+    const section = formatQaPairForSummary(pair);
+    const candidate = current ? `${current}\n\n${section}` : section;
+
+    if (candidate.length > 2900) {
+      if (current) {
+        blocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: current },
+        });
+      }
+      current = section;
+      continue;
+    }
+
+    current = candidate;
+  }
+
+  if (current) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: current },
+    });
+  }
+
+  return blocks;
+}
+
 /** Public channel parent message — the only "Good morning" in the whole flow. */
 export function buildParentMessageBlocks(params: {
   checkInName: string;
+  runDateLabel: string;
   completedCount: number;
   totalCount: number;
 }): KnownBlock[] {
@@ -543,99 +739,54 @@ export function buildParentMessageBlocks(params: {
 
 export function buildParentMessageText(params: {
   checkInName: string;
+  runDateLabel: string;
   completedCount: number;
   totalCount: number;
 }): string {
   return [
-    '🌞 *Good morning everyone!*',
-    '',
-    `Today's *"${params.checkInName}"* has started.`,
-    '',
-    'Please check your Direct Messages to answer today\'s questions.',
-    '',
-    'All participant updates and the final AI report will be posted in this thread.',
+    `🌞 Good morning team! *${params.checkInName}* for ${params.runDateLabel} has started.`,
     '',
     `*Reported:* ${params.completedCount}/${params.totalCount}`,
   ].join('\n');
 }
 
-function categorizeQuestionLabel(question: string): string {
-  const normalized = question.toLowerCase();
-
-  if (normalized.includes('yesterday')) return 'Yesterday';
-  if (normalized.includes('today')) return 'Today';
-  if (normalized.includes('block')) return 'Blockers';
-  if (normalized.includes('plan')) return 'Plans';
-
-  return question.replace(/\?+$/, '').trim();
-}
-
-function formatAnswerAsBullets(answer: string): string {
-  const trimmed = answer.trim();
-  if (!trimmed) return '- _No answer_';
-
-  const lines = trimmed
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length === 1) {
-    return lines[0].startsWith('-') || lines[0].startsWith('•')
-      ? lines[0]
-      : `- ${lines[0]}`;
-  }
-
-  return lines
-    .map((line) =>
-      line.startsWith('-') || line.startsWith('•') ? line : `- ${line}`,
-    )
-    .join('\n');
-}
-
-/** Participant update posted inside the public thread. */
+/** Participant update posted inside the public thread (Geekbot-style). */
 export function buildParticipantSummaryBlocks(params: {
   displayName: string;
-  qaPairs: Array<{ question: string; answer: string }>;
+  checkInName: string;
+  qaPairs: ParticipantSummaryQaPair[];
 }): KnownBlock[] {
-  const sections = params.qaPairs
-    .map((pair) => {
-      const label = categorizeQuestionLabel(pair.question);
-      const bullets = formatAnswerAsBullets(pair.answer);
-      return `*${label}*\n${bullets}`;
-    })
-    .join('\n\n');
-
   return [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*${params.displayName}* submitted today's update`,
+        text: `*${params.displayName}* posted an update for *${params.checkInName}*`,
       },
     },
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: sections || '_No answers recorded._',
-      },
-    },
+    { type: 'divider' },
+    ...buildParticipantSummaryContentBlocks(params.qaPairs),
+    { type: 'divider' },
   ];
 }
 
 export function buildParticipantSummaryText(params: {
   displayName: string;
-  qaPairs: Array<{ question: string; answer: string }>;
+  checkInName: string;
+  qaPairs: ParticipantSummaryQaPair[];
 }): string {
-  const sections = params.qaPairs
-    .map((pair) => {
-      const label = categorizeQuestionLabel(pair.question);
-      const bullets = formatAnswerAsBullets(pair.answer);
-      return `${label}\n${bullets}`;
-    })
-    .join('\n\n');
+  const divider = '━━━━━━━━━━━━━━━━━━━━';
+  const body =
+    params.qaPairs.length > 0
+      ? params.qaPairs.map(formatQaPairForSummary).join('\n\n')
+      : '_No answers recorded._';
 
-  return `${params.displayName} submitted today's update\n\n${sections}`;
+  return [
+    `${params.displayName} posted an update for ${params.checkInName}`,
+    divider,
+    body,
+    divider,
+  ].join('\n');
 }
 
 /** Parent message for a CheckIn DM thread — one per Standup run. */
@@ -866,6 +1017,7 @@ export function buildAdditionalUpdateModal(runId: string): Record<string, unknow
 
 export function buildAdditionalUpdatePostedBlocks(params: {
   displayName: string;
+  checkInName: string;
   text: string;
 }): KnownBlock[] {
   return [
@@ -873,16 +1025,18 @@ export function buildAdditionalUpdatePostedBlocks(params: {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*${params.displayName}* added an additional update`,
+        text: `*${params.displayName}* posted an additional update for *${params.checkInName}*`,
       },
     },
+    { type: 'divider' },
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: params.text,
+        text: quoteAnswerLines(params.text.trim()),
       },
     },
+    { type: 'divider' },
   ];
 }
 

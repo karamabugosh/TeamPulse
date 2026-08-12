@@ -35,6 +35,7 @@ export interface CollectionGateway {
   ): Promise<{
     submissionId: string;
     checkInName: string | null;
+    runId: string;
   } | null>;
 
   /**

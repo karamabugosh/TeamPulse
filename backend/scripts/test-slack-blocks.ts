@@ -5,6 +5,9 @@
 import { QuestionType } from '@prisma/client';
 import {
   buildDmQuestionMessage,
+  buildParticipantSummaryBlocks,
+  buildParticipantSummaryText,
+  formatSummaryAnswer,
   parseCheckinAnswerActionId,
   parseCheckinAnswerSelectActionId,
   validateSlackBlocks,
@@ -121,6 +124,91 @@ function testDuplicateActionIdRegression(): void {
   console.log('PASS');
 }
 
+function testParticipantSummaryFormat(): void {
+  const qaPairs = [
+    {
+      question: 'What did you work on yesterday?',
+      answer: 'Finished the API integration and fixed auth bugs.',
+      type: QuestionType.FREE_TEXT,
+    },
+    {
+      question: 'Are you currently blocked?',
+      answer: 'No',
+      type: QuestionType.YES_NO,
+      structuredValue: { value: false },
+    },
+    {
+      question: 'Do you need help from another team member?',
+      answer: 'Maybe',
+      type: QuestionType.YES_NO_MAYBE,
+      structuredValue: { value: 'maybe' },
+    },
+    {
+      question: 'What is your current task status?',
+      answer: 'on track',
+      type: QuestionType.MULTIPLE_CHOICE,
+    },
+    {
+      question: "Was yesterday's work reviewed?",
+      answer: 'Yes',
+      type: QuestionType.YES_NO,
+      structuredValue: { value: true },
+    },
+    {
+      question: 'How confident are you that you will finish today?',
+      answer: '4',
+      type: QuestionType.SCALE_1_5,
+      structuredValue: { value: 4 },
+    },
+  ];
+
+  assert(
+    formatSummaryAnswer({
+      question: 'Are you currently blocked?',
+      type: QuestionType.YES_NO,
+      text: 'No',
+      structuredValue: { value: false },
+    }) === '🟢 No',
+    'blocked question No should be green',
+  );
+  assert(
+    formatSummaryAnswer({
+      question: "Was yesterday's work reviewed?",
+      type: QuestionType.YES_NO,
+      text: 'Yes',
+      structuredValue: { value: true },
+    }) === '🟢 Yes',
+    'reviewed question Yes should be green',
+  );
+
+  const blocks = buildParticipantSummaryBlocks({
+    displayName: 'Karam',
+    checkInName: 'Daily Standup',
+    qaPairs,
+  });
+  const validation = validateSlackBlocks(blocks);
+  assert(validation.valid, `Summary blocks invalid: ${validation.errors.join('; ')}`);
+  assert(blocks[0].type === 'section', 'Header section expected');
+  assert(blocks[1].type === 'divider', 'Top divider expected');
+  assert(blocks[blocks.length - 1].type === 'divider', 'Bottom divider expected');
+
+  const text = buildParticipantSummaryText({
+    displayName: 'Karam',
+    checkInName: 'Daily Standup',
+    qaPairs,
+  });
+  assert(
+    text.includes('Karam posted an update for Daily Standup'),
+    'Summary text header missing',
+  );
+  assert(!text.includes('Yesterday'), 'Old Today/Yesterday labels must be removed');
+  assert(!text.includes('Today\n'), 'Old Today/Yesterday labels must be removed');
+
+  console.log('\n=== Participant summary (Geekbot style) ===');
+  console.log(text);
+  console.log('PASS');
+}
+
 function main(): void {
   testQuestionType(QuestionType.FREE_TEXT);
   testQuestionType(QuestionType.YES_NO);
@@ -132,6 +220,7 @@ function main(): void {
     Array.from({ length: 8 }, (_, i) => `Long option number ${i + 1}`),
   );
   testDuplicateActionIdRegression();
+  testParticipantSummaryFormat();
 
   console.log('\nAll Slack Block Kit tests passed.');
 }

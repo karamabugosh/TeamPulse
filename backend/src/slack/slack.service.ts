@@ -1,25 +1,42 @@
-import {
-  Injectable,
-  Logger,
-  OnModuleDestroy,
-  OnModuleInit,
-} from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { App } from '@slack/bolt';
+import { App, LogLevel, SocketModeReceiver } from '@slack/bolt';
+import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
 import { PrismaService } from '../prisma/prisma.service';
 import { OutgoingMessageDto } from './dto/outgoing-message.dto';
+import {
+  attachSocketLifecycleLogging,
+  formatSocketError,
+  maskToken,
+  registerSocketDisconnectGuard,
+  validateSlackSocketConfig,
+} from './slack-socket.lifecycle';
+
+function formatDisconnectReason(error: unknown): string {
+  return formatSocketError(error);
+}
+
+const MAX_SOCKET_RECONNECT_ATTEMPTS = 12;
+const BASE_SOCKET_RECONNECT_DELAY_MS = 3000;
 
 @Injectable()
-export class SlackService
-  implements OnModuleInit, OnModuleDestroy
-{
-  private readonly logger = new Logger(
-    SlackService.name,
-  );
+export class SlackService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(SlackService.name);
 
   private app?: App;
   private webClient?: WebClient;
+  private socketClient?: SocketModeClient;
+
+  private socketStartInProgress = false;
+  private socketConnected = false;
+  private shuttingDown = false;
+  private reconnectAttempt = 0;
+  private reconnectTimer?: NodeJS.Timeout;
+  private listenersRegistered = false;
+
+  private static socketInstanceCounter = 0;
+  private readonly socketInstanceId = ++SlackService.socketInstanceCounter;
 
   constructor(
     private readonly configService: ConfigService,
@@ -27,112 +44,267 @@ export class SlackService
   ) {}
 
   async onModuleInit(): Promise<void> {
+    registerSocketDisconnectGuard(
+      (reason) => this.handleUncaughtSocketDisconnect(reason),
+      this.logger,
+    );
     await this.initializeSlack();
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.shuttingDown = true;
     this.logger.log('Slack service shutting down.');
 
-    if (this.app) {
-      try {
-        await this.app.stop();
-      } catch (error: unknown) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : String(error);
-
-        this.logger.warn(
-          `Slack app shutdown warning: ${message}`,
-        );
-      }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
     }
+
+    await this.stopSocketMode('module_destroy');
   }
 
   private async initializeSlack(): Promise<void> {
-    const token =
-      this.configService.get<string>(
-        'SLACK_BOT_TOKEN',
-      );
+    const token = this.configService.get<string>('SLACK_BOT_TOKEN');
+    const signingSecret = this.configService.get<string>('SLACK_SIGNING_SECRET');
+    const appToken = this.configService.get<string>('SLACK_APP_TOKEN');
+    const socketModeEnabled =
+      this.configService.get<string>('SLACK_SOCKET_MODE_ENABLED') === 'true';
 
-    const signingSecret =
-      this.configService.get<string>(
-        'SLACK_SIGNING_SECRET',
-      );
+    const validation = validateSlackSocketConfig({
+      botToken: token,
+      signingSecret,
+      appToken,
+      socketModeEnabled,
+    });
 
-    const appToken =
-      this.configService.get<string>(
-        'SLACK_APP_TOKEN',
-      );
+    for (const warning of validation.warnings) {
+      this.logger.warn(`[Slack Socket] ${warning}`);
+    }
 
     if (!token) {
       this.logger.warn(
         'SLACK_BOT_TOKEN is missing. Slack messaging is disabled.',
       );
-
       return;
     }
 
-    /*
-     * WebClient handles outbound messages even when
-     * Socket Mode is disabled.
-     */
     this.webClient = new WebClient(token);
-
-    const socketModeEnabled =
-      this.configService.get<string>(
-        'SLACK_SOCKET_MODE_ENABLED',
-      ) === 'true';
 
     if (!socketModeEnabled) {
       this.logger.warn(
         'Slack Socket Mode is disabled. Outbound Slack messaging remains available.',
       );
-
       return;
     }
 
-    if (!signingSecret || !appToken) {
-      this.logger.warn(
-        'Slack signing secret or app token is missing. Socket Mode will not start.',
+    if (!validation.ok) {
+      for (const error of validation.errors) {
+        this.logger.error(`[Slack Socket] ${error}`);
+      }
+      this.logger.error(
+        'Slack Socket Mode will not start until configuration is fixed.',
       );
-
       return;
     }
+
+    this.logger.log(
+      `[Slack Socket] Config OK — bot=${maskToken(token)} app=${maskToken(appToken)} instance=#${this.socketInstanceId}`,
+    );
+
+    await this.startSocketMode();
+  }
+
+  private async startSocketMode(): Promise<void> {
+    if (this.shuttingDown) {
+      return;
+    }
+
+    if (this.socketStartInProgress) {
+      this.logger.warn(
+        '[Slack Socket] Start already in progress — skipping duplicate start.',
+      );
+      return;
+    }
+
+    if (this.socketConnected && this.app) {
+      this.logger.log(
+        '[Slack Socket] Already connected — skipping duplicate start.',
+      );
+      return;
+    }
+
+    this.socketStartInProgress = true;
+
+    const token = this.configService.get<string>('SLACK_BOT_TOKEN')!;
+    const signingSecret = this.configService.get<string>('SLACK_SIGNING_SECRET')!;
+    const appToken = this.configService.get<string>('SLACK_APP_TOKEN')!;
 
     try {
+      await this.stopSocketMode('restart_before_connect');
+
+      const receiver = new SocketModeReceiver({
+        appToken,
+        logLevel: LogLevel.INFO,
+      });
+
+      this.socketClient = receiver.client;
+      attachSocketLifecycleLogging(this.socketClient, this.logger);
+      this.attachReconnectListeners(this.socketClient);
+
       this.app = new App({
         token,
         signingSecret,
-        appToken,
-        socketMode: true,
+        receiver,
       });
+
+      this.registerBoltListenersOnce();
+
+      this.logger.log(
+        `[Slack Socket] Starting Bolt app (instance #${this.socketInstanceId}, attempt ${this.reconnectAttempt + 1})…`,
+      );
 
       await this.app.start();
 
+      this.socketConnected = true;
+      this.reconnectAttempt = 0;
+
       this.logger.log(
-        'Slack Bolt app is running in Socket Mode.',
+        `[Slack Socket] Bolt app is running in Socket Mode (instance #${this.socketInstanceId}).`,
       );
     } catch (error: unknown) {
       const message =
-        error instanceof Error
-          ? error.message
-          : String(error);
-
-      /*
-       * Do not crash the backend when Socket Mode fails.
-       * Outbound Web API messaging can still work.
-       */
+        error instanceof Error ? error.message : String(error);
       this.logger.error(
-        `Could not start Slack Socket Mode: ${message}`,
+        `[Slack Socket] Could not start Socket Mode: ${message}`,
       );
-
       this.app = undefined;
+      this.socketClient = undefined;
+      this.socketConnected = false;
+      this.scheduleSocketReconnect(`start_failed: ${message}`);
+    } finally {
+      this.socketStartInProgress = false;
+    }
+  }
+
+  private registerBoltListenersOnce(): void {
+    if (this.listenersRegistered || !this.app) {
+      return;
+    }
+
+    this.app.error(async (error) => {
+      this.logger.error(
+        `[Slack Socket] Bolt error: ${error.message}`,
+        error.stack,
+      );
+    });
+
+    this.listenersRegistered = true;
+  }
+
+  private attachReconnectListeners(client: SocketModeClient): void {
+    client.on('connected', () => {
+      this.socketConnected = true;
+      this.reconnectAttempt = 0;
+    });
+
+    client.on('disconnected', (error?: unknown) => {
+      this.socketConnected = false;
+      const reason = error
+        ? formatDisconnectReason(error)
+        : 'disconnected';
+      if (this.shuttingDown) {
+        this.logger.log(
+          `[Slack Socket] Ignoring disconnect during shutdown (${reason}).`,
+        );
+        return;
+      }
+      this.logger.warn(
+        `[Slack Socket] Connection lost (${reason}). Socket Mode client will reconnect automatically.`,
+      );
+    });
+
+    client.on('reconnecting', () => {
+      if (this.shuttingDown) {
+        return;
+      }
+      this.reconnectAttempt += 1;
+      this.logger.warn(
+        `[Slack Socket] Reconnect attempt #${this.reconnectAttempt} (built-in socket-mode retry)`,
+      );
+    });
+  }
+
+  /** Safety net when legacy socket-mode throws instead of emitting disconnect events. */
+  private handleUncaughtSocketDisconnect(reason: string): void {
+    if (this.shuttingDown) {
+      return;
+    }
+    this.socketConnected = false;
+    this.logger.error(
+      `[Slack Socket] Unhandled disconnect (${reason}). Process kept alive — socket-mode will retry automatically. If Slack events stop arriving, restart the backend and ensure only one instance uses this app token.`,
+    );
+  }
+
+  private scheduleSocketReconnect(reason: string): void {
+    if (this.shuttingDown) {
+      return;
+    }
+
+    if (this.reconnectTimer) {
+      return;
+    }
+
+    if (this.reconnectAttempt >= MAX_SOCKET_RECONNECT_ATTEMPTS) {
+      this.logger.error(
+        `[Slack Socket] Reconnect limit reached (${MAX_SOCKET_RECONNECT_ATTEMPTS}). Last reason: ${reason}`,
+      );
+      return;
+    }
+
+    const delay =
+      BASE_SOCKET_RECONNECT_DELAY_MS * Math.min(this.reconnectAttempt + 1, 6);
+
+    this.reconnectAttempt += 1;
+    this.logger.warn(
+      `[Slack Socket] Reconnect attempt ${this.reconnectAttempt}/${MAX_SOCKET_RECONNECT_ATTEMPTS} in ${delay}ms (reason: ${reason})`,
+    );
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.startSocketMode();
+    }, delay);
+  }
+
+  private async stopSocketMode(reason: string): Promise<void> {
+    if (!this.app) {
+      this.socketClient = undefined;
+      this.socketConnected = false;
+      return;
+    }
+
+    this.logger.log(`[Slack Socket] Stopping Socket Mode (${reason})…`);
+
+    try {
+      await this.app.stop();
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `[Slack Socket] Stop warning (${reason}): ${message}`,
+      );
+    } finally {
+      this.app = undefined;
+      this.socketClient = undefined;
+      this.socketConnected = false;
     }
   }
 
   public getSlackApp(): App | undefined {
     return this.app;
+  }
+
+  public isSocketConnected(): boolean {
+    return this.socketConnected;
   }
 
   public async ensureUserRegistered(
@@ -333,9 +505,6 @@ export class SlackService
     }
   }
 
-  /**
-   * Retrieves all active human members in the Slack workspace.
-   */
   public async getWorkspaceMembers(): Promise<
     {
       id: string;
@@ -416,9 +585,6 @@ export class SlackService
     }
   }
 
-  /**
-   * Opens a direct-message channel with a Slack user.
-   */
   public async openDirectMessage(
     slackUserId: string,
   ): Promise<string | null> {
@@ -463,14 +629,6 @@ export class SlackService
     }
   }
 
-  /**
-   * Sends a message to a Slack channel or user.
-   * Supports optional Slack Block Kit blocks.
-   * Text remains required as fallback/accessibility text.
-   *
-   * Returns true when Slack confirms delivery.
-   * Returns false if validation or all retry attempts fail.
-   */
   public async sendMessage(
     payload: OutgoingMessageDto,
   ): Promise<boolean> {
@@ -544,9 +702,6 @@ export class SlackService
     return false;
   }
 
-  /**
-   * Posts a message and returns the Slack message timestamp (thread anchor).
-   */
   public async postMessage(
     payload: OutgoingMessageDto,
   ): Promise<{
@@ -625,10 +780,6 @@ export class SlackService
     }
   }
 
-  /**
-   * Resolves a channel reference to a Slack channel ID.
-   * Accepts raw IDs (C…/G…), #channel-name, or plain channel names.
-   */
   public async resolveChannelId(
     channelRef: string,
   ): Promise<string | null> {
@@ -685,9 +836,6 @@ export class SlackService
     }
   }
 
-  /**
-   * Ensures the bot is a member of the channel before posting.
-   */
   public async joinChannel(channelId: string): Promise<boolean> {
     if (!this.webClient) {
       return false;

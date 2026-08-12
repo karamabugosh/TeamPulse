@@ -5,11 +5,13 @@ import { SlackService } from './slack.service';
 import { CreateRunThreadResult } from './check-in-thread.types';
 import {
   buildAdditionalUpdatePostedBlocks,
+  buildAdditionalUpdateButtonBlocks,
   buildAiReportHeader,
   buildParentMessageBlocks,
   buildParentMessageText,
   buildParticipantSummaryBlocks,
   buildParticipantSummaryText,
+  formatRunDateShort,
 } from './slack-checkin.views';
 
 @Injectable()
@@ -119,14 +121,21 @@ export class CheckInThreadService {
         where: { checkInId: run.checkInId!, isActive: true },
       }));
 
+    const runDateLabel = formatRunDateShort(
+      run.scheduledFor,
+      run.checkIn.timezone || 'UTC',
+    );
+
     const blocks = buildParentMessageBlocks({
       checkInName: run.checkIn.name,
+      runDateLabel,
       completedCount: 0,
       totalCount,
     });
 
     const text = buildParentMessageText({
       checkInName: run.checkIn.name,
+      runDateLabel,
       completedCount: 0,
       totalCount,
     });
@@ -190,14 +199,21 @@ export class CheckInThreadService {
     const completedCount = run.submissions.filter((s) => s.status === 'completed').length;
     const totalCount = run.submissions.length;
 
+    const runDateLabel = formatRunDateShort(
+      run.scheduledFor,
+      run.checkIn.timezone || 'UTC',
+    );
+
     const blocks = buildParentMessageBlocks({
       checkInName: run.checkIn.name,
+      runDateLabel,
       completedCount,
       totalCount,
     });
 
     const text = buildParentMessageText({
       checkInName: run.checkIn.name,
+      runDateLabel,
       completedCount,
       totalCount,
     });
@@ -238,18 +254,26 @@ export class CheckInThreadService {
       return;
     }
 
-    const qaPairs = submission.answers.map((a) => ({
-      question: a.question.question,
-      answer: a.text,
-    }));
+    const qaPairs = [...submission.answers]
+      .sort((a, b) => a.question.order - b.question.order)
+      .map((a) => ({
+        question: a.question.question,
+        answer: a.text,
+        type: a.question.type,
+        structuredValue: a.structuredValue,
+      }));
+
+    const checkInName = submission.run.checkIn.name;
 
     const blocks = buildParticipantSummaryBlocks({
       displayName: submission.user.slackDisplayName,
+      checkInName,
       qaPairs,
     });
 
     const text = buildParticipantSummaryText({
       displayName: submission.user.slackDisplayName,
+      checkInName,
       qaPairs,
     });
 
@@ -309,13 +333,14 @@ export class CheckInThreadService {
 
     const blocks = buildAdditionalUpdatePostedBlocks({
       displayName: user.slackDisplayName,
+      checkInName: run.checkIn.name,
       text: params.text.trim(),
     });
 
     const posted = await this.slackService.postMessage({
       channelId: run.slackChannelId,
       threadTs: run.slackThreadTs,
-      text: `${user.slackDisplayName} added an additional update:\n${params.text.trim()}`,
+      text: `${user.slackDisplayName} posted an additional update for ${run.checkIn.name}:\n${params.text.trim()}`,
       blocks,
     });
 
@@ -341,10 +366,52 @@ export class CheckInThreadService {
     return true;
   }
 
+  /** Posts the "Add Additional Update" button in the participant's DM thread. */
+  async postAdditionalUpdateButtonForUser(params: {
+    runId: string;
+    slackUserId: string;
+  }): Promise<boolean> {
+    const submission = await this.prisma.standupSubmission.findFirst({
+      where: {
+        runId: params.runId,
+        user: { slackUserId: params.slackUserId },
+      },
+      select: {
+        slackDmChannelId: true,
+        slackDmThreadTs: true,
+      },
+    });
+
+    if (!submission?.slackDmChannelId || !submission.slackDmThreadTs) {
+      this.logger.warn(
+        `[Thread] Cannot post additional-update button — no DM anchor for user ${params.slackUserId} on run ${params.runId}`,
+      );
+      return false;
+    }
+
+    const blocks = buildAdditionalUpdateButtonBlocks(params.runId);
+
+    const posted = await this.slackService.postMessage({
+      channelId: submission.slackDmChannelId,
+      threadTs: submission.slackDmThreadTs,
+      text: 'Finished your check-in? You can add another update anytime.',
+      blocks: blocks as any,
+    });
+
+    if (posted.ok) {
+      this.logger.log(
+        `[Thread] Posted additional-update button for user ${params.slackUserId} on run ${params.runId}`,
+      );
+    }
+
+    return posted.ok;
+  }
+
   async postAiReportToThread(
     runId: string,
     digestText: string,
     blocks?: unknown[],
+    options?: { skipHeader?: boolean },
   ): Promise<boolean> {
     const run = await this.prisma.standupRun.findUnique({
       where: { id: runId },
@@ -359,14 +426,18 @@ export class CheckInThreadService {
       return false;
     }
 
-    const completedCount = run.submissions.filter((s) => s.status === 'completed').length;
-    const totalCount = run.submissions.length;
-    const header = buildAiReportHeader({
-      checkInName: run.checkIn.name,
-      completedCount,
-      totalCount,
-    });
-    const body = `${header}\n\n${digestText}`;
+    let body = digestText;
+
+    if (!options?.skipHeader) {
+      const completedCount = run.submissions.filter((s) => s.status === 'completed').length;
+      const totalCount = run.submissions.length;
+      const header = buildAiReportHeader({
+        checkInName: run.checkIn.name,
+        completedCount,
+        totalCount,
+      });
+      body = `${header}\n\n${digestText}`;
+    }
 
     const posted = await this.slackService.postMessage({
       channelId: run.slackChannelId,

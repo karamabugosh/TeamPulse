@@ -189,7 +189,7 @@ model StandupRun {
   team        Team                @relation(fields: [teamId], references: [id])
   checkIn     CheckIn?            @relation(fields: [checkInId], references: [id])
   submissions StandupSubmission[]
-  aiDigests   AiDigest[]
+  aiDigest    AiDigest?
   threadUpdates StandupThreadUpdate[]
 
   @@unique([checkInId, scheduledFor])
@@ -268,22 +268,24 @@ model ConversationState {
 }
 
 model AiDigest {
-  id          String   @id @default(uuid())
-  teamId      String
-  runId       String
-  generatedAt DateTime @default(now())
-  source      String
-  summary     String
-  blockers    Json
-  themes      Json
-  reportSections Json?
-  createdAt   DateTime @default(now())
+  id               String   @id @default(uuid())
+  teamId           String
+  runId            String   @unique
+  generatedAt      DateTime @default(now())
+  source           String
+  summary          String
+  blockers         Json
+  themes           Json
+  reportSections   Json?
+  slackReportText  String?
+  nonResponderNames Json?
+  slackReportBlocks Json?
+  createdAt        DateTime @default(now())
 
   team Team       @relation(fields: [teamId], references: [id])
   run  StandupRun @relation(fields: [runId], references: [id])
 
   @@index([teamId])
-  @@index([runId])
 }
 
 model StandupThreadUpdate {
