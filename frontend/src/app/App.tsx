@@ -25,6 +25,7 @@ function App() {
             <Route path="/teams" element={<TeamsPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/reports/checkins/:checkInId/history" element={<CheckInReportsHistoryPage />} />
+            <Route path="/reports/run/:runId" element={<ReportDetailPage />} />
             <Route path="/reports/:id" element={<ReportDetailPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Route>

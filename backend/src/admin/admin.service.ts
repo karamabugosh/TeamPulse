@@ -1,5 +1,15 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { QuestionType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  describeSemanticAnswer,
+  getSemanticSentiment,
+} from '../common/question-semantics';
+import {
+  buildParticipantProfiles,
+  buildReportStatistics,
+  groupBlockersByPerson,
+} from '../check-in/report-participant.utils';
 import { buildSlackThreadUrl } from '../slack/slack-checkin.views';
 
 @Injectable()
@@ -64,7 +74,8 @@ export class AdminService {
     const recentActivity = await this.buildRecentActivity();
     const upcomingCheckIns = await this.buildUpcomingCheckIns();
 
-    const aiInsights = await this.buildAiInsights(completionRate, pendingResponses);
+    const aiInsights = await this.buildAiInsights();
+    const aiAnalytics = await this.buildAiAnalytics(activeCheckInsCount);
 
     return {
       stats: {
@@ -81,6 +92,7 @@ export class AdminService {
       recentActivity,
       upcomingCheckIns,
       aiInsights,
+      aiAnalytics,
     };
   }
 
@@ -266,19 +278,679 @@ export class AdminService {
     });
   }
 
-  private async buildAiInsights(completionRate: number, pendingResponses: number) {
+  private isPlaceholderAnalyticsText(text: string | null | undefined): boolean {
+    if (!text || typeof text !== 'string') {
+      return true;
+    }
+
+    const normalized = text.trim().toLowerCase();
+    if (!normalized) {
+      return true;
+    }
+
+    return (
+      normalized.startsWith('ai analysis is unavailable') ||
+      normalized.includes('no substantive standup answers were available') ||
+      normalized === 'no blockers reported.' ||
+      normalized === 'no blockers reported' ||
+      normalized === 'no additional insights.' ||
+      normalized === 'no action items suggested.' ||
+      /^collected \d+ substantive answer\(s\) from \d+ participant\(s\)\.$/.test(
+        normalized,
+      )
+    );
+  }
+
+  private async buildAiInsights() {
     const latestDigest = await this.prisma.aiDigest.findFirst({
+      where: {
+        source: 'ai',
+        generationError: null,
+        slackReportText: { not: null },
+        run: { checkInId: { not: null } },
+      },
       orderBy: { generatedAt: 'desc' },
+      select: {
+        summary: true,
+        reportSections: true,
+      },
     });
+    if (!latestDigest) {
+      return null;
+    }
+
+    const sections = this.parseReportSections(latestDigest.reportSections);
+    const summary = this.isPlaceholderAnalyticsText(latestDigest.summary)
+      ? null
+      : latestDigest.summary.trim();
+
+    const insight = sections.aiInsights.find(
+      (item) => !this.isPlaceholderAnalyticsText(item),
+    );
+
+    const recommendation = sections.actionItems.find(
+      (item) => !this.isPlaceholderAnalyticsText(item),
+    );
+
+    if (!summary && !insight && !recommendation) {
+      return null;
+    }
 
     return {
-      headline: `Team completion rate is ${completionRate}%`,
-      summary: latestDigest?.summary || `${pendingResponses} responses are still pending across active check-ins.`,
-      recommendation:
-        completionRate < 85
-          ? 'Consider enabling recurring reminders for teams with low participation.'
-          : 'Team participation is healthy. Review recurring blockers in Analytics.',
+      headline: summary || insight || 'Latest standup report',
+      summary:
+        sections.overallProgress && !this.isPlaceholderAnalyticsText(sections.overallProgress)
+          ? sections.overallProgress
+          : summary || insight || '',
+      recommendation: recommendation || null,
     };
+  }
+
+  private async buildAiAnalytics(activeCheckInsCount: number) {
+    const recentRuns = await this.prisma.standupRun.findMany({
+      where: {
+        status: 'completed',
+        checkInId: { not: null },
+        aiDigest: {
+          is: {
+            slackReportText: { not: null },
+            source: 'ai',
+            generationError: null,
+          },
+        },
+      },
+      orderBy: { startedAt: 'desc' },
+      take: 7,
+      include: {
+        checkIn: { select: { name: true } },
+        submissions: {
+          select: {
+            id: true,
+            status: true,
+            user: {
+              select: {
+                slackUserId: true,
+                slackDisplayName: true,
+              },
+            },
+          },
+        },
+        aiDigest: {
+          select: {
+            summary: true,
+            source: true,
+            blockers: true,
+            themes: true,
+            reportSections: true,
+          },
+        },
+      },
+    });
+
+    if (recentRuns.length === 0) {
+      return {
+        available: false,
+        message: 'Waiting for completed standup reports',
+      };
+    }
+
+    const latestRun = recentRuns[0];
+    const latestTotal = latestRun.submissions.length;
+    const latestCompleted = latestRun.submissions.filter(
+      (submission) => submission.status === 'completed',
+    ).length;
+
+    if (latestTotal === 0) {
+      return {
+        available: false,
+        message: 'Not enough responses to generate analytics',
+      };
+    }
+
+    if (latestCompleted === 0) {
+      return {
+        available: false,
+        message: 'Not enough responses to generate analytics',
+      };
+    }
+
+    const latestDigest = latestRun.aiDigest;
+    if (!latestDigest) {
+      return {
+        available: false,
+        message: 'Waiting for completed standup reports',
+      };
+    }
+
+    const latestSections = this.parseReportSections(latestDigest.reportSections);
+
+    const completionRate =
+      latestTotal > 0
+        ? Math.round((latestCompleted / latestTotal) * 100)
+        : null;
+
+    const productivityTrend = [...recentRuns]
+      .reverse()
+      .map((run) => {
+        const total = run.submissions.length;
+        const completed = run.submissions.filter(
+          (submission) => submission.status === 'completed',
+        ).length;
+
+        if (total === 0) {
+          return null;
+        }
+
+        return {
+          runId: run.id,
+          label: run.startedAt.toLocaleDateString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          checkInName: run.checkIn?.name || 'Check-in',
+          rate: Math.round((completed / total) * 100),
+          completed,
+          total,
+        };
+      })
+      .filter(
+        (
+          point,
+        ): point is {
+          runId: string;
+          label: string;
+          checkInName: string;
+          rate: number;
+          completed: number;
+          total: number;
+        } => point !== null,
+      );
+
+    const aiBlockers = this.extractAiDigestBlockers(
+      latestDigest.blockers,
+      latestRun,
+      latestSections.participantUpdates as Array<{
+        slackUserId: string;
+        displayName: string;
+      }>,
+      await this.resolveSlackDisplayNames(
+        this.extractBlockerSlackUserIds(latestDigest.blockers),
+      ),
+    );
+
+    const answerBlockers = await this.extractAnswerBlockers(latestRun.id);
+    const activeBlockers = this.mergeBlockers(aiBlockers, answerBlockers);
+    const blockedMemberCount = new Set(
+      activeBlockers.map((blocker) => blocker.memberKey),
+    ).size;
+
+    const runIds = recentRuns.map((run) => run.id);
+    const scaleAnswers = await this.prisma.answer.findMany({
+      where: {
+        submission: {
+          runId: { in: runIds },
+          status: 'completed',
+        },
+        question: { type: QuestionType.SCALE_1_5 },
+      },
+      select: { text: true, structuredValue: true },
+    });
+
+    const scaleValues = scaleAnswers
+      .map((answer) => {
+        const structured = answer.structuredValue as { value?: number } | null;
+        if (
+          typeof structured?.value === 'number' &&
+          structured.value >= 1 &&
+          structured.value <= 5
+        ) {
+          return structured.value;
+        }
+
+        const parsed = Number.parseInt(answer.text, 10);
+        if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 5) {
+          return parsed;
+        }
+
+        return null;
+      })
+      .filter((value): value is number => value !== null);
+
+    const averageConfidence =
+      scaleValues.length > 0
+        ? Math.round(
+            (scaleValues.reduce((sum, value) => sum + value, 0) /
+              scaleValues.length) *
+              10,
+          ) / 10
+        : null;
+
+    const highBlockers = activeBlockers.filter(
+      (blocker) => blocker.severity === 'high',
+    ).length;
+
+    const teamHealth = this.computeTeamHealth({
+      completionRate,
+      blockerCount: blockedMemberCount,
+      highBlockers,
+      summary: this.isPlaceholderAnalyticsText(latestDigest.summary)
+        ? ''
+        : latestDigest.summary,
+    });
+
+    const insights = this.buildAnalyticsInsights({
+      digest: latestDigest,
+      sections: latestSections,
+      productivityTrend,
+      recentRuns,
+      blockedMemberCount,
+      completionRate,
+    });
+
+    const recommendations = latestSections.actionItems
+      .map((item) => item.trim())
+      .filter((item) => item && !this.isPlaceholderAnalyticsText(item))
+      .slice(0, 8);
+
+    const previousRate =
+      productivityTrend.length >= 2
+        ? productivityTrend[productivityTrend.length - 2].rate
+        : null;
+    const completionTrendDelta =
+      completionRate !== null && previousRate !== null
+        ? completionRate - previousRate
+        : null;
+
+    return {
+      available: true,
+      teamHealth: teamHealth?.status ?? null,
+      teamHealthLabel: teamHealth?.label ?? 'Not available',
+      completionRate,
+      completionRateLabel:
+        completionRate !== null ? `${completionRate}%` : 'Not enough responses',
+      completionTrendDelta,
+      activeBlockersCount: blockedMemberCount,
+      activeBlockers: activeBlockers.map(({ memberKey: _memberKey, ...blocker }) => blocker),
+      averageConfidence,
+      averageConfidenceLabel:
+        averageConfidence !== null
+          ? `${averageConfidence} / 5`
+          : 'Not available',
+      averageConfidenceScale: 5,
+      activeCheckIns: activeCheckInsCount,
+      productivityTrend:
+        productivityTrend.length >= 2 ? productivityTrend : [],
+      productivityTrendLabel:
+        productivityTrend.length >= 2
+          ? `Completion rate across ${productivityTrend.length} standup runs`
+          : 'Not enough historical standup runs',
+      insights,
+      insightsLabel:
+        insights.length > 0
+          ? 'From latest stored AI report'
+          : 'No data available yet',
+      recommendations,
+      recommendationsLabel:
+        recommendations.length > 0
+          ? 'From latest stored AI report'
+          : 'No recommendations available',
+      basedOnRuns: recentRuns.length,
+      latestRunId: latestRun.id,
+      latestCheckInName: latestRun.checkIn?.name || null,
+    };
+  }
+
+  private extractBlockerSlackUserIds(blockersJson: unknown): string[] {
+    if (!Array.isArray(blockersJson)) {
+      return [];
+    }
+
+    return [
+      ...new Set(
+        (blockersJson as Array<{ userId?: string }>)
+          .map((blocker) => blocker.userId)
+          .filter((userId): userId is string => typeof userId === 'string'),
+      ),
+    ];
+  }
+
+  private async resolveSlackDisplayNames(slackUserIds: string[]) {
+    if (slackUserIds.length === 0) {
+      return new Map<string, string>();
+    }
+
+    const users = await this.prisma.user.findMany({
+      where: { slackUserId: { in: slackUserIds } },
+      select: { slackUserId: true, slackDisplayName: true },
+    });
+
+    return new Map(users.map((user) => [user.slackUserId, user.slackDisplayName]));
+  }
+
+  private extractAiDigestBlockers(
+    blockersJson: unknown,
+    run: {
+      id: string;
+      checkIn: { name: string } | null;
+    },
+    participantUpdates: Array<{ slackUserId: string; displayName: string }>,
+    userMap: Map<string, string>,
+  ) {
+    if (!Array.isArray(blockersJson)) {
+      return [] as Array<{
+        memberKey: string;
+        memberName: string;
+        standup: string;
+        description: string;
+        severity: string;
+        runId: string;
+        source: string;
+      }>;
+    }
+
+    const nameFromParticipants = new Map(
+      participantUpdates.map((participant) => [
+        participant.slackUserId,
+        participant.displayName,
+      ]),
+    );
+
+    return (blockersJson as Array<{
+      userId?: string;
+      description?: string;
+      severity?: string;
+    }>)
+      .filter(
+        (blocker) =>
+          blocker.description &&
+          !this.isPlaceholderAnalyticsText(blocker.description),
+      )
+      .map((blocker) => {
+        const memberKey = blocker.userId || blocker.description || 'unknown';
+        return {
+          memberKey,
+          memberName:
+            (blocker.userId && nameFromParticipants.get(blocker.userId)) ||
+            (blocker.userId && userMap.get(blocker.userId)) ||
+            blocker.userId ||
+            'Unknown member',
+          standup: run.checkIn?.name || 'Check-in',
+          description: blocker.description!.trim(),
+          severity: blocker.severity || 'medium',
+          runId: run.id,
+          source: 'ai_report',
+        };
+      });
+  }
+
+  private async extractAnswerBlockers(runId: string) {
+    const answers = await this.prisma.answer.findMany({
+      where: {
+        submission: { runId, status: 'completed' },
+        question: {
+          type: { in: [QuestionType.YES_NO, QuestionType.YES_NO_MAYBE] },
+        },
+      },
+      include: {
+        question: { select: { question: true, type: true } },
+        user: { select: { slackUserId: true, slackDisplayName: true } },
+        submission: {
+          select: {
+            run: {
+              select: {
+                id: true,
+                checkIn: { select: { name: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const blockers: Array<{
+      memberKey: string;
+      memberName: string;
+      standup: string;
+      description: string;
+      severity: string;
+      runId: string;
+      source: string;
+    }> = [];
+
+    for (const answer of answers) {
+      const sentiment = getSemanticSentiment({
+        question: answer.question.question,
+        type: answer.question.type,
+        text: answer.text,
+        structuredValue: answer.structuredValue,
+      });
+
+      if (sentiment !== 'negative') {
+        continue;
+      }
+
+      const interpretation =
+        describeSemanticAnswer({
+          question: answer.question.question,
+          type: answer.question.type,
+          text: answer.text,
+          structuredValue: answer.structuredValue,
+        }) || answer.text.trim();
+
+      if (!interpretation || this.isPlaceholderAnalyticsText(interpretation)) {
+        continue;
+      }
+
+      blockers.push({
+        memberKey: answer.user.slackUserId,
+        memberName: answer.user.slackDisplayName,
+        standup:
+          answer.submission?.run.checkIn?.name || 'Check-in',
+        description: interpretation,
+        severity: 'medium',
+        runId,
+        source: 'standup_answer',
+      });
+    }
+
+    return blockers;
+  }
+
+  private mergeBlockers(
+    aiBlockers: Array<{
+      memberKey: string;
+      memberName: string;
+      standup: string;
+      description: string;
+      severity: string;
+      runId: string;
+      source: string;
+    }>,
+    answerBlockers: Array<{
+      memberKey: string;
+      memberName: string;
+      standup: string;
+      description: string;
+      severity: string;
+      runId: string;
+      source: string;
+    }>,
+  ) {
+    const merged = new Map<string, (typeof aiBlockers)[number]>();
+
+    for (const blocker of [...aiBlockers, ...answerBlockers]) {
+      const key = `${blocker.memberKey}:${blocker.description.toLowerCase()}`;
+      if (!merged.has(key)) {
+        merged.set(key, blocker);
+      }
+    }
+
+    return [...merged.values()];
+  }
+
+  private computeTeamHealth(params: {
+    completionRate: number | null;
+    blockerCount: number;
+    highBlockers: number;
+    summary: string;
+  }): { status: 'healthy' | 'needs_attention' | 'critical'; label: string } | null {
+    if (params.completionRate === null) {
+      return null;
+    }
+
+    const summarySignalsRisk =
+      !this.isPlaceholderAnalyticsText(params.summary) &&
+      /\b(blocked|blocker|at risk|behind|concern|issue|impediment|waiting)\b/i.test(
+        params.summary,
+      );
+
+    if (params.completionRate < 60 || params.highBlockers >= 2) {
+      return { status: 'critical', label: 'Critical' };
+    }
+
+    if (
+      params.completionRate < 85 ||
+      params.blockerCount > 0 ||
+      summarySignalsRisk
+    ) {
+      return { status: 'needs_attention', label: 'Needs Attention' };
+    }
+
+    return { status: 'healthy', label: 'Healthy' };
+  }
+
+  private buildAnalyticsInsights(params: {
+    digest: {
+      summary: string;
+      source: string;
+      themes: unknown;
+      blockers: unknown;
+    };
+    sections: {
+      aiInsights: string[];
+      risks: string[];
+      keyAccomplishments: string[];
+      overallProgress: string;
+    };
+    productivityTrend: Array<{
+      rate: number;
+      label: string;
+      checkInName: string;
+    }>;
+    recentRuns: Array<{ aiDigest: { blockers: unknown } | null }>;
+    blockedMemberCount: number;
+    completionRate: number | null;
+  }): string[] {
+    const insights: string[] = [];
+    const seen = new Set<string>();
+
+    const addInsight = (text: string | null | undefined) => {
+      const trimmed = text?.trim();
+      if (!trimmed || this.isPlaceholderAnalyticsText(trimmed) || seen.has(trimmed)) {
+        return;
+      }
+      seen.add(trimmed);
+      insights.push(trimmed);
+    };
+
+    for (const insight of params.sections.aiInsights) {
+      addInsight(insight);
+    }
+
+    for (const risk of params.sections.risks) {
+      addInsight(risk);
+    }
+
+    for (const accomplishment of params.sections.keyAccomplishments) {
+      addInsight(`Key accomplishment: ${accomplishment}`);
+    }
+
+    if (Array.isArray(params.digest.themes)) {
+      for (const theme of params.digest.themes as Array<{
+        theme?: string;
+        summary?: string;
+        mentionCount?: number;
+      }>) {
+        if (theme.theme && theme.summary) {
+          addInsight(
+            `${theme.theme} (${theme.mentionCount ?? 1} mention(s)): ${theme.summary}`,
+          );
+        } else if (theme.theme) {
+          addInsight(
+            `Frequently mentioned: ${theme.theme} (${theme.mentionCount ?? 1} mention(s))`,
+          );
+        }
+      }
+    }
+
+    if (
+      params.digest.source === 'ai' &&
+      !this.isPlaceholderAnalyticsText(params.digest.summary)
+    ) {
+      addInsight(params.digest.summary);
+    } else if (
+      params.sections.overallProgress &&
+      !this.isPlaceholderAnalyticsText(params.sections.overallProgress)
+    ) {
+      addInsight(params.sections.overallProgress);
+    }
+
+    if (params.blockedMemberCount > 0) {
+      addInsight(
+        `${params.blockedMemberCount} team member(s) reported blockers in the latest standup.`,
+      );
+    }
+
+    const recurringBlockers = this.aggregateRecurringBlockers(params.recentRuns);
+    for (const [description, count] of recurringBlockers.slice(0, 3)) {
+      if (count >= 2) {
+        addInsight(`Repeated blocker across recent standups: ${description} (${count} runs)`);
+      }
+    }
+
+    if (params.productivityTrend.length >= 2 && params.completionRate !== null) {
+      const first = params.productivityTrend[0].rate;
+      const last = params.productivityTrend[params.productivityTrend.length - 1].rate;
+      if (last > first) {
+        addInsight(
+          `Team productivity trend: completion rate increased from ${first}% to ${last}% across recent standup runs.`,
+        );
+      } else if (last < first) {
+        addInsight(
+          `Team productivity trend: completion rate decreased from ${first}% to ${last}% across recent standup runs.`,
+        );
+      }
+    }
+
+    return insights.slice(0, 8);
+  }
+
+  private aggregateRecurringBlockers(
+    runs: Array<{ aiDigest: { blockers: unknown } | null }>,
+  ) {
+    const counts = new Map<string, number>();
+
+    for (const run of runs) {
+      const blockers = Array.isArray(run.aiDigest?.blockers)
+        ? (run.aiDigest!.blockers as Array<{ description?: string }>)
+        : [];
+
+      for (const blocker of blockers) {
+        if (
+          !blocker.description ||
+          this.isPlaceholderAnalyticsText(blocker.description)
+        ) {
+          continue;
+        }
+
+        const key = blocker.description.trim();
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    }
+
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
   }
 
   async getAnalyticsData() {
@@ -396,7 +1068,9 @@ export class AdminService {
 
   async getReportsList(search?: string, timeframe?: string) {
     const where: any = {
+      source: 'ai',
       slackReportText: { not: null },
+      generationError: null,
       run: {
         checkInId: { not: null },
       },
@@ -518,7 +1192,9 @@ export class AdminService {
 
     const digests = await this.prisma.aiDigest.findMany({
       where: {
+        source: 'ai',
         slackReportText: { not: null },
+        generationError: null,
         run: { checkInId },
       },
       orderBy: { run: { startedAt: 'desc' } },
@@ -575,8 +1251,14 @@ export class AdminService {
       where: { runId },
     });
 
-    if (!digest?.slackReportText) {
+    if (!digest?.slackReportText && !digest?.generationError) {
       throw new NotFoundException('Report is not generated yet.');
+    }
+
+    if (digest.source !== 'ai') {
+      throw new NotFoundException(
+        'Report is not available — only AI-generated reports are shown.',
+      );
     }
 
     return this.getReportDetail(digest.id);
@@ -633,14 +1315,34 @@ export class AdminService {
       throw new NotFoundException(`Report ${id} was not found.`);
     }
 
-    if (!digest.slackReportText) {
+    if (!digest.slackReportText && !digest.generationError) {
       throw new NotFoundException('Report is not generated yet.');
     }
 
+    if (digest.source !== 'ai' && !digest.generationError) {
+      throw new NotFoundException(
+        'Report is not available — only AI-generated reports are shown.',
+      );
+    }
+
     const listItem = this.mapReportListItem(digest);
-    const reportSections = this.parseReportSections(digest.reportSections);
+    const reportSections = this.enrichReportSectionsForDetail(
+      digest,
+      digest.run.submissions,
+    );
     const nonResponderNames = Array.isArray(digest.nonResponderNames)
       ? (digest.nonResponderNames as string[])
+      : [];
+
+    const blockers = Array.isArray(digest.blockers)
+      ? (digest.blockers as Array<Record<string, unknown>>).map((blocker) => ({
+          ...blocker,
+          displayName:
+            digest.run.submissions.find(
+              (submission) =>
+                submission.user.slackUserId === blocker.userId,
+            )?.user.slackDisplayName ?? String(blocker.userId ?? 'Unknown'),
+        }))
       : [];
 
     return {
@@ -650,10 +1352,120 @@ export class AdminService {
       reportStatus: digest.run.reportStatus,
       nonResponderNames,
       slackReportText: digest.slackReportText ?? null,
+      generationError: digest.generationError ?? null,
       reportSections,
       participants: reportSections.participantUpdates,
-      blockers: digest.blockers,
+      participantProfiles: reportSections.participantProfiles ?? [],
+      statistics: reportSections.statistics ?? null,
+      blockers,
       themes: digest.themes,
+    };
+  }
+
+  private enrichReportSectionsForDetail(
+    digest: {
+      blockers: unknown;
+      reportSections?: unknown;
+    },
+    submissions: Array<{
+      status: string;
+      answers: Array<{
+        text: string;
+        structuredValue?: unknown;
+        question: { question: string; type: QuestionType; order?: number };
+      }>;
+      user: { slackUserId: string; slackDisplayName: string };
+    }>,
+  ) {
+    const parsed = this.parseReportSections(digest.reportSections);
+    const completedCount = submissions.filter(
+      (submission) => submission.status === 'completed',
+    ).length;
+    const totalCount = submissions.length;
+
+    const participantProfiles =
+      parsed.participantProfiles && parsed.participantProfiles.length > 0
+        ? parsed.participantProfiles
+        : buildParticipantProfiles(submissions);
+
+    const blockers = Array.isArray(digest.blockers)
+      ? (digest.blockers as Array<{ userId: string; description: string; dependency?: string | null }>)
+      : [];
+
+    const userIdToName = new Map(
+      submissions.map((submission) => [
+        submission.user.slackUserId,
+        submission.user.slackDisplayName,
+      ]),
+    );
+
+    const statistics =
+      parsed.statistics ??
+      buildReportStatistics(
+        submissions,
+        blockers as any,
+        participantProfiles,
+        completedCount,
+        totalCount,
+      );
+
+    const namedBlockers =
+      parsed.namedBlockers && parsed.namedBlockers.length > 0
+        ? parsed.namedBlockers
+        : groupBlockersByPerson(blockers as any, userIdToName);
+
+    const helpRequests =
+      parsed.helpRequests && parsed.helpRequests.length > 0
+        ? parsed.helpRequests
+        : participantProfiles
+            .filter((profile) => profile.helpRequested)
+            .map((profile) => ({
+              displayName: profile.displayName,
+              items: [profile.helpDetail || profile.todaysPlan].filter(
+                (item) => item && item !== '—',
+              ),
+            }))
+            .filter((section) => section.items.length > 0);
+
+    const namedRisks =
+      parsed.namedRisks && parsed.namedRisks.length > 0
+        ? parsed.namedRisks
+        : participantProfiles
+            .filter(
+              (profile) =>
+                profile.blocked ||
+                (profile.confidence != null && profile.confidence <= 2),
+            )
+            .map((profile) => ({
+              displayName: profile.displayName,
+              items: [
+                profile.blockedDetail || profile.todaysPlan || profile.taskStatus,
+              ].filter((item) => item && item !== '—'),
+            }))
+            .filter((section) => section.items.length > 0);
+
+    const namedAccomplishments =
+      parsed.namedAccomplishments && parsed.namedAccomplishments.length > 0
+        ? parsed.namedAccomplishments
+        : participantProfiles
+            .filter((profile) => profile.yesterdaysWork !== '—')
+            .map((profile) => ({
+              displayName: profile.displayName,
+              items: [profile.yesterdaysWork],
+            }));
+
+    return {
+      ...parsed,
+      participantProfiles,
+      statistics,
+      namedBlockers,
+      helpRequests,
+      namedRisks,
+      namedAccomplishments,
+      teamProgress:
+        parsed.teamProgress && parsed.teamProgress.length > 0
+          ? parsed.teamProgress
+          : statistics.teamProgressBullets,
     };
   }
 
@@ -723,7 +1535,12 @@ export class AdminService {
       scheduledFor: run.scheduledFor.toISOString(),
       generatedAt: digest.generatedAt.toISOString(),
       source: digest.source,
-      aiProvider: digest.source === 'ai' ? 'OpenAI' : 'Rules Fallback',
+      aiProvider:
+        digest.source === 'ai'
+          ? 'OpenAI'
+          : digest.source === 'failed'
+            ? 'Failed'
+            : 'Unavailable',
       summary: digest.summary,
       blockers: digest.blockers,
       themes: digest.themes,
@@ -774,6 +1591,13 @@ export class AdminService {
           answers: Array<{ question: string; answer: string }>;
         }>,
         overallProgress: '',
+        namedBlockers: [] as Array<{ displayName: string; items: string[] }>,
+        helpRequests: [] as Array<{ displayName: string; items: string[] }>,
+        namedRisks: [] as Array<{ displayName: string; items: string[] }>,
+        namedAccomplishments: [] as Array<{ displayName: string; items: string[] }>,
+        teamProgress: [] as string[],
+        participantProfiles: [] as Array<Record<string, unknown>>,
+        statistics: null as Record<string, unknown> | null,
       };
     }
 
@@ -781,6 +1605,19 @@ export class AdminService {
     const toStringArray = (input: unknown) =>
       Array.isArray(input)
         ? input.filter((item): item is string => typeof item === 'string')
+        : [];
+
+    const parseNamed = (input: unknown) =>
+      Array.isArray(input)
+        ? input
+            .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+            .map((item) => ({
+              displayName: String(item.displayName ?? '').trim(),
+              items: Array.isArray(item.items)
+                ? item.items.filter((entry): entry is string => typeof entry === 'string')
+                : [],
+            }))
+            .filter((section) => section.displayName && section.items.length > 0)
         : [];
 
     return {
@@ -795,6 +1632,18 @@ export class AdminService {
         typeof record.overallProgress === 'string'
           ? record.overallProgress
           : '',
+      namedBlockers: parseNamed(record.namedBlockers),
+      helpRequests: parseNamed(record.helpRequests),
+      namedRisks: parseNamed(record.namedRisks),
+      namedAccomplishments: parseNamed(record.namedAccomplishments),
+      teamProgress: toStringArray(record.teamProgress),
+      participantProfiles: Array.isArray(record.participantProfiles)
+        ? record.participantProfiles
+        : [],
+      statistics:
+        record.statistics && typeof record.statistics === 'object'
+          ? (record.statistics as Record<string, unknown>)
+          : null,
     };
   }
 

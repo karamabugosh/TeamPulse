@@ -84,6 +84,12 @@ Rules you must follow, without exception:
   productivity, or performance.
 - Only report information supported by the supplied standup data.
 - Do not invent blockers, dependencies, users, themes, impact, or intent.
+- ALWAYS use each participant's real displayName from the standup data.
+  Never write generic phrases such as "some members", "the team",
+  "participants", or "several developers" when a specific person can
+  be named from the data.
+- Every narrative section must identify people by name whenever the
+  underlying answer supports it.
 
 BLOCKER FIELDS:
 
@@ -268,9 +274,22 @@ Return JSON matching exactly this shape:
       "confidence": 0.0
     }
   ],
+  "namedBlockers": [
+    { "displayName": "string", "items": ["string"] }
+  ],
+  "helpRequests": [
+    { "displayName": "string", "items": ["string"] }
+  ],
   "risks": ["string"],
+  "namedRisks": [
+    { "displayName": "string", "items": ["string"] }
+  ],
+  "namedAccomplishments": [
+    { "displayName": "string", "items": ["string"] }
+  ],
   "aiInsights": ["string"],
   "actionItems": ["string"],
+  "teamProgress": ["string"],
   "participantUpdates": [
     {
       "slackUserId": "string",
@@ -289,13 +308,31 @@ Return JSON matching exactly this shape:
 }
 
 Section guidance:
-- summary: executive summary (1-2 sentences)
-- keyAccomplishments: concrete accomplishments reported by the team
-- risks: potential risks or concerns inferred from the data
-- aiInsights: useful observations for managers
-- actionItems: suggested follow-ups based on the standup data
-- participantUpdates: one entry per participant with their submitted answers preserved
-- overallProgress: team-level progress assessment based on all responses
+- summary: 1-2 sentences naming specific people and their progress when relevant
+- overallProgress: concrete team status using counts and names from the data
+- namedBlockers: group each person's blockers under their real displayName.
+  Example item: "Waiting for Backend API."
+- helpRequests: people who asked for help, grouped by displayName
+- namedRisks: delivery risks grouped by the affected person's displayName
+- namedAccomplishments: concrete wins grouped by displayName
+- keyAccomplishments / risks: optional legacy one-line bullets that still name people
+- aiInsights: cross-participant patterns using real names
+  (e.g. "Ahmed and Mohammad are both working on Authentication.")
+- actionItems: specific recommendations referencing real people and dependencies
+- teamProgress: bullet metrics derived from answers
+  (e.g. "3 members completed yesterday's tasks.", "Average confidence: 4.2 / 5.")
+- participantUpdates: preserve each participant's submitted answers faithfully
+- themes: recurring work areas (Authentication, Bug Fixing, Testing, etc.)
+
+Personalization rules:
+- Prefer namedBlockers, helpRequests, namedRisks, and namedAccomplishments
+  over generic team-level wording.
+- Each named section entry must use the participant's displayName exactly
+  as provided in the standup data.
+- Each items[] entry is one concise bullet for that person.
+- Never emit placeholder filler such as "No additional insights",
+  "Some members need help", or "Team is progressing well."
+- Omit empty arrays when nothing applies; do not fabricate content.
 
 Before returning the JSON, internally verify that:
 - every blocker is active rather than resolved;

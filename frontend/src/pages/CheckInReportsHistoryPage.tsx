@@ -9,6 +9,7 @@ import { apiFetch, ApiError } from '@/lib/api';
 
 type ReportListItem = {
   id: string;
+  runId: string;
   checkInName: string;
   teamName: string;
   generatedAt: string;
@@ -123,7 +124,7 @@ export const CheckInReportsHistoryPage: React.FC = () => {
                 </p>
               </div>
               <Button asChild variant="outline" size="sm" className="shrink-0">
-                <Link to={`/reports/${report.id}`}>
+                <Link to={`/reports/run/${report.runId}`}>
                   <Eye className="h-3.5 w-3.5" />
                   View
                 </Link>

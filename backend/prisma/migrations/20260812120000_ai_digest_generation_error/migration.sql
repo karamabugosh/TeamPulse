@@ -1,0 +1,1 @@
+ALTER TABLE "AiDigest" ADD COLUMN IF NOT EXISTS "generationError" TEXT;

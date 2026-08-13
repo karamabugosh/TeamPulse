@@ -28,11 +28,27 @@ export const AI_BASELINE: AiBaseline = {
 /**
  * Controls whether the AI layer is allowed to run.
  *
- * Runtime enablement is intentionally controlled only through
- * the environment flag. Evaluation quality is checked separately.
+ * Enabled when PULSE_AI_ENABLED=true and OPENAI_API_KEY is configured.
+ * ConfigModule.forRoot() loads .env into process.env before services start.
  */
 export function isAiFeatureEnabled(): boolean {
-  return process.env.PULSE_AI_ENABLED === 'true';
+  const explicitlyEnabled = process.env.PULSE_AI_ENABLED === 'true';
+  const apiKeyConfigured = Boolean(process.env.OPENAI_API_KEY?.trim());
+  return explicitlyEnabled && apiKeyConfigured;
+}
+
+export function getAiConfigStatus(): {
+  enabled: boolean;
+  apiKeyConfigured: boolean;
+  model: string;
+  pulseAiFlag: string | undefined;
+} {
+  return {
+    enabled: isAiFeatureEnabled(),
+    apiKeyConfigured: Boolean(process.env.OPENAI_API_KEY?.trim()),
+    model: process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini',
+    pulseAiFlag: process.env.PULSE_AI_ENABLED,
+  };
 }
 
 /**

@@ -25,6 +25,7 @@ import {
 } from 'recharts';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { KpiCard } from '@/components/dashboard/KpiCard';
+import { AiAnalyticsSection } from '@/components/dashboard/AiAnalyticsSection';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -84,6 +85,7 @@ export const OverviewPage: React.FC = () => {
   const recentActivity = data?.recentActivity || [];
   const upcomingCheckIns = data?.upcomingCheckIns || [];
   const aiInsights = data?.aiInsights;
+  const aiAnalytics = data?.aiAnalytics;
 
   const severityVariant = (severity: string) => {
     if (severity === 'high') return 'danger' as const;
@@ -163,6 +165,8 @@ export const OverviewPage: React.FC = () => {
         <KpiCard title="Today's Reports" value={stats.todayReports} icon={FileText} subtitle="Generated today" />
         <KpiCard title="Avg Response Time" value={`${stats.avgResponseTimeMinutes} min`} icon={Activity} iconClassName="bg-cyan-500/10 text-cyan-400 group-hover:bg-cyan-500/20" />
       </div>
+
+      <AiAnalyticsSection data={aiAnalytics} />
 
       {aiInsights && (
         <Card className="border-l-4 border-l-primary bg-gradient-to-r from-primary/5 to-transparent">

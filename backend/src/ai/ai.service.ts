@@ -1,6 +1,6 @@
 // backend/src/ai/ai.service.ts
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import {
   AiDigestResult,
   RawResponseForAnalysis,
@@ -8,7 +8,7 @@ import {
 } from './dto/ai-result.dto';
 import { AI_PROMPT } from './prompts/pulse-ai.prompts';
 import { runRulesFallback } from './rules-fallback';
-import { isAiFeatureEnabled } from './ai.config';
+import { isAiFeatureEnabled, getAiConfigStatus } from './ai.config';
 import {
   getOpenAiClient,
   getOpenAiModel,
@@ -16,9 +16,10 @@ import {
 import { parseAndValidateAiResponse } from './ai-response-validator';
 import { CostAccumulator } from './cost-tracker';
 import { PrismaService } from '../prisma/prisma.service';
+import { AiReportGenerationError } from './ai-report-generation.error';
 
 @Injectable()
-export class AiService {
+export class AiService implements OnModuleInit {
   private readonly logger = new Logger(AiService.name);
 
   private readonly costAccumulator =
@@ -30,39 +31,61 @@ export class AiService {
     private readonly prisma: PrismaService,
   ) {}
 
+  onModuleInit(): void {
+    const status = getAiConfigStatus();
+    this.logger.log(
+      `[AI] Config loaded — enabled=${status.enabled}, apiKeyConfigured=${status.apiKeyConfigured}, model=${status.model}, PULSE_AI_ENABLED=${status.pulseAiFlag ?? 'unset'}`,
+    );
+
+    if (!status.apiKeyConfigured) {
+      this.logger.error(
+        '[AI] OPENAI_API_KEY is not loaded from environment — reports will fail until it is set in .env',
+      );
+    } else if (!status.enabled) {
+      this.logger.warn(
+        '[AI] OPENAI_API_KEY is present but PULSE_AI_ENABLED is not true — set PULSE_AI_ENABLED=true to enable AI reports',
+      );
+    }
+  }
+
   async analyzeRun(
     teamId: string,
     runId: string,
     responses: RawResponseForAnalysis[],
     persist = false,
+    options?: { allowRulesFallback?: boolean },
   ): Promise<AiDigestResult> {
+    const allowRulesFallback = options?.allowRulesFallback ?? false;
     let result: AiDigestResult;
 
     if (!isAiFeatureEnabled()) {
-      this.logger.log(
-        `AI layer disabled — using rules fallback for run ${runId}`,
-      );
-
-      result = runRulesFallback(
-        teamId,
-        runId,
-        responses,
-      );
+      if (allowRulesFallback) {
+        this.logger.log(
+          `AI layer disabled — using rules fallback for run ${runId}`,
+        );
+        result = runRulesFallback(teamId, runId, responses);
+      } else {
+        throw new AiReportGenerationError(
+          'AI report generation is disabled. Set PULSE_AI_ENABLED=true and configure OPENAI_API_KEY.',
+        );
+      }
     } else if (responses.length === 0) {
-      this.logger.warn(
-        `No responses found for run ${runId}; using rules fallback`,
-      );
-
-      result = runRulesFallback(
-        teamId,
-        runId,
-        responses,
-      );
+      if (allowRulesFallback) {
+        this.logger.warn(
+          `No responses found for run ${runId}; using rules fallback`,
+        );
+        result = runRulesFallback(teamId, runId, responses);
+      } else {
+        throw new AiReportGenerationError(
+          'No submitted standup answers were found for this run.',
+        );
+      }
     } else {
       result = await this.analyzeWithFallback(
         teamId,
         runId,
         responses,
+        allowRulesFallback,
       );
     }
 
@@ -82,6 +105,7 @@ export class AiService {
     teamId: string,
     runId: string,
     responses: RawResponseForAnalysis[],
+    allowRulesFallback: boolean,
   ): Promise<AiDigestResult> {
     let lastError: unknown = null;
 
@@ -125,21 +149,29 @@ export class AiService {
 
     this.logger.error(
       `AI extraction failed for run ${runId} after ` +
-        `${this.maxAiAttempts} attempt(s). ` +
-        `Using rules fallback: ${finalMessage}`,
+        `${this.maxAiAttempts} attempt(s): ${finalMessage}`,
     );
 
-    return runRulesFallback(
-      teamId,
-      runId,
-      responses,
-    );
+    if (allowRulesFallback) {
+      return runRulesFallback(teamId, runId, responses);
+    }
+
+    throw new AiReportGenerationError(finalMessage);
   }
 
   private async saveDigest(
     result: AiDigestResult,
   ): Promise<void> {
     try {
+      const existing = await this.prisma.aiDigest.findUnique({
+        where: { runId: result.runId },
+        select: {
+          slackReportText: true,
+          slackReportBlocks: true,
+          nonResponderNames: true,
+        },
+      });
+
       await this.prisma.aiDigest.upsert({
         where: { runId: result.runId },
         create: {
@@ -159,6 +191,14 @@ export class AiService {
           blockers: result.blockers as any,
           themes: result.themes as any,
           reportSections: result.reportSections as any,
+          generationError: result.generationError ?? null,
+          ...(existing?.slackReportText && result.source === 'ai'
+            ? {
+                slackReportText: existing.slackReportText,
+                slackReportBlocks: existing.slackReportBlocks as any,
+                nonResponderNames: existing.nonResponderNames as any,
+              }
+            : {}),
         },
       });
 
@@ -221,6 +261,15 @@ export class AiService {
         runId,
         responses,
       );
+
+    const answerCount = responses.reduce(
+      (total, response) => total + response.answers.length,
+      0,
+    );
+
+    this.logger.log(
+      `[AI] Calling OpenAI model ${model} for run ${runId} — ${responses.length} participant(s), ${answerCount} answer(s)`,
+    );
 
     const completion =
       await client.chat.completions.create({

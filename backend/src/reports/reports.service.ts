@@ -14,6 +14,7 @@ import {
 } from '../ai/dto/ai-result.dto';
 
 import { Logger } from '@nestjs/common';
+import { isPlaceholderReportText } from '../check-in/report-content.utils';
 
 @Injectable()
 export class ReportsService {
@@ -88,6 +89,10 @@ export class ReportsService {
     formatDigestForSlack(
     digest: AiDigestResult,
   ): string {
+    if (digest.source === 'failed') {
+      return `*Report generation failed*\n${digest.generationError || digest.reportSections?.generationError || 'AI report generation failed.'}`;
+    }
+
     const sections = digest.reportSections ?? {
       keyAccomplishments: [],
       risks: [],
@@ -97,36 +102,110 @@ export class ReportsService {
       overallProgress: '',
     };
 
-    const listSection = (
-      title: string,
-      items: string[],
-      emptyText: string,
-    ) => [
-      `*${title}*`,
-      items.length > 0
-        ? items.map((item) => `• ${item}`).join('\n')
-        : emptyText,
-    ].join('\n');
+    const parts: string[] = [];
 
-    const parts = [
-      '*Summary*',
-      digest.summary,
-      '',
-      listSection(
-        'Blockers',
-        digest.blockers.length > 0
-          ? digest.blockers.map(
-              (blocker) =>
-                `<@${blocker.userId}> — ${blocker.description} (${blocker.severity})`,
-            )
-          : [],
-        'No blockers reported.',
-      ),
-      '',
-      listSection('Insights', sections.aiInsights, 'No additional insights.'),
-      '',
-      listSection('Action Items', sections.actionItems, 'No action items suggested.'),
-    ];
+    if (digest.summary?.trim()) {
+      parts.push('*Executive Summary*', digest.summary.trim());
+    }
+
+    if (sections.overallProgress?.trim()) {
+      parts.push('', '*Overall Team Status*', sections.overallProgress.trim());
+    }
+
+    if (sections.participationSummary?.trim()) {
+      parts.push('', '*Participation Summary*', sections.participationSummary.trim());
+    }
+
+    if (sections.namedBlockers && sections.namedBlockers.length > 0) {
+      parts.push(
+        '',
+        '*Blockers*',
+        ...sections.namedBlockers.map(
+          (person) =>
+            `*${person.displayName}*\n${person.items.map((item) => `• ${item}`).join('\n')}`,
+        ),
+      );
+    } else if (digest.blockers.length > 0) {
+      parts.push(
+        '',
+        '*Blockers*',
+        digest.blockers
+          .map(
+            (blocker) =>
+              `• <@${blocker.userId}> — ${blocker.description} (${blocker.severity})`,
+          )
+          .join('\n'),
+      );
+    }
+
+    if (sections.helpRequests && sections.helpRequests.length > 0) {
+      parts.push(
+        '',
+        '*Help Requests*',
+        ...sections.helpRequests.map(
+          (person) =>
+            `*${person.displayName}*\n${person.items.map((item) => `• ${item}`).join('\n')}`,
+        ),
+      );
+    }
+
+    if (sections.namedAccomplishments && sections.namedAccomplishments.length > 0) {
+      parts.push(
+        '',
+        '*Key Accomplishments*',
+        ...sections.namedAccomplishments.map(
+          (person) =>
+            `*${person.displayName}*\n${person.items.map((item) => `• ${item}`).join('\n')}`,
+        ),
+      );
+    } else if (sections.keyAccomplishments.length > 0) {
+      parts.push(
+        '',
+        '*Positive Highlights*',
+        sections.keyAccomplishments.map((item) => `• ${item}`).join('\n'),
+      );
+    }
+
+    if (sections.namedRisks && sections.namedRisks.length > 0) {
+      parts.push(
+        '',
+        '*Risks*',
+        ...sections.namedRisks.map(
+          (person) =>
+            `*${person.displayName}*\n${person.items.map((item) => `• ${item}`).join('\n')}`,
+        ),
+      );
+    } else if (sections.risks.length > 0) {
+      parts.push(
+        '',
+        '*Risks*',
+        sections.risks.map((item) => `• ${item}`).join('\n'),
+      );
+    }
+
+    if (sections.teamProgress && sections.teamProgress.length > 0) {
+      parts.push(
+        '',
+        '*Team Progress*',
+        sections.teamProgress.map((item) => `• ${item}`).join('\n'),
+      );
+    }
+
+    if (sections.aiInsights.length > 0) {
+      parts.push(
+        '',
+        '*AI Insights*',
+        sections.aiInsights.map((item) => `• ${item}`).join('\n'),
+      );
+    }
+
+    if (sections.actionItems.length > 0) {
+      parts.push(
+        '',
+        '*Recommendations*',
+        sections.actionItems.map((item) => `• ${item}`).join('\n'),
+      );
+    }
 
     if (sections.participantUpdates?.length) {
       parts.push(
@@ -135,14 +214,10 @@ export class ReportsService {
         ...sections.participantUpdates.map(
           (participant) =>
             `• *${participant.displayName}*\n${participant.answers
-              .map((a) => `  - ${a.question}: ${a.answer}`)
+              .map((a) => `  - ${a.question}: ${a.formattedAnswer || a.answer}`)
               .join('\n')}`,
         ),
       );
-    }
-
-    if (sections.overallProgress) {
-      parts.push('', '*Overall Progress*', sections.overallProgress);
     }
 
     return parts.join('\n');
@@ -152,6 +227,28 @@ export class ReportsService {
     digest: AiDigestResult,
     nonResponderNames: string[] = [],
   ): unknown[] {
+    if (digest.source === 'failed') {
+      return [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text:
+              `*Report generation failed*\n${digest.generationError || digest.reportSections?.generationError || 'AI report generation failed.'}`,
+          },
+        },
+      ];
+    }
+
+    const sections = digest.reportSections ?? {
+      keyAccomplishments: [],
+      risks: [],
+      aiInsights: [],
+      actionItems: [],
+      participantUpdates: [],
+      overallProgress: '',
+    };
+
     const blocks: unknown[] = [
       {
         type: 'header',
@@ -166,49 +263,54 @@ export class ReportsService {
         elements: [
           {
             type: 'mrkdwn',
-            text:
-              `Generated: ${this.formatDate(
-                digest.generatedAt,
-              )}  •  Source: ${digest.source}`,
+            text: `Generated: ${this.formatDate(digest.generatedAt)}`,
           },
         ],
       },
-      {
-        type: 'divider',
-      },
-      {
+      { type: 'divider' },
+    ];
+
+    if (digest.summary?.trim()) {
+      blocks.push({
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*Executive Summary*\n${digest.summary}`,
+          text: `*Executive Summary*\n${digest.summary.trim()}`,
         },
-      },
-      {
-        type: 'divider',
-      },
-    ];
+      });
+      blocks.push({ type: 'divider' });
+    }
 
-    this.appendListBlock(
+    if (sections.overallProgress?.trim()) {
+      this.appendListBlock(blocks, 'Overall Team Status', [sections.overallProgress.trim()]);
+    }
+
+    const participationSummary =
+      sections.participationSummary?.trim() ||
+      (nonResponderNames.length > 0
+        ? `Pending responses: ${nonResponderNames.join(', ')}`
+        : '');
+
+    if (participationSummary) {
+      this.appendListBlock(blocks, 'Participation Summary', [participationSummary]);
+    }
+
+    this.appendListBlockIfPresent(
       blocks,
-      '✅ Key Accomplishments',
-      digest.reportSections?.keyAccomplishments ?? [],
-      'No accomplishments reported.',
+      'Positive Highlights',
+      sections.keyAccomplishments,
     );
 
     if (digest.blockers.length > 0) {
       blocks.push({
         type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: '*🚧 Blockers*',
-        },
+        text: { type: 'mrkdwn', text: '*Blockers*' },
       });
 
       for (const blocker of digest.blockers) {
-        const dependency =
-          blocker.dependency
-            ? `\n*Dependency:* ${blocker.dependency}`
-            : '';
+        const dependency = blocker.dependency
+          ? `\n*Dependency:* ${blocker.dependency}`
+          : '';
 
         blocks.push({
           type: 'section',
@@ -221,70 +323,68 @@ export class ReportsService {
           },
         });
       }
-    } else {
-      blocks.push({
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: '*🚧 Blockers*\n✅ No blockers reported.',
-        },
-      });
+
+      blocks.push({ type: 'divider' });
     }
 
-    blocks.push({ type: 'divider' });
-
-    this.appendListBlock(
+    this.appendListBlockIfPresent(blocks, 'Risks', sections.risks);
+    this.appendListBlockIfPresent(blocks, 'AI Insights', sections.aiInsights);
+    this.appendListBlockIfPresent(
       blocks,
-      '⚠️ Risks',
-      digest.reportSections?.risks ?? [],
-      'No risks identified.',
-    );
-    this.appendListBlock(
-      blocks,
-      '💡 AI Insights',
-      digest.reportSections?.aiInsights ?? [],
-      'No additional insights.',
-    );
-    this.appendListBlock(
-      blocks,
-      '📝 Action Items',
-      digest.reportSections?.actionItems ?? [],
-      'No action items suggested.',
+      'Recommendations',
+      sections.actionItems,
     );
 
-    blocks.push({ type: 'divider' });
+    if (sections.participantUpdates?.length) {
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: '*Participant Updates*' },
+      });
 
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text:
-          nonResponderNames.length > 0
-            ? [
-                '*⏳ No Response*',
-                ...nonResponderNames.map((name) => `• ${name}`),
-              ].join('\n')
-            : '*⏳ No Response*\n✅ Everyone submitted.',
-      },
-    });
+      for (const participant of sections.participantUpdates) {
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*${participant.displayName}*\n${participant.answers
+              .map((a) => `• ${a.question}: ${a.formattedAnswer || a.answer}`)
+              .join('\n')}`,
+          },
+        });
+      }
+
+      blocks.push({ type: 'divider' });
+    }
 
     return blocks;
+  }
+
+  private appendListBlockIfPresent(
+    blocks: unknown[],
+    title: string,
+    items: string[],
+  ): void {
+    const cleaned = items
+      .map((item) => item.trim())
+      .filter((item) => item && !isPlaceholderReportText(item));
+
+    if (cleaned.length === 0) {
+      return;
+    }
+
+    this.appendListBlock(blocks, title, cleaned);
   }
 
   private appendListBlock(
     blocks: unknown[],
     title: string,
     items: string[],
-    emptyText: string,
   ): void {
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text:
-          items.length > 0
-            ? `*${title}*\n${items.map((item) => `• ${item}`).join('\n')}`
-            : `*${title}*\n${emptyText}`,
+        text: `*${title}*\n${items.map((item) => `• ${item}`).join('\n')}`,
       },
     });
     blocks.push({ type: 'divider' });

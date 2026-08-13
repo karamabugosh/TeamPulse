@@ -10,9 +10,11 @@ import { apiFetch } from '@/lib/api';
 
 type ReportListItem = {
   id: string;
+  runId: string;
   checkInId: string | null;
   checkInName: string;
   teamName: string;
+  runDate: string;
   generatedAt: string;
   aiProvider: string;
   source: string;
@@ -20,6 +22,7 @@ type ReportListItem = {
   totalParticipants: number;
   participantsResponded: number;
   completionRate: number;
+  reportPosted: boolean;
 };
 
 type ReportGroup = {
@@ -75,7 +78,7 @@ export const ReportsPage: React.FC = () => {
     <div className="mx-auto max-w-4xl space-y-8">
       <PageHeader
         title="Reports"
-        description="Latest AI standup report for each CheckIn."
+        description="Saved standup reports — one per completed Check-In run (same content as Slack)."
       />
 
       <div className="relative max-w-md">
@@ -99,7 +102,7 @@ export const ReportsPage: React.FC = () => {
             <Sparkles className="mx-auto mb-3 h-8 w-8 opacity-40" />
             <p className="font-medium text-foreground">No reports yet</p>
             <p className="mt-1 text-sm">
-              Reports appear here after a CheckIn run completes and the AI report is generated.
+              Reports appear here after a CheckIn run completes and the report is generated and saved.
             </p>
           </CardContent>
         </Card>
@@ -120,8 +123,8 @@ export const ReportsPage: React.FC = () => {
                         </h2>
                         <p className="text-sm text-muted-foreground">{group.teamName}</p>
                       </div>
-                      <Badge variant={report.source === 'ai' ? 'default' : 'secondary'}>
-                        {report.aiProvider}
+                      <Badge variant={report.reportPosted ? 'success' : 'secondary'}>
+                        {report.reportPosted ? 'Posted' : 'Saved'}
                       </Badge>
                     </div>
                   </div>
@@ -132,7 +135,8 @@ export const ReportsPage: React.FC = () => {
                         Latest Report
                       </p>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        Generated {formatGenerated(report.generatedAt)}
+                        Run {formatGenerated(report.runDate)} · Generated{' '}
+                        {formatGenerated(report.generatedAt)}
                       </p>
                     </div>
 
@@ -152,7 +156,7 @@ export const ReportsPage: React.FC = () => {
 
                     <div className="flex flex-wrap gap-2 pt-1">
                       <Button asChild size="sm">
-                        <Link to={`/reports/${report.id}`}>
+                        <Link to={`/reports/run/${report.runId}`}>
                           <Eye className="h-3.5 w-3.5" />
                           View Report
                         </Link>

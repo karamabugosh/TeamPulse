@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   Patch,
   Post,
@@ -10,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { CheckInService } from './check-in.service';
 import { CheckInRunService } from './check-in-run/check-in-run.service';
+import { CheckInReportService } from './check-in-report.service';
 import { CheckInThreadService } from '../slack/check-in-thread.service';
 import { SlackGateway } from '../slack/slack.gateway';
 import { CreateCheckInDto } from './dto/create-check-in.dto';
@@ -20,6 +22,7 @@ export class CheckInController {
   constructor(
     private readonly checkInService: CheckInService,
     private readonly checkInRunService: CheckInRunService,
+    private readonly checkInReportService: CheckInReportService,
     private readonly slackGateway: SlackGateway,
     private readonly checkInThreadService: CheckInThreadService,
   ) {}
@@ -137,6 +140,37 @@ export class CheckInController {
     const run = await this.checkInRunService.getRunForDelivery(runId);
     const delivery = await this.slackGateway.deliverCheckInRun(run);
     return { runId, thread, delivery };
+  }
+
+  @Post('runs/:runId/generate-report')
+  async generateRunReport(
+    @Param('runId') runId: string,
+    @Body() body: { forceRegenerate?: boolean },
+  ) {
+    return this.checkInReportService.executeForRun(runId, {
+      skipTriggerValidation: true,
+      allowRetry: true,
+      forceRegenerate: body?.forceRegenerate === true,
+    });
+  }
+
+  @Delete('runs/:runId')
+  deleteRun(@Param('runId') runId: string) {
+    return this.checkInService.deleteRun(runId);
+  }
+
+  @Get('runs/:runId/export/csv')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="checkin-run-export.csv"')
+  exportRunCsv(@Param('runId') runId: string) {
+    return this.checkInService.exportRunCsv(runId);
+  }
+
+  @Get('runs/:runId/export/pdf')
+  @Header('Content-Type', 'text/plain; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="checkin-run-report.txt"')
+  exportRunPdf(@Param('runId') runId: string) {
+    return this.checkInService.exportRunPdf(runId);
   }
 
   @Post(':id/duplicate')

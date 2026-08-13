@@ -1423,8 +1423,8 @@ export class CheckInService {
       totalParticipants,
     );
 
-    let slackThreadUrl: string | null = null;
-    if (run.slackChannelId && run.slackThreadTs) {
+    let slackThreadUrl: string | null = run.slackThreadUrl ?? null;
+    if (!slackThreadUrl && run.slackChannelId && run.slackThreadTs) {
       slackThreadUrl = await this.resolveSlackThreadUrl(
         run.slackChannelId,
         run.slackThreadTs,
@@ -1535,37 +1535,37 @@ export class CheckInService {
     > = {
       waiting_for_responses: {
         code: 'waiting',
-        label: 'Waiting for Responses',
+        label: 'Not Generated',
         tooltip: 'Collecting standup answers before the AI report can be generated.',
       },
       generating: {
         code: 'generating',
-        label: 'Generating AI Report',
+        label: 'Generating',
         tooltip: 'AI is analyzing responses and building the report.',
       },
       generated: {
         code: 'ready',
-        label: 'Report Ready',
+        label: 'Generated',
         tooltip: 'The AI report was generated and is ready to post to Slack.',
       },
       posting: {
         code: 'posting',
-        label: 'Posting to Slack Thread',
+        label: 'Generated',
         tooltip: 'Delivering the report into the CheckIn Slack thread.',
       },
       completed: {
         code: 'posted',
-        label: 'Posted to Slack Thread',
+        label: 'Generated',
         tooltip: 'AI report was generated and posted in the Slack thread.',
       },
       generation_failed: {
         code: 'generation_failed',
-        label: 'Generation Failed',
+        label: 'Failed',
         tooltip: 'AI report generation failed. The system will retry automatically.',
       },
       posting_failed: {
         code: 'posting_failed',
-        label: 'Posting Failed',
+        label: 'Failed',
         tooltip: 'Report was saved but Slack posting failed. The system will retry automatically.',
       },
     };
@@ -1676,5 +1676,218 @@ export class CheckInService {
     return slackWorkspaceId
       ? buildSlackThreadUrl(slackWorkspaceId, channelId, threadTs)
       : null;
+  }
+
+  async deleteRun(runId: string) {
+    const run = await this.prisma.standupRun.findUnique({
+      where: { id: runId },
+      select: { id: true, checkInId: true },
+    });
+
+    if (!run) {
+      throw new NotFoundException(`Run ${runId} was not found.`);
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const submissions = await tx.standupSubmission.findMany({
+        where: { runId },
+        select: { id: true },
+      });
+      const submissionIds = submissions.map((submission) => submission.id);
+
+      if (submissionIds.length > 0) {
+        await tx.answer.deleteMany({
+          where: { submissionId: { in: submissionIds } },
+        });
+        await tx.conversationState.deleteMany({
+          where: { submissionId: { in: submissionIds } },
+        });
+      }
+
+      await tx.standupThreadUpdate.deleteMany({ where: { runId } });
+      await tx.standupSubmission.deleteMany({ where: { runId } });
+      await tx.aiDigest.deleteMany({ where: { runId } });
+      await tx.standupRun.delete({ where: { id: runId } });
+    });
+
+    return { deleted: true, id: runId };
+  }
+
+  async exportRunCsv(runId: string): Promise<string> {
+    const run = await this.prisma.standupRun.findUnique({
+      where: { id: runId },
+      include: {
+        checkIn: { select: { name: true, timezone: true } },
+        team: { select: { name: true } },
+        aiDigest: true,
+        submissions: {
+          include: {
+            user: {
+              select: {
+                slackDisplayName: true,
+                slackUserId: true,
+              },
+            },
+            answers: {
+              include: { question: true },
+              orderBy: { createdAt: 'asc' },
+            },
+          },
+          orderBy: { completedAt: 'asc' },
+        },
+        threadUpdates: {
+          where: { type: 'additional_update' },
+          include: {
+            user: {
+              select: { slackDisplayName: true },
+            },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+    });
+
+    if (!run) {
+      throw new NotFoundException(`Run ${runId} was not found.`);
+    }
+
+    if (!run.aiDigest?.slackReportText && !run.aiDigest?.summary) {
+      throw new NotFoundException('Report is not generated yet for this run.');
+    }
+
+    const escape = (value: string) =>
+      `"${value.replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
+
+    const lines: string[] = [];
+    lines.push('Section,Field,Value');
+    lines.push(
+      ['Run', 'CheckIn', escape(run.checkIn?.name ?? '')].join(','),
+    );
+    lines.push(['Run', 'Team', escape(run.team.name)].join(','));
+    lines.push(['Run', 'Run ID', escape(run.id)].join(','));
+    lines.push(
+      ['Run', 'Started At', escape(run.startedAt.toISOString())].join(','),
+    );
+    lines.push(
+      ['Run', 'Completed At', escape(run.completedAt?.toISOString() ?? '')].join(','),
+    );
+    lines.push(['Run', 'Status', escape(run.status)].join(','));
+    lines.push(
+      [
+        'Run',
+        'Participants',
+        escape(
+          `${run.submissions.filter((submission) => submission.status === 'completed').length}/${run.submissions.length}`,
+        ),
+      ].join(','),
+    );
+
+    if (run.aiDigest) {
+      lines.push(
+        ['Report', 'Generated At', escape(run.aiDigest.generatedAt.toISOString())].join(','),
+      );
+      lines.push(['Report', 'Source', escape(run.aiDigest.source)].join(','));
+      lines.push(['Report', 'Summary', escape(run.aiDigest.summary)].join(','));
+      if (run.aiDigest.slackReportText) {
+        lines.push(
+          ['Report', 'Full Text', escape(run.aiDigest.slackReportText)].join(','),
+        );
+      }
+    }
+
+    lines.push('');
+    lines.push('Participant,Question,Answer,Status');
+
+    for (const submission of run.submissions) {
+      for (const answer of submission.answers) {
+        lines.push(
+          [
+            escape(submission.user.slackDisplayName),
+            escape(answer.question.question),
+            escape(answer.text),
+            escape(submission.status),
+          ].join(','),
+        );
+      }
+    }
+
+    if (run.threadUpdates.length > 0) {
+      lines.push('');
+      lines.push('Additional Updates');
+      lines.push('Participant,Content,Created At');
+      for (const update of run.threadUpdates) {
+        lines.push(
+          [
+            escape(update.user.slackDisplayName),
+            escape(update.content),
+            escape(update.createdAt.toISOString()),
+          ].join(','),
+        );
+      }
+    }
+
+    return '\uFEFF' + lines.join('\n');
+  }
+
+  async exportRunPdf(runId: string): Promise<string> {
+    const run = await this.prisma.standupRun.findUnique({
+      where: { id: runId },
+      include: {
+        checkIn: { select: { name: true } },
+        team: { select: { name: true } },
+        aiDigest: true,
+        submissions: {
+          include: {
+            user: {
+              select: { slackDisplayName: true },
+            },
+            answers: {
+              include: { question: true },
+              orderBy: { createdAt: 'asc' },
+            },
+          },
+          orderBy: { completedAt: 'asc' },
+        },
+      },
+    });
+
+    if (!run) {
+      throw new NotFoundException(`Run ${runId} was not found.`);
+    }
+
+    const digest = run.aiDigest;
+    if (!digest?.slackReportText && !digest?.summary) {
+      throw new NotFoundException('Report is not generated yet for this run.');
+    }
+
+    const participantLines = run.submissions
+      .flatMap((submission) =>
+        submission.answers.map(
+          (answer) =>
+            `- ${submission.user.slackDisplayName} | ${answer.question.question}: ${answer.text}`,
+        ),
+      )
+      .join('\n');
+
+    return `
+==================================================
+PULSE CHECK-IN RUN REPORT
+==================================================
+Check-In: ${run.checkIn?.name ?? 'Unknown'}
+Team: ${run.team.name}
+Run ID: ${run.id}
+Started: ${run.startedAt.toISOString()}
+Completed: ${run.completedAt?.toISOString() ?? '—'}
+Participants: ${run.submissions.filter((submission) => submission.status === 'completed').length}/${run.submissions.length}
+
+AI REPORT
+--------------------------------------------------
+${digest.slackReportText ?? digest.summary}
+
+PARTICIPANT ANSWERS
+--------------------------------------------------
+${participantLines || 'No answers recorded.'}
+==================================================
+`;
   }
 }

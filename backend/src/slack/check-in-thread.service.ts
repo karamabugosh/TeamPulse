@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { SlackService } from './slack.service';
@@ -11,12 +11,22 @@ import {
   buildParentMessageText,
   buildParticipantSummaryBlocks,
   buildParticipantSummaryText,
+  buildSlackArchiveUrl,
+  buildSlackThreadUrl,
   formatRunDateShort,
 } from './slack-checkin.views';
 
+export type ThreadAnchorResult = {
+  ok: boolean;
+  channelId?: string;
+  threadTs?: string;
+  threadUrl?: string | null;
+  reason?: string;
+  repaired?: boolean;
+};
+
 @Injectable()
-export class CheckInThreadService {
-  private readonly logger = new Logger(CheckInThreadService.name);
+export class CheckInThreadService implements OnApplicationBootstrap {  private readonly logger = new Logger(CheckInThreadService.name);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -24,6 +34,19 @@ export class CheckInThreadService {
     private readonly configService: ConfigService,
   ) {}
 
+  async onApplicationBootstrap(): Promise<void> {
+    try {
+      const repaired = await this.repairAllMissingThreadAnchors();
+      if (repaired > 0) {
+        this.logger.log(
+          `[Thread] Repaired ${repaired} run(s) with missing Slack thread anchors.`,
+        );
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`[Thread] Startup anchor repair failed: ${message}`);
+    }
+  }
   resolveUpdatesChannelRef(checkIn: {
     updatesChannelId?: string | null;
     team?: { slackChannelId?: string | null } | null;
@@ -160,16 +183,13 @@ export class CheckInThreadService {
       return { ok: false, reason };
     }
 
-    await this.prisma.standupRun.update({
-      where: { id: runId },
-      data: {
-        slackChannelId: channelId,
-        slackThreadTs: posted.ts,
-      },
+    await this.persistThreadAnchor({
+      runId,
+      channelId,
+      messageTs: posted.ts as string,
     });
 
-    await this.prisma.standupThreadUpdate.create({
-      data: {
+    await this.prisma.standupThreadUpdate.create({      data: {
         runId,
         userId: run.submissions[0]?.userId || (await this.getFallbackUserId(run.checkIn.teamId)),
         type: 'parent',
@@ -185,6 +205,286 @@ export class CheckInThreadService {
     return { ok: true, channelId, threadTs: posted.ts as string };
   }
 
+  /**
+   * Loads the stored thread anchor, repairing from StandupThreadUpdate when possible.
+   * Never creates a new public message for completed runs.
+   */
+  async ensureThreadAnchor(runId: string): Promise<ThreadAnchorResult> {
+    const run = await this.prisma.standupRun.findUnique({
+      where: { id: runId },
+      include: {
+        checkIn: {
+          include: {
+            team: {
+              include: {
+                workspace: {
+                  select: {
+                    slackWorkspaceId: true,
+                    slackWorkspaceName: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        threadUpdates: {
+          where: { type: 'parent' },
+          orderBy: { createdAt: 'asc' },
+          take: 1,
+        },
+      },
+    });
+
+    if (!run) {
+      return { ok: false, reason: `Run ${runId} was not found.` };
+    }
+
+    if (run.slackChannelId && run.slackThreadTs) {
+      const threadUrl = await this.ensureThreadUrl(run);
+      return {
+        ok: true,
+        channelId: run.slackChannelId,
+        threadTs: run.slackThreadTs,
+        threadUrl,
+      };
+    }
+
+    const parentUpdate = run.threadUpdates[0];
+    if (parentUpdate?.slackMessageTs) {
+      const channelId = await this.resolveStoredChannelId(run);
+      if (channelId) {
+        await this.persistThreadAnchor({
+          runId,
+          channelId,
+          messageTs: parentUpdate.slackMessageTs,
+        });
+        this.logger.warn(
+          `[Thread] Repaired missing anchor for run ${runId} from parent StandupThreadUpdate (${parentUpdate.slackMessageTs}).`,
+        );
+        const refreshed = await this.prisma.standupRun.findUnique({
+          where: { id: runId },
+          select: {
+            slackChannelId: true,
+            slackThreadTs: true,
+            slackThreadUrl: true,
+          },
+        });
+        return {
+          ok: true,
+          channelId: refreshed?.slackChannelId ?? channelId,
+          threadTs: refreshed?.slackThreadTs ?? parentUpdate.slackMessageTs,
+          threadUrl: refreshed?.slackThreadUrl ?? null,
+          repaired: true,
+        };
+      }
+
+      this.logger.error(
+        `[Thread] Run ${runId} has a parent StandupThreadUpdate (${parentUpdate.slackMessageTs}) but no resolvable Slack channel — check updatesChannelId / team.slackChannelId.`,
+      );
+      return {
+        ok: false,
+        reason:
+          'Parent Slack message exists in history but the channel ID could not be resolved.',
+      };
+    }
+
+    if (run.status === 'collecting') {
+      const created = await this.createRunThread(runId);
+      if (created.ok) {
+        const refreshed = await this.prisma.standupRun.findUnique({
+          where: { id: runId },
+          select: {
+            slackChannelId: true,
+            slackThreadTs: true,
+            slackThreadUrl: true,
+          },
+        });
+        return {
+          ok: true,
+          channelId: refreshed?.slackChannelId ?? created.channelId,
+          threadTs: refreshed?.slackThreadTs ?? created.threadTs,
+          threadUrl: refreshed?.slackThreadUrl ?? null,
+          repaired: true,
+        };
+      }
+
+      return {
+        ok: false,
+        reason:
+          created.ok === false
+            ? created.reason
+            : 'Could not create Slack thread for active run.',
+      };
+    }
+
+    const checkInLabel = run.checkIn?.name ?? runId;
+    const reason =
+      `Check-In "${checkInLabel}" never started in Slack — no parent message was posted, so reports and reminders cannot use a thread.`;
+
+    this.logger.warn(`[Thread] ${reason} (runId=${runId}, status=${run.status})`);
+
+    return { ok: false, reason };
+  }
+
+  private async repairAllMissingThreadAnchors(): Promise<number> {
+    const runs = await this.prisma.standupRun.findMany({
+      where: {
+        checkInId: { not: null },
+        OR: [
+          { slackThreadTs: null },
+          { slackChannelId: null },
+          { slackThreadUrl: null, slackThreadTs: { not: null } },
+        ],
+      },
+      select: { id: true },
+      take: 100,
+    });
+
+    let repaired = 0;
+
+    for (const run of runs) {
+      const result = await this.ensureThreadAnchor(run.id);
+      if (result.ok && result.repaired) {
+        repaired += 1;
+      }
+    }
+
+    return repaired;
+  }
+
+  private async persistThreadAnchor(params: {
+    runId: string;
+    channelId: string;
+    messageTs: string;
+  }): Promise<void> {
+    const threadUrl = await this.buildThreadUrlForRun(
+      params.runId,
+      params.channelId,
+      params.messageTs,
+    );
+
+    await this.prisma.standupRun.update({
+      where: { id: params.runId },
+      data: {
+        slackChannelId: params.channelId,
+        slackThreadTs: params.messageTs,
+        slackRootMessageTs: params.messageTs,
+        slackThreadUrl: threadUrl,
+      },
+    });
+  }
+
+  private async ensureThreadUrl(
+    run: {
+      id: string;
+      slackChannelId: string | null;
+      slackThreadTs: string | null;
+      slackThreadUrl?: string | null;
+    },
+  ): Promise<string | null> {
+    if (run.slackThreadUrl) {
+      return run.slackThreadUrl;
+    }
+
+    if (!run.slackChannelId || !run.slackThreadTs) {
+      return null;
+    }
+
+    const threadUrl = await this.buildThreadUrlForRun(
+      run.id,
+      run.slackChannelId,
+      run.slackThreadTs,
+    );
+
+    if (threadUrl) {
+      await this.prisma.standupRun.update({
+        where: { id: run.id },
+        data: { slackThreadUrl: threadUrl },
+      });
+    }
+
+    return threadUrl;
+  }
+
+  private async buildThreadUrlForRun(
+    runId: string,
+    channelId: string,
+    messageTs: string,
+  ): Promise<string | null> {
+    try {
+      const permalink = await this.slackService.getPermalink(
+        channelId,
+        messageTs,
+      );
+      if (permalink) {
+        return permalink;
+      }
+    } catch {
+      // Fall back to constructed URL below.
+    }
+
+    const run = await this.prisma.standupRun.findUnique({
+      where: { id: runId },
+      select: {
+        team: {
+          select: {
+            workspace: {
+              select: {
+                slackWorkspaceId: true,
+                slackWorkspaceName: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const workspaceId =
+      run?.team?.workspace?.slackWorkspaceId ||
+      this.configService.get<string>('SLACK_TEAM_ID')?.trim() ||
+      '';
+
+    if (workspaceId && !workspaceId.startsWith('T0000')) {
+      return buildSlackThreadUrl(workspaceId, channelId, messageTs);
+    }
+
+    const domain = run?.team?.workspace?.slackWorkspaceName
+      ?.toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+
+    if (domain && domain.length > 2) {
+      return buildSlackArchiveUrl(domain, channelId, messageTs);
+    }
+
+    return workspaceId
+      ? buildSlackThreadUrl(workspaceId, channelId, messageTs)
+      : null;
+  }
+
+  private async resolveStoredChannelId(run: {
+    slackChannelId?: string | null;
+    checkIn?: {
+      updatesChannelId?: string | null;
+      team?: { slackChannelId?: string | null } | null;
+    } | null;
+  }): Promise<string | null> {
+    if (run.slackChannelId) {
+      return run.slackChannelId;
+    }
+
+    if (!run.checkIn) {
+      return null;
+    }
+
+    const { ref: channelRef } = this.resolveUpdatesChannelRef(run.checkIn);
+    if (!channelRef) {
+      return null;
+    }
+
+    return this.slackService.resolveChannelId(channelRef);
+  }
   async refreshParentProgress(runId: string): Promise<void> {
     const run = await this.prisma.standupRun.findUnique({
       where: { id: runId },

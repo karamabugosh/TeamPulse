@@ -1,6 +1,7 @@
 import {
   Injectable,
   Logger,
+  OnApplicationBootstrap,
 } from '@nestjs/common';
 import {
   AiDigestResult,
@@ -16,6 +17,16 @@ import { PrismaService } from '../prisma/prisma.service';
 import { enrichAnswerForAnalysis } from '../common/question-semantics';
 import { QuestionType } from '@prisma/client';
 import { buildAiReportHeader } from '../slack/slack-checkin.views';
+import { AiReportGenerationError } from '../ai/ai-report-generation.error';
+import {
+  isCanonicalAiDigest,
+  shouldRegenerateReport,
+} from './report-content.utils';
+import {
+  buildParticipantProfiles,
+  buildReportStatistics,
+  groupBlockersByPerson,
+} from './report-participant.utils';
 
 export type RunReportStatus =
   | 'waiting_for_responses'
@@ -37,7 +48,7 @@ export type ReportWorkflowResult = {
 };
 
 @Injectable()
-export class CheckInReportService {
+export class CheckInReportService implements OnApplicationBootstrap {
   private readonly logger = new Logger(CheckInReportService.name);
 
   private readonly maxGenerationAttempts = 3;
@@ -52,12 +63,54 @@ export class CheckInReportService {
     private readonly checkInThreadService: CheckInThreadService,
   ) {}
 
+  async onApplicationBootstrap(): Promise<void> {
+    try {
+      await this.regeneratePlaceholderReports();
+      await this.refreshCanonicalSlackReports();
+      await this.backfillMissingCanonicalReports();
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `[Report] Startup canonical report backfill failed: ${message}`,
+      );
+    }
+  }
+
+  async executeForRun(
+    runId: string,
+    options?: {
+      skipTriggerValidation?: boolean;
+      allowRetry?: boolean;
+      forceRegenerate?: boolean;
+    },
+  ): Promise<ReportWorkflowResult> {
+    const runMeta = await this.prisma.standupRun.findUnique({
+      where: { id: runId },
+      select: { checkInId: true },
+    });
+
+    if (!runMeta?.checkInId) {
+      return {
+        runId,
+        status: 'failed',
+        reportStatus: 'generation_failed',
+        responseCount: 0,
+        slackDelivered: false,
+        message: 'Run is not linked to a Check-In.',
+      };
+    }
+
+    return this.execute(runMeta.checkInId, runId, options);
+  }
+
   async execute(
     checkInId: string,
     runId: string,
     options?: {
       skipTriggerValidation?: boolean;
       allowRetry?: boolean;
+      forceRegenerate?: boolean;
     },
   ): Promise<ReportWorkflowResult> {
     const run = await this.prisma.standupRun.findUnique({
@@ -89,14 +142,15 @@ export class CheckInReportService {
 
     if (
       run.reportGeneratedAt &&
-      run.reportStatus === 'completed'
+      run.reportStatus === 'completed' &&
+      !options?.forceRegenerate
     ) {
       const canonical = await this.prisma.aiDigest.findUnique({
         where: { runId: run.id },
-        select: { slackReportText: true },
+        select: { slackReportText: true, source: true, summary: true, generationError: true },
       });
 
-      if (canonical?.slackReportText) {
+      if (canonical?.slackReportText && isCanonicalAiDigest(canonical)) {
         return {
           runId,
           status: 'skipped',
@@ -106,6 +160,10 @@ export class CheckInReportService {
           message: 'Report already posted.',
         };
       }
+
+      this.logger.warn(
+        `[Report] Run ${run.id} was posted to Slack without a canonical saved report — backfilling database record.`,
+      );
     }
 
     const inProgress =
@@ -141,6 +199,23 @@ export class CheckInReportService {
       };
     }
 
+    const threadAnchor = await this.checkInThreadService.ensureThreadAnchor(
+      run.id,
+    );
+
+    if (!threadAnchor.ok) {
+      return {
+        runId: run.id,
+        status: 'skipped',
+        reportStatus: run.reportStatus as RunReportStatus,
+        responseCount: 0,
+        slackDelivered: false,
+        message:
+          threadAnchor.reason ??
+          'Check-In never started in Slack — skipping report workflow.',
+      };
+    }
+
     const responses = await this.collectionService.getRunResponses(run.id);
     const nonResponders =
       await this.collectionService.getRunNonResponders(run.id);
@@ -157,12 +232,14 @@ export class CheckInReportService {
     let slackReportBlocks =
       (existingRecord?.slackReportBlocks as unknown[] | null) ?? null;
 
-    const isCanonical = !!existingRecord?.slackReportText;
+    const hasCanonicalAiReport =
+      !!existingRecord && isCanonicalAiDigest(existingRecord);
 
     const needsAiGeneration =
-      !existingRecord || run.reportStatus === 'generation_failed';
+      options?.forceRegenerate ||
+      shouldRegenerateReport(existingRecord);
 
-    if (needsAiGeneration && !isCanonical) {
+    if (needsAiGeneration) {
       await this.setReportStatus(run.id, 'generating');
 
       try {
@@ -171,6 +248,7 @@ export class CheckInReportService {
           run.id,
           run.submissions,
           responses.length,
+          options?.forceRegenerate === true,
         );
         const persisted = await this.persistReportForRun(
           aiDigest,
@@ -187,6 +265,7 @@ export class CheckInReportService {
         this.logger.error(
           `Report generation failed for run ${run.id}: ${message}`,
         );
+        await this.persistFailedReport(run, message);
         await this.setReportStatus(run.id, 'generation_failed');
         return {
           runId: run.id,
@@ -197,7 +276,7 @@ export class CheckInReportService {
           message,
         };
       }
-    } else if (!isCanonical && aiDigest) {
+    } else if (!hasCanonicalAiReport && aiDigest) {
       const additionalUpdatesByUser =
         await this.fetchAdditionalUpdatesByUser(run.id);
       aiDigest = this.enrichDigestWithParticipants(
@@ -215,7 +294,7 @@ export class CheckInReportService {
       slackReportBlocks = persisted.slackReportBlocks;
     }
 
-    if (!aiDigest) {
+    if (!aiDigest || aiDigest.source === 'failed') {
       await this.setReportStatus(run.id, 'generation_failed');
       return {
         runId: run.id,
@@ -223,7 +302,10 @@ export class CheckInReportService {
         reportStatus: 'generation_failed',
         responseCount: responses.length,
         slackDelivered: false,
-        message: 'No report could be generated.',
+        message:
+          aiDigest?.generationError ||
+          aiDigest?.reportSections?.generationError ||
+          'No report could be generated.',
       };
     }
 
@@ -241,16 +323,16 @@ export class CheckInReportService {
       !refreshedRun?.slackChannelId ||
       !refreshedRun.slackThreadTs
     ) {
-      await this.setReportStatus(run.id, 'posting_failed');
+      await this.setReportStatus(run.id, 'generated');
       return {
         runId: run.id,
         status: 'partial_success',
-        reportStatus: 'posting_failed',
+        reportStatus: 'generated',
         responseCount: responses.length,
         slackDelivered: false,
         slackError:
-          'CheckIn run has no Slack thread — configure updatesChannelId or SLACK_UPDATES_CHANNEL_ID.',
-        message: 'Report saved but Slack thread is unavailable.',
+          'CheckIn run has no Slack thread — report saved but not posted to Slack.',
+        message: 'Report saved in database but Slack thread is unavailable.',
       };
     }
 
@@ -281,7 +363,7 @@ export class CheckInReportService {
       slackReportBlocks = persisted.slackReportBlocks;
     }
 
-    if (run.reportGeneratedAt && slackReportText) {
+    if (run.reportGeneratedAt && slackReportText && !options?.forceRegenerate) {
       await this.setReportStatus(run.id, 'completed');
       return {
         runId: run.id,
@@ -291,6 +373,13 @@ export class CheckInReportService {
         slackDelivered: true,
         message: 'Canonical report backfilled in database (already posted to Slack).',
       };
+    }
+
+    if (options?.forceRegenerate) {
+      await this.prisma.standupRun.update({
+        where: { id: run.id },
+        data: { reportGeneratedAt: null },
+      });
     }
 
     const posted = await this.postReportWithRetry(
@@ -323,6 +412,8 @@ export class CheckInReportService {
   }
 
   async processDueReports(): Promise<void> {
+    await this.backfillMissingCanonicalReports();
+
     const now = new Date();
 
     const dueRuns = await this.prisma.standupRun.findMany({
@@ -380,6 +471,16 @@ export class CheckInReportService {
         if (total === 0 || completed < total) {
           continue;
         }
+      }
+
+      const threadAnchor = await this.checkInThreadService.ensureThreadAnchor(
+        dueRun.id,
+      );
+      if (!threadAnchor.ok) {
+        this.logger.warn(
+          `[Report] Skipping due report for run ${dueRun.id}: ${threadAnchor.reason ?? 'no Slack thread anchor.'}`,
+        );
+        continue;
       }
 
       try {
@@ -458,17 +559,15 @@ export class CheckInReportService {
     });
   }
 
-  private async ensureThread(runId: string): Promise<void> {
-    const run = await this.prisma.standupRun.findUnique({
-      where: { id: runId },
-      select: { slackChannelId: true, slackThreadTs: true },
-    });
-
-    if (!run?.slackChannelId || !run?.slackThreadTs) {
-      this.logger.error(
-        `[Report] Run ${runId} has no Slack thread anchor — will not create a new public message.`,
+  private async ensureThread(runId: string): Promise<boolean> {
+    const anchor = await this.checkInThreadService.ensureThreadAnchor(runId);
+    if (!anchor.ok) {
+      this.logger.warn(
+        `[Report] Run ${runId} has no Slack thread anchor — ${anchor.reason ?? 'cannot post to Slack.'}`,
       );
+      return false;
     }
+    return true;
   }
 
   private async generateReportWithRetry(
@@ -485,12 +584,17 @@ export class CheckInReportService {
       user: { slackUserId: string; slackDisplayName: string };
     }>,
     responseCount: number,
+    forceRegenerate = false,
   ): Promise<AiDigestResult> {
     const existingDigest = await this.prisma.aiDigest.findUnique({
       where: { runId },
     });
 
-    if (existingDigest?.slackReportText) {
+    if (
+      !forceRegenerate &&
+      existingDigest &&
+      isCanonicalAiDigest(existingDigest)
+    ) {
       return this.mapStoredDigest(existingDigest);
     }
 
@@ -498,7 +602,10 @@ export class CheckInReportService {
       await this.fetchAdditionalUpdatesByUser(runId);
 
     const aiResponses: RawResponseForAnalysis[] = submissions
-      .filter((submission) => submission.answers.length > 0)
+      .filter(
+        (submission) =>
+          submission.status === 'completed' && submission.answers.length > 0,
+      )
       .map((submission) => ({
         userId: submission.user.slackUserId,
         answers: submission.answers.map((answer) => {
@@ -541,11 +648,18 @@ export class CheckInReportService {
           );
         }
 
+        if (attempt === 1) {
+          this.logger.log(
+            `[Report] Generating AI report for run ${runId} — ${aiResponses.length} participant(s) with answers`,
+          );
+        }
+
         generated = await this.aiService.analyzeRun(
           teamId,
           runId,
           aiResponses,
           false,
+          { allowRulesFallback: false },
         );
         break;
       } catch (error: unknown) {
@@ -559,9 +673,11 @@ export class CheckInReportService {
     }
 
     if (!generated) {
-      throw lastError instanceof Error
+      throw lastError instanceof AiReportGenerationError
         ? lastError
-        : new Error(String(lastError));
+        : lastError instanceof Error
+          ? lastError
+          : new AiReportGenerationError(String(lastError));
     }
 
     return this.enrichDigestWithParticipants(
@@ -628,7 +744,15 @@ export class CheckInReportService {
     run: {
       id: string;
       checkIn: { name: string };
-      submissions: { status: string }[];
+      submissions: Array<{
+        status: string;
+        answers: Array<{
+          text: string;
+          structuredValue?: unknown;
+          question: { question: string; type: QuestionType; order?: number };
+        }>;
+        user: { slackUserId: string; slackDisplayName: string };
+      }>;
     },
     nonResponderNames: string[],
   ): Promise<{
@@ -640,8 +764,17 @@ export class CheckInReportService {
       (submission) => submission.status === 'completed',
     ).length;
     const totalCount = run.submissions.length;
+    const reportSections = this.buildPersistedReportSections(
+      digest,
+      run,
+      nonResponderNames,
+    );
+    const digestWithSections: AiDigestResult = {
+      ...digest,
+      reportSections,
+    };
     const { slackReportText, slackReportBlocks } =
-      this.buildPublishedSlackPayload(digest, {
+      this.buildPublishedSlackPayload(digestWithSections, {
         checkInName: run.checkIn.name,
         completedCount,
         totalCount,
@@ -658,10 +791,11 @@ export class CheckInReportService {
         summary: digest.summary,
         blockers: digest.blockers as any,
         themes: digest.themes as any,
-        reportSections: digest.reportSections as any,
+        reportSections: reportSections as any,
         slackReportText,
         nonResponderNames: nonResponderNames as any,
         slackReportBlocks: slackReportBlocks as any,
+        generationError: digest.generationError ?? null,
       },
       update: {
         generatedAt: new Date(digest.generatedAt),
@@ -669,10 +803,11 @@ export class CheckInReportService {
         summary: digest.summary,
         blockers: digest.blockers as any,
         themes: digest.themes as any,
-        reportSections: digest.reportSections as any,
+        reportSections: reportSections as any,
         slackReportText,
         nonResponderNames: nonResponderNames as any,
         slackReportBlocks: slackReportBlocks as any,
+        generationError: digest.generationError ?? null,
       },
     });
 
@@ -680,7 +815,7 @@ export class CheckInReportService {
       `[Report] Saved canonical report for run ${run.id} (source=${digest.source})`,
     );
 
-    return { digest, slackReportText, slackReportBlocks };
+    return { digest: digestWithSections, slackReportText, slackReportBlocks };
   }
 
   private buildPublishedSlackPayload(
@@ -708,6 +843,316 @@ export class CheckInReportService {
     );
 
     return { slackReportText, slackReportBlocks };
+  }
+
+  async refreshCanonicalSlackReports(): Promise<number> {
+    const digests = await this.prisma.aiDigest.findMany({
+      where: { source: 'ai' },
+      include: {
+        run: {
+          include: {
+            checkIn: true,
+            submissions: {
+              include: {
+                user: {
+                  select: {
+                    slackUserId: true,
+                    slackDisplayName: true,
+                  },
+                },
+                answers: {
+                  include: { question: true },
+                  orderBy: { createdAt: 'asc' },
+                },
+              },
+            },
+          },
+        },
+      },
+      take: 25,
+      orderBy: { generatedAt: 'desc' },
+    });
+
+    let refreshed = 0;
+
+    for (const digestRecord of digests) {
+      if (!digestRecord.run?.checkIn) {
+        continue;
+      }
+
+      const nonResponders = await this.collectionService.getRunNonResponders(
+        digestRecord.runId,
+      );
+      const digest = this.mapStoredDigest(digestRecord);
+
+      await this.persistReportForRun(
+        digest,
+        digestRecord.run,
+        nonResponders.map((member) => member.name),
+      );
+      refreshed += 1;
+    }
+
+    if (refreshed > 0) {
+      this.logger.log(
+        `[Report] Refreshed ${refreshed} canonical Slack report payload(s) from stored AI digests.`,
+      );
+    }
+
+    return refreshed;
+  }
+
+  async regeneratePlaceholderReports(): Promise<number> {
+    const runs = await this.prisma.standupRun.findMany({
+      where: {
+        checkInId: { not: null },
+        submissions: {
+          some: {
+            status: 'completed',
+            answers: { some: {} },
+          },
+        },
+        OR: [
+          { aiDigest: { is: { source: 'rules_fallback' } } },
+          { aiDigest: { is: { source: 'failed' } } },
+          {
+            aiDigest: {
+              is: {
+                summary: {
+                  contains: 'AI analysis is unavailable',
+                  mode: 'insensitive',
+                },
+              },
+            },
+          },
+        ],
+      },
+      orderBy: { startedAt: 'desc' },
+      select: { id: true, checkInId: true },
+    });
+
+    let regenerated = 0;
+
+    for (const run of runs) {
+      if (!run.checkInId) {
+        continue;
+      }
+
+      try {
+        await this.prisma.aiDigest.updateMany({
+          where: { runId: run.id },
+          data: {
+            slackReportText: null,
+            slackReportBlocks: null,
+            generationError: null,
+          },
+        });
+
+        await this.prisma.standupRun.update({
+          where: { id: run.id },
+          data: {
+            reportGeneratedAt: null,
+            reportStatus: 'waiting_for_responses',
+          },
+        });
+
+        const result = await this.execute(run.checkInId, run.id, {
+          skipTriggerValidation: true,
+          allowRetry: true,
+          forceRegenerate: true,
+        });
+
+        if (result.status === 'success') {
+          regenerated += 1;
+        }
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        this.logger.error(
+          `[Report] Failed regenerating AI report for run ${run.id}: ${message}`,
+        );
+      }
+    }
+
+    if (regenerated > 0) {
+      this.logger.log(
+        `[Report] Regenerated ${regenerated} AI report(s) from submitted answers.`,
+      );
+    }
+
+    return regenerated;
+  }
+
+  async backfillMissingCanonicalReports(): Promise<number> {
+    const runs = await this.prisma.standupRun.findMany({
+      where: {
+        checkInId: { not: null },
+        aiDigest: {
+          is: {
+            source: 'ai',
+            slackReportText: null,
+            generationError: null,
+          },
+        },
+      },
+      orderBy: { startedAt: 'desc' },
+      take: 25,
+      select: { id: true, checkInId: true },
+    });
+
+    let backfilled = 0;
+
+    for (const run of runs) {
+      if (!run.checkInId) {
+        continue;
+      }
+
+      try {
+        const result = await this.execute(run.checkInId, run.id, {
+          skipTriggerValidation: true,
+          allowRetry: true,
+        });
+
+        if (result.status !== 'failed') {
+          backfilled += 1;
+        }
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        this.logger.error(
+          `[Report] Failed backfilling canonical report for run ${run.id}: ${message}`,
+        );
+      }
+    }
+
+    if (backfilled > 0) {
+      this.logger.log(
+        `[Report] Backfilled ${backfilled} canonical report record(s) in the database.`,
+      );
+    }
+
+    return backfilled;
+  }
+
+  private buildPersistedReportSections(
+    digest: AiDigestResult,
+    run: {
+      submissions: Array<{
+        status: string;
+        answers: Array<{
+          text: string;
+          structuredValue?: unknown;
+          question: { question: string; type: QuestionType; order?: number };
+        }>;
+        user: { slackUserId: string; slackDisplayName: string };
+      }>;
+    },
+    nonResponderNames: string[],
+  ) {
+    const completedCount = run.submissions.filter(
+      (submission) => submission.status === 'completed',
+    ).length;
+    const totalCount = run.submissions.length;
+    const completionRate =
+      totalCount > 0
+        ? Math.round((completedCount / totalCount) * 100)
+        : 0;
+
+    const participationSummary =
+      nonResponderNames.length > 0
+        ? `${completedCount} of ${totalCount} participants responded (${completionRate}%). Pending: ${nonResponderNames.join(', ')}.`
+        : `${completedCount} of ${totalCount} participants responded (${completionRate}%). Everyone submitted.`;
+
+    const participantProfiles = buildParticipantProfiles(run.submissions);
+    const statistics = buildReportStatistics(
+      run.submissions,
+      digest.blockers,
+      participantProfiles,
+      completedCount,
+      totalCount,
+    );
+
+    const userIdToName = new Map(
+      run.submissions.map((submission) => [
+        submission.user.slackUserId,
+        submission.user.slackDisplayName,
+      ]),
+    );
+
+    const namedBlockers =
+      digest.reportSections.namedBlockers &&
+      digest.reportSections.namedBlockers.length > 0
+        ? digest.reportSections.namedBlockers
+        : groupBlockersByPerson(digest.blockers, userIdToName);
+
+    return {
+      ...digest.reportSections,
+      participationSummary,
+      runStats: {
+        completedCount,
+        totalCount,
+        completionRate,
+      },
+      participantProfiles,
+      statistics,
+      namedBlockers,
+      teamProgress:
+        digest.reportSections.teamProgress &&
+        digest.reportSections.teamProgress.length > 0
+          ? digest.reportSections.teamProgress
+          : statistics.teamProgressBullets,
+    };
+  }
+
+  private async persistFailedReport(
+    run: {
+      id: string;
+      checkIn: { teamId: string };
+    },
+    errorMessage: string,
+  ): Promise<void> {
+    await this.prisma.aiDigest.upsert({
+      where: { runId: run.id },
+      create: {
+        teamId: run.checkIn.teamId,
+        runId: run.id,
+        source: 'failed',
+        summary: '',
+        blockers: [],
+        themes: [],
+        reportSections: {
+          keyAccomplishments: [],
+          risks: [],
+          aiInsights: [],
+          actionItems: [],
+          participantUpdates: [],
+          overallProgress: '',
+          generationError: errorMessage,
+        } as any,
+        generationError: errorMessage,
+        slackReportText: null,
+        slackReportBlocks: null,
+        nonResponderNames: [],
+      },
+      update: {
+        source: 'failed',
+        summary: '',
+        blockers: [],
+        themes: [],
+        reportSections: {
+          keyAccomplishments: [],
+          risks: [],
+          aiInsights: [],
+          actionItems: [],
+          participantUpdates: [],
+          overallProgress: '',
+          generationError: errorMessage,
+        } as any,
+        generationError: errorMessage,
+        slackReportText: null,
+        slackReportBlocks: null,
+      },
+    });
   }
 
   private async postReportWithRetry(
@@ -744,18 +1189,9 @@ export class CheckInReportService {
 
   private buildSlackDigestText(
     digest: AiDigestResult,
-    nonResponderNames: string[],
+    _nonResponderNames: string[],
   ): string {
-    const formatted = this.reportsService.formatDigestForSlack(digest);
-    const nonResponderSection =
-      nonResponderNames.length > 0
-        ? [
-            '*⏳ No Response*',
-            ...nonResponderNames.map((name) => `• ${name}`),
-          ].join('\n')
-        : '*⏳ No Response*\n• Everyone submitted.';
-
-    return `${formatted}\n\n${nonResponderSection}`;
+    return this.reportsService.formatDigestForSlack(digest);
   }
 
   private mapStoredDigest(digest: {
@@ -770,6 +1206,7 @@ export class CheckInReportService {
     slackReportText?: string | null;
     nonResponderNames?: unknown;
     slackReportBlocks?: unknown;
+    generationError?: string | null;
   }): AiDigestResult {
     const sections = this.parseReportSections(digest.reportSections);
 
@@ -777,7 +1214,12 @@ export class CheckInReportService {
       teamId: digest.teamId,
       runId: digest.runId,
       generatedAt: digest.generatedAt.toISOString(),
-      source: digest.source === 'ai' ? 'ai' : 'rules_fallback',
+      source:
+        digest.source === 'ai'
+          ? 'ai'
+          : digest.source === 'failed'
+            ? 'failed'
+            : 'rules_fallback',
       summary: digest.summary,
       blockers: Array.isArray(digest.blockers)
         ? (digest.blockers as AiDigestResult['blockers'])
@@ -786,6 +1228,7 @@ export class CheckInReportService {
         ? (digest.themes as AiDigestResult['themes'])
         : [],
       reportSections: sections,
+      generationError: digest.generationError,
     };
   }
 

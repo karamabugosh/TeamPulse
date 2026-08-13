@@ -5,8 +5,10 @@ import {
   ExtractedBlocker,
   ThemeSummary,
   ReportSections,
+  NamedPersonSection,
   EMPTY_REPORT_SECTIONS,
 } from './dto/ai-result.dto';
+import { filterGenericLines } from '../check-in/report-participant.utils';
 
 export interface ParsedAiResponse {
   summary: string;
@@ -29,6 +31,11 @@ const ROOT_KEYS = new Set([
   'actionItems',
   'participantUpdates',
   'overallProgress',
+  'namedBlockers',
+  'helpRequests',
+  'namedRisks',
+  'namedAccomplishments',
+  'teamProgress',
 ]);
 
 const BLOCKER_KEYS = new Set([
@@ -97,6 +104,39 @@ function parseStringArray(
     .filter((item): item is string => typeof item === 'string')
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function parseOptionalStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function parseNamedPersonSections(
+  value: unknown,
+  fieldName: string,
+): NamedPersonSection[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    .map((item) => ({
+      displayName: String(item.displayName ?? '').trim(),
+      items: Array.isArray(item.items)
+        ? item.items
+            .filter((entry): entry is string => typeof entry === 'string')
+            .map((entry) => entry.trim())
+            .filter((entry) => entry.length > 0)
+        : [],
+    }))
+    .filter((section) => section.displayName.length > 0 && section.items.length > 0);
 }
 
 export function parseAndValidateAiResponse(
@@ -355,18 +395,31 @@ export function parseAndValidateAiResponse(
     blockers,
     themes,
     reportSections: {
-      keyAccomplishments: parseStringArray(
-        parsed.keyAccomplishments,
-        'keyAccomplishments',
+      keyAccomplishments: filterGenericLines(
+        parseOptionalStringArray(parsed.keyAccomplishments),
       ),
-      risks: parseStringArray(parsed.risks, 'risks'),
-      aiInsights: parseStringArray(parsed.aiInsights, 'aiInsights'),
-      actionItems: parseStringArray(parsed.actionItems, 'actionItems'),
+      risks: filterGenericLines(parseOptionalStringArray(parsed.risks)),
+      aiInsights: filterGenericLines(
+        parseOptionalStringArray(parsed.aiInsights),
+      ),
+      actionItems: filterGenericLines(
+        parseOptionalStringArray(parsed.actionItems),
+      ),
       participantUpdates: parseParticipantUpdates(parsed.participantUpdates),
       overallProgress:
         typeof parsed.overallProgress === 'string'
           ? parsed.overallProgress.trim()
           : '',
+      namedBlockers: parseNamedPersonSections(parsed.namedBlockers, 'namedBlockers'),
+      helpRequests: parseNamedPersonSections(parsed.helpRequests, 'helpRequests'),
+      namedRisks: parseNamedPersonSections(parsed.namedRisks, 'namedRisks'),
+      namedAccomplishments: parseNamedPersonSections(
+        parsed.namedAccomplishments,
+        'namedAccomplishments',
+      ),
+      teamProgress: filterGenericLines(
+        parseOptionalStringArray(parsed.teamProgress),
+      ),
     },
   };
 }

@@ -1803,6 +1803,8 @@ export class SchedulerService
       teamId,
       runId,
       responses,
+      false,
+      { allowRulesFallback: false },
     );
   }
 

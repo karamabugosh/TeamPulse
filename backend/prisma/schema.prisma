@@ -175,9 +175,11 @@ model StandupRun {
   reminderCount  Int       @default(0)
   lastReminderAt DateTime?
 
-  slackChannelId  String?
-  slackThreadTs   String?
-  threadReplyCount Int @default(0)
+  slackChannelId      String?
+  slackThreadTs       String?
+  slackRootMessageTs  String?
+  slackThreadUrl      String?
+  threadReplyCount    Int @default(0)
 
   reportDueAt       DateTime?
   reportGeneratedAt DateTime?
@@ -280,6 +282,7 @@ model AiDigest {
   slackReportText  String?
   nonResponderNames Json?
   slackReportBlocks Json?
+  generationError  String?
   createdAt        DateTime @default(now())
 
   team Team       @relation(fields: [teamId], references: [id])
