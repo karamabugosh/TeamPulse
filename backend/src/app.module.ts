@@ -7,6 +7,7 @@ import { SchedulerModule } from './scheduler/scheduler.module';
 import { TeamModule } from './team/team.module';
 import { CheckInModule } from './check-in/check-in.module';
 import { AdminModule } from './admin/admin.module';
+import { JiraModule } from './jira/jira.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { AdminModule } from './admin/admin.module';
     TeamModule,
     CheckInModule,
     AdminModule,
+    JiraModule,
   ],
   controllers: [],
   providers: [],
