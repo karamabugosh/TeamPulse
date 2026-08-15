@@ -32,7 +32,9 @@ import { apiFetch, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import {
   EnrichedRun,
-  formatDuration,
+  displayStatusVariant,
+  formatDurationLabel,
+  formatParticipants,
   formatStartedTime,
   normalizeRun,
   reportStatusIcon,
@@ -48,20 +50,24 @@ type HistoryResponse = {
   };
 };
 
-function hasExportableReport(run: EnrichedRun): boolean {
+function hasGeneratedReport(run: EnrichedRun): boolean {
   return (
-    !!run.aiReport?.id &&
-    run.aiReport.source === 'ai' &&
-    !['waiting', 'generating', 'generation_failed'].includes(run.reportStatus.code)
+    run.reportStatus.code === 'generated' ||
+    !!run.reportGeneratedAt ||
+    (!!run.aiReport?.id && run.aiReport.source === 'ai')
   );
 }
 
-function hasExistingReport(run: EnrichedRun): boolean {
-  return (
-    !!run.aiReport?.id ||
-    !!run.reportGeneratedAt ||
-    ['ready', 'posting', 'posted'].includes(run.reportStatus.code)
-  );
+function hasReportContent(run: EnrichedRun): boolean {
+  return hasGeneratedReport(run) || !!run.aiReport?.id;
+}
+
+function hasRunExportData(run: EnrichedRun): boolean {
+  return run.totalParticipants > 0;
+}
+
+function hasSlackThread(run: EnrichedRun): boolean {
+  return run.threadStatus.code !== 'missing';
 }
 
 async function downloadRunExport(runId: string, type: 'csv' | 'pdf'): Promise<void> {
@@ -93,29 +99,31 @@ type RunActionsMenuProps = {
 const RunActionsMenu: React.FC<RunActionsMenuProps> = ({ run, onRefresh }) => {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [generatingReport, setGeneratingReport] = useState(false);
 
-  const hasThread = run.threadStatus.code === 'active' && !!run.slackThreadUrl;
-  const canExport = hasExportableReport(run);
-  const canGenerate =
-    run.status !== 'collecting' && run.reportStatus.code !== 'generating';
-  const reportLabel = hasExistingReport(run)
-    ? 'Regenerate AI Report'
-    : 'Generate AI Report';
+  const reportGenerated = hasGeneratedReport(run);
+  const showGenerate = !reportGenerated;
+  const showRegenerate = reportGenerated;
+  const canViewReport = hasReportContent(run);
+  const canExportPdf = hasReportContent(run);
+  const canExportCsv = hasRunExportData(run);
+  const canGenerate = showGenerate && run.reportStatus.code !== 'generating';
+  const canRegenerate = showRegenerate && run.reportStatus.code !== 'generating';
+  const canOpenThread = hasSlackThread(run);
+  const canCopyThreadLink = !!run.slackThreadUrl;
 
   const closeMenu = () => setOpen(false);
 
-  const handleGenerateReport = async () => {
-    closeMenu();
-
-    if (hasExistingReport(run)) {
+  const handleGenerateReport = async (forceRegenerate: boolean) => {
+    if (forceRegenerate) {
       const confirmed = window.confirm(
-        'A report already exists for this run. Regenerating will replace the saved report and post an updated version to the Slack thread. Continue?',
+        'Regenerating will replace the saved report and post an updated version to the Slack thread. Continue?',
       );
       if (!confirmed) return;
     }
 
-    setBusy(true);
+    setGeneratingReport(true);
     try {
       const result = await apiFetch<{
         status: string;
@@ -123,31 +131,53 @@ const RunActionsMenu: React.FC<RunActionsMenuProps> = ({ run, onRefresh }) => {
         slackDelivered?: boolean;
       }>(`/api/check-ins/runs/${run.id}/generate-report`, {
         method: 'POST',
-        body: JSON.stringify({
-          forceRegenerate: hasExistingReport(run),
-        }),
+        body: JSON.stringify({ forceRegenerate }),
       });
 
-      toast({
-        title: result.status === 'success' ? 'Report updated' : 'Report request finished',
-        description:
-          result.message ??
-          (result.slackDelivered
-            ? 'The AI report was generated and posted to Slack.'
-            : 'Check run status for details.'),
-      });
+      closeMenu();
+
+      if (result.status === 'success' || result.status === 'partial_success') {
+        toast({
+          title: forceRegenerate ? 'Report regenerated' : 'Report generated',
+          description:
+            result.message ??
+            (result.slackDelivered
+              ? 'The AI report was generated and posted to Slack.'
+              : 'The AI report was saved for this run.'),
+        });
+      } else {
+        toast({
+          title: 'Report request finished',
+          description: result.message ?? 'Check run status for details.',
+        });
+      }
+
       onRefresh();
     } catch (error) {
       const message = error instanceof ApiError ? error.message : 'Failed to generate report';
       toast({ title: 'Report generation failed', description: message, variant: 'destructive' });
     } finally {
-      setBusy(false);
+      setGeneratingReport(false);
     }
+  };
+
+  const handleOpenThread = () => {
+    closeMenu();
+    if (run.slackThreadUrl) {
+      window.open(run.slackThreadUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
+
+    toast({
+      title: 'Thread link unavailable',
+      description: 'A Slack thread exists for this run, but no permalink is stored yet.',
+      variant: 'destructive',
+    });
   };
 
   const handleExport = async (type: 'csv' | 'pdf') => {
     closeMenu();
-    setBusy(true);
+    setBusyAction(type);
     try {
       await downloadRunExport(run.id, type);
       toast({
@@ -158,7 +188,7 @@ const RunActionsMenu: React.FC<RunActionsMenuProps> = ({ run, onRefresh }) => {
       const message = error instanceof ApiError ? error.message : 'Export failed';
       toast({ title: 'Export failed', description: message, variant: 'destructive' });
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
@@ -186,7 +216,7 @@ const RunActionsMenu: React.FC<RunActionsMenuProps> = ({ run, onRefresh }) => {
     );
     if (!confirmed) return;
 
-    setBusy(true);
+    setBusyAction('delete');
     try {
       await apiFetch(`/api/check-ins/runs/${run.id}`, { method: 'DELETE' });
       toast({ title: 'Run deleted', description: 'The run and its data were removed.' });
@@ -195,75 +225,98 @@ const RunActionsMenu: React.FC<RunActionsMenuProps> = ({ run, onRefresh }) => {
       const message = error instanceof ApiError ? error.message : 'Failed to delete run';
       toast({ title: 'Delete failed', description: message, variant: 'destructive' });
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <div className="flex h-full items-center justify-end">
+      <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
           size="icon"
           className="h-8 w-8"
-          disabled={busy}
           aria-label="Run actions"
         >
           <MoreVertical className="h-4 w-4" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
-        {canExport ? (
-          <DropdownMenuItem asChild>
+        <DropdownMenuItem disabled={!canViewReport} asChild={canViewReport}>
+          {canViewReport ? (
             <Link to={`/reports/run/${run.id}`} onClick={closeMenu}>
               <BarChart3 className="mr-2 h-4 w-4" />
               View Report
             </Link>
+          ) : (
+            <span className="flex items-center">
+              <BarChart3 className="mr-2 h-4 w-4" />
+              View Report
+            </span>
+          )}
+        </DropdownMenuItem>
+
+        {showGenerate ? (
+          <DropdownMenuItem
+            disabled={!canGenerate || generatingReport}
+            onClick={() => handleGenerateReport(false)}
+          >
+            {generatingReport ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Sparkles className="mr-2 h-4 w-4" />
+            )}
+            Generate AI Report
           </DropdownMenuItem>
         ) : (
-          <DropdownMenuItem disabled>
-            <BarChart3 className="mr-2 h-4 w-4" />
-            No report has been generated yet.
+          <DropdownMenuItem
+            disabled={!canRegenerate || generatingReport}
+            onClick={() => handleGenerateReport(true)}
+          >
+            {generatingReport ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Sparkles className="mr-2 h-4 w-4" />
+            )}
+            Regenerate AI Report
           </DropdownMenuItem>
         )}
 
         <DropdownMenuSeparator />
 
-        {hasThread ? (
-          <>
-            <DropdownMenuItem asChild>
-              <a
-                href={run.slackThreadUrl!}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={closeMenu}
-                className="flex cursor-pointer items-center"
-              >
-                <MessageSquare className="mr-2 h-4 w-4" />
-                Open Slack Thread
-              </a>
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={handleCopyLink}>
-              <Link2 className="mr-2 h-4 w-4" />
-              Copy Slack Thread Link
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-          </>
-        ) : null}
+        <DropdownMenuItem disabled={!canOpenThread} onClick={handleOpenThread}>
+          <MessageSquare className="mr-2 h-4 w-4" />
+          Open Slack Thread
+        </DropdownMenuItem>
 
-        <DropdownMenuItem disabled={!canGenerate} onClick={handleGenerateReport}>
-          <Sparkles className="mr-2 h-4 w-4" />
-          {reportLabel}
+        <DropdownMenuItem disabled={!canCopyThreadLink} onClick={handleCopyLink}>
+          <Link2 className="mr-2 h-4 w-4" />
+          Copy Slack Thread Link
         </DropdownMenuItem>
 
         <DropdownMenuSeparator />
 
-        <DropdownMenuItem disabled={!canExport} onClick={() => handleExport('pdf')}>
-          <FileText className="mr-2 h-4 w-4" />
+        <DropdownMenuItem
+          disabled={!canExportPdf || busyAction === 'pdf'}
+          onClick={() => handleExport('pdf')}
+        >
+          {busyAction === 'pdf' ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <FileText className="mr-2 h-4 w-4" />
+          )}
           Export as PDF
         </DropdownMenuItem>
-        <DropdownMenuItem disabled={!canExport} onClick={() => handleExport('csv')}>
-          <FileSpreadsheet className="mr-2 h-4 w-4" />
+        <DropdownMenuItem
+          disabled={!canExportCsv || busyAction === 'csv'}
+          onClick={() => handleExport('csv')}
+        >
+          {busyAction === 'csv' ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <FileSpreadsheet className="mr-2 h-4 w-4" />
+          )}
           Export as CSV
         </DropdownMenuItem>
 
@@ -271,13 +324,19 @@ const RunActionsMenu: React.FC<RunActionsMenuProps> = ({ run, onRefresh }) => {
 
         <DropdownMenuItem
           className="text-destructive focus:text-destructive"
+          disabled={busyAction === 'delete'}
           onClick={handleDelete}
         >
-          <Trash2 className="mr-2 h-4 w-4" />
+          {busyAction === 'delete' ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <Trash2 className="mr-2 h-4 w-4" />
+          )}
           Delete Run
         </DropdownMenuItem>
       </DropdownMenuContent>
-    </DropdownMenu>
+      </DropdownMenu>
+    </div>
   );
 };
 
@@ -286,14 +345,45 @@ export const CheckInHistoryPage: React.FC = () => {
   const [runs, setRuns] = useState<EnrichedRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ total: 0, totalPages: 1, limit: 25 });
+  const [, setClock] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(searchTerm.trim());
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [searchTerm]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
+
+  useEffect(() => {
+    const hasActiveRun = runs.some((run) => run.durationKind === 'elapsed');
+    if (!hasActiveRun) return;
+
+    const timer = window.setInterval(() => {
+      setClock((value) => value + 1);
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [runs]);
 
   const loadHistory = useCallback(async () => {
     setLoading(true);
     try {
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: String(pagination.limit),
+      });
+      if (debouncedSearch) {
+        params.set('search', debouncedSearch);
+      }
+
       const data = await apiFetch<HistoryResponse>(
-        `/api/check-ins/runs/history?page=${page}&limit=25`,
+        `/api/check-ins/runs/history?${params.toString()}`,
       );
       setRuns((data.runs ?? []).map(normalizeRun));
       setPagination(data.pagination);
@@ -303,27 +393,23 @@ export const CheckInHistoryPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [page, toast]);
+  }, [page, debouncedSearch, pagination.limit, toast]);
 
   useEffect(() => {
     loadHistory();
   }, [loadHistory]);
 
-  const filtered = runs.filter((run) => {
-    const q = searchTerm.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      run.checkIn?.name?.toLowerCase().includes(q) ||
-      run.team?.name?.toLowerCase().includes(q)
-    );
-  });
+  const counterLabel =
+    debouncedSearch.length > 0
+      ? `${pagination.total} matching run${pagination.total !== 1 ? 's' : ''}`
+      : `${pagination.total} historical run${pagination.total !== 1 ? 's' : ''}`;
 
   return (
     <TooltipProvider>
       <div className="space-y-6">
         <PageHeader
           title="Run History"
-          description="Completed standup runs — Slack threads and AI reports."
+          description="Real execution history for every Check-In run."
         >
           <Button variant="outline" asChild>
             <Link to="/checkins">
@@ -337,7 +423,7 @@ export const CheckInHistoryPage: React.FC = () => {
             <div className="relative w-full sm:max-w-md">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="Search by CheckIn or team..."
+                placeholder="Search by Check-In, team, status, or date..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="pl-9"
@@ -345,7 +431,7 @@ export const CheckInHistoryPage: React.FC = () => {
             </div>
             <p className="text-sm text-muted-foreground">
               <History className="mr-1.5 inline h-4 w-4" />
-              {pagination.total} historical run{pagination.total !== 1 ? 's' : ''}
+              {counterLabel}
             </p>
           </CardContent>
         </Card>
@@ -355,15 +441,15 @@ export const CheckInHistoryPage: React.FC = () => {
             <Loader2 className="mr-2 h-5 w-5 animate-spin" />
             Loading history...
           </div>
-        ) : filtered.length === 0 ? (
+        ) : runs.length === 0 ? (
           <Card>
             <CardContent className="py-20 text-center">
               <History className="mx-auto mb-3 h-10 w-10 text-muted-foreground/50" />
               <p className="font-medium text-foreground">No historical runs</p>
               <p className="mt-1 text-sm text-muted-foreground">
-                {searchTerm.trim()
+                {debouncedSearch
                   ? 'Try a different search term.'
-                  : 'Completed runs appear here. Active collection stays on the CheckIns page.'}
+                  : 'Runs appear here once a Check-In has started collecting responses.'}
               </p>
             </CardContent>
           </Card>
@@ -374,31 +460,50 @@ export const CheckInHistoryPage: React.FC = () => {
                 <thead>
                   <tr className="border-b border-border bg-secondary/40">
                     <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">CheckIn</th>
-                    <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Date</th>
+                    <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Team</th>
+                    <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Date &amp; Time</th>
                     <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Status</th>
                     <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Participants</th>
                     <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">AI Report</th>
                     <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Duration</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-muted-foreground w-12" />
+                    <th className="w-20 px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((run) => (
+                  {runs.map((run) => (
                     <tr key={run.id} className="border-b border-border/60 hover:bg-secondary/20">
                       <td className="px-4 py-3">
-                        <p className="font-medium">{run.checkIn?.name}</p>
-                        <p className="text-xs text-muted-foreground">{run.team?.name}</p>
+                        <p className="font-medium">{run.checkIn?.name ?? 'Unavailable'}</p>
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground">
+                        {run.team?.name ?? 'Unavailable'}
                       </td>
                       <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">
                         {formatStartedTime(run.startedAt, run.checkIn?.timezone)}
                       </td>
                       <td className="px-4 py-3">
-                        <Badge variant={run.status === 'completed' ? 'secondary' : 'success'}>
-                          {run.status === 'completed' ? 'Completed' : run.status}
-                        </Badge>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Badge variant={displayStatusVariant(run.displayStatus.code)}>
+                              {run.displayStatus.label}
+                            </Badge>
+                          </TooltipTrigger>
+                          <TooltipContent>{run.displayStatus.tooltip}</TooltipContent>
+                        </Tooltip>
                       </td>
                       <td className="px-4 py-3 tabular-nums">
-                        {run.participantsResponded}/{run.totalParticipants}
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="cursor-default">
+                              {formatParticipants(run.participantsResponded, run.totalParticipants)}
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {run.participantsResponded} of {run.totalParticipants} assigned participants submitted all required answers.
+                          </TooltipContent>
+                        </Tooltip>
                       </td>
                       <td className="px-4 py-3">
                         <Tooltip>
@@ -410,10 +515,10 @@ export const CheckInHistoryPage: React.FC = () => {
                           <TooltipContent>{run.reportStatus.tooltip}</TooltipContent>
                         </Tooltip>
                       </td>
-                      <td className="px-4 py-3 text-muted-foreground">
-                        {formatDuration(run.durationMinutes)}
+                      <td className="px-4 py-3 whitespace-nowrap text-muted-foreground">
+                        {formatDurationLabel(run)}
                       </td>
-                      <td className="px-4 py-3 text-right">
+                      <td className="w-20 px-2 py-3">
                         <RunActionsMenu run={run} onRefresh={loadHistory} />
                       </td>
                     </tr>

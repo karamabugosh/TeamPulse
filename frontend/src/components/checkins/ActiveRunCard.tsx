@@ -5,10 +5,10 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   EnrichedRun,
-  THREAD_STATUS_DOT,
   formatStartedTime,
   normalizeRun,
   reportStatusIcon,
+  threadStatusIcon,
 } from '@/lib/run-status';
 import { cn } from '@/lib/utils';
 
@@ -20,9 +20,10 @@ interface ActiveRunCardProps {
 export const ActiveRunCard: React.FC<ActiveRunCardProps> = ({ run: rawRun, compact = false }) => {
   const run = normalizeRun(rawRun);
   const isCollecting = run.status === 'collecting';
-  const threadDot = THREAD_STATUS_DOT[run.threadStatus.code as keyof typeof THREAD_STATUS_DOT] ?? '⚪';
+  const threadDot = threadStatusIcon(run.threadStatus.code);
   const reportIcon = reportStatusIcon(run.reportStatus.code);
-  const canOpenThread = run.threadStatus.code === 'active' && !!run.slackThreadUrl;
+  const canOpenThread =
+    ['active', 'waiting_for_responses'].includes(run.threadStatus.code) && !!run.slackThreadUrl;
 
   return (
     <div

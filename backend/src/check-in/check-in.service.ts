@@ -16,6 +16,11 @@ import { buildSlackArchiveUrl, buildSlackThreadUrl } from '../slack/slack-checki
 import { SlackService } from '../slack/slack.service';
 import { CreateCheckInDto } from './dto/create-check-in.dto';
 import { UpdateCheckInDto } from './dto/update-check-in.dto';
+import {
+  buildHistoryRunView,
+  matchesHistorySearch,
+  parseHistorySearch,
+} from './run-history.utils';
 
 @Injectable()
 export class CheckInService {
@@ -1275,24 +1280,10 @@ export class CheckInService {
           this.logger.warn(
             `Failed to enrich run ${run.id}: ${message}`,
           );
-          return {
+          return this.buildFallbackHistoryRun({
             ...run,
-            participantsResponded: run.submissions?.filter(
-              (s: { status: string }) => s.status === 'completed',
-            ).length ?? 0,
-            totalParticipants: run.submissions?.length ?? 0,
-            threadStatus: this.resolveThreadStatus(run),
-            reportStatus: this.resolveReportStatus(
-              run,
-              run.submissions?.filter(
-                (s: { status: string }) => s.status === 'completed',
-              ).length ?? 0,
-              run.submissions?.length ?? 0,
-            ),
             slackThreadUrl: null,
-            durationMinutes: null,
-            aiReport: run.aiDigest ?? null,
-          };
+          });
         }
       }),
     );
@@ -1302,28 +1293,64 @@ export class CheckInService {
     page?: number;
     limit?: number;
     checkInId?: string;
+    search?: string;
   }) {
     const page = Math.max(1, options?.page ?? 1);
     const limit = Math.min(100, Math.max(1, options?.limit ?? 25));
     const skip = (page - 1) * limit;
+    const search = options?.search?.trim();
+    const parsedSearch = search ? parseHistorySearch(search) : {};
 
     const where: Prisma.StandupRunWhereInput = {
-      status: 'completed',
       checkInId: options?.checkInId
         ? options.checkInId
         : { not: null },
+      ...(parsedSearch.text
+        ? {
+            OR: [
+              {
+                checkIn: {
+                  name: { contains: parsedSearch.text, mode: 'insensitive' },
+                },
+              },
+              {
+                team: {
+                  name: { contains: parsedSearch.text, mode: 'insensitive' },
+                },
+              },
+            ],
+          }
+        : {}),
+      ...(parsedSearch.date
+        ? {
+            startedAt: {
+              gte: new Date(
+                parsedSearch.date.getFullYear(),
+                parsedSearch.date.getMonth(),
+                parsedSearch.date.getDate(),
+              ),
+              lt: new Date(
+                parsedSearch.date.getFullYear(),
+                parsedSearch.date.getMonth(),
+                parsedSearch.date.getDate() + 1,
+              ),
+            },
+          }
+        : {}),
+      ...(parsedSearch.status === 'in_progress'
+        ? { status: 'collecting' }
+        : parsedSearch.status === 'failed'
+          ? { status: 'failed' }
+          : parsedSearch.status === 'cancelled'
+            ? { status: 'cancelled' }
+            : {}),
     };
 
-    const [runs, total] = await Promise.all([
-      this.prisma.standupRun.findMany({
-        where,
-        include: this.runIncludeRelations,
-        orderBy: { startedAt: 'desc' },
-        skip,
-        take: limit,
-      }),
-      this.prisma.standupRun.count({ where }),
-    ]);
+    const runs = await this.prisma.standupRun.findMany({
+      where,
+      include: this.runIncludeRelations,
+      orderBy: { startedAt: 'desc' },
+    });
 
     const enriched = await Promise.all(
       runs.map(async (run) => {
@@ -1335,27 +1362,25 @@ export class CheckInService {
           this.logger.warn(
             `Failed to enrich history run ${run.id}: ${message}`,
           );
-          return {
-            ...run,
-            participantsResponded: 0,
-            totalParticipants: run.submissions?.length ?? 0,
-            threadStatus: this.resolveThreadStatus(run),
-            reportStatus: this.resolveReportStatus(run, 0, run.submissions?.length ?? 0),
-            slackThreadUrl: null,
-            durationMinutes: null,
-            aiReport: run.aiDigest ?? null,
-          };
+          return this.buildFallbackHistoryRun(run);
         }
       }),
     );
 
+    const filtered = search
+      ? enriched.filter((run) => matchesHistorySearch(run, search))
+      : enriched;
+
+    const total = filtered.length;
+    const paginatedRuns = filtered.slice(skip, skip + limit);
+
     return {
-      runs: enriched,
+      runs: paginatedRuns,
       pagination: {
         page,
         limit,
         total,
-        totalPages: Math.ceil(total / limit),
+        totalPages: Math.max(1, Math.ceil(total / limit)),
       },
     };
   }
@@ -1368,6 +1393,16 @@ export class CheckInService {
         timezone: true,
         updatesChannelId: true,
         reportTriggerMode: true,
+        reportTimeoutMinutes: true,
+        questions: {
+          where: { isActive: true },
+          select: {
+            id: true,
+            isRequired: true,
+            isActive: true,
+          },
+          orderBy: { order: 'asc' as const },
+        },
       },
     },
     team: {
@@ -1391,6 +1426,11 @@ export class CheckInService {
             slackUserId: true,
           },
         },
+        answers: {
+          select: {
+            questionId: true,
+          },
+        },
       },
     },
     aiDigest: {
@@ -1399,6 +1439,7 @@ export class CheckInService {
         generatedAt: true,
         source: true,
         summary: true,
+        generationError: true,
       },
     },
     _count: {
@@ -1406,22 +1447,23 @@ export class CheckInService {
     },
   };
 
+  private buildFallbackHistoryRun(run: any) {
+    const view = buildHistoryRunView(run);
+    return {
+      ...run,
+      ...view,
+      slackThreadUrl: run.slackThreadUrl ?? null,
+      aiReport: run.aiDigest ?? null,
+    };
+  }
+
   private async enrichRun(run: any) {
-    const participantsResponded = run.submissions.filter(
-      (s: { status: string }) => s.status === 'completed',
-    ).length;
-    const totalParticipants = run.submissions.length;
     const slackWorkspaceId =
       run.team?.workspace?.slackWorkspaceId ||
       process.env.SLACK_TEAM_ID ||
       '';
 
-    const threadStatus = this.resolveThreadStatus(run);
-    const reportStatus = this.resolveReportStatus(
-      run,
-      participantsResponded,
-      totalParticipants,
-    );
+    const view = buildHistoryRunView(run);
 
     let slackThreadUrl: string | null = run.slackThreadUrl ?? null;
     if (!slackThreadUrl && run.slackChannelId && run.slackThreadTs) {
@@ -1433,189 +1475,20 @@ export class CheckInService {
       );
     }
 
-    const durationMinutes =
-      run.completedAt && run.startedAt
-        ? Math.round(
-            (new Date(run.completedAt).getTime() -
-              new Date(run.startedAt).getTime()) /
-              60000,
-          )
-        : null;
-
     return {
       ...run,
-      participantsResponded,
-      totalParticipants,
-      threadStatus,
-      reportStatus,
+      participantsResponded: view.participantsResponded,
+      totalParticipants: view.totalParticipants,
+      displayStatus: view.displayStatus,
+      threadStatus: view.threadStatus,
+      reportStatus: view.reportStatus,
+      durationMinutes: view.durationMinutes,
+      durationLabel: view.durationLabel,
+      durationKind: view.durationKind,
+      durationDefinition: view.durationDefinition,
       slackThreadUrl,
-      durationMinutes,
       aiReport: run.aiDigest ?? null,
     };
-  }
-
-  private resolveThreadStatus(run: {
-    slackChannelId?: string | null;
-    slackThreadTs?: string | null;
-    startedAt: Date;
-    status: string;
-  }): {
-    code: 'active' | 'creating' | 'failed' | 'not_started';
-    label: string;
-    tooltip: string;
-  } {
-    if (run.slackThreadTs && run.slackChannelId) {
-      return {
-        code: 'active',
-        label: 'Thread Active',
-        tooltip: 'Slack thread is live. Participant updates and reports post here.',
-      };
-    }
-
-    const ageMs = Date.now() - new Date(run.startedAt).getTime();
-    const fiveMinutes = 5 * 60 * 1000;
-
-    if (run.status === 'collecting' && ageMs < 30_000) {
-      return {
-        code: 'creating',
-        label: 'Creating Thread...',
-        tooltip: 'Posting the parent message to the updates channel.',
-      };
-    }
-
-    if (ageMs < fiveMinutes) {
-      return {
-        code: 'creating',
-        label: 'Creating Thread...',
-        tooltip: 'Waiting for Slack to confirm the thread anchor.',
-      };
-    }
-
-    if (run.status === 'collecting' || ageMs >= fiveMinutes) {
-      return {
-        code: 'failed',
-        label: 'Failed to Create',
-        tooltip:
-          'Could not create a Slack thread. Check updates channel configuration and bot permissions.',
-      };
-    }
-
-    return {
-      code: 'not_started',
-      label: 'Not Started',
-      tooltip: 'This run has not posted a Slack thread yet.',
-    };
-  }
-
-  private resolveReportStatus(
-    run: {
-      status: string;
-      reportStatus?: string | null;
-      reportGeneratedAt?: Date | null;
-      reportDueAt?: Date | null;
-      checkIn?: { reportTriggerMode?: string | null } | null;
-    },
-    participantsResponded: number,
-    totalParticipants: number,
-  ): {
-    code:
-      | 'waiting'
-      | 'generating'
-      | 'ready'
-      | 'posting'
-      | 'posted'
-      | 'generation_failed'
-      | 'posting_failed';
-    label: string;
-    tooltip: string;
-  } {
-    const statusMap: Record<
-      string,
-      { code: 'waiting' | 'generating' | 'ready' | 'posting' | 'posted' | 'generation_failed' | 'posting_failed'; label: string; tooltip: string }
-    > = {
-      waiting_for_responses: {
-        code: 'waiting',
-        label: 'Not Generated',
-        tooltip: 'Collecting standup answers before the AI report can be generated.',
-      },
-      generating: {
-        code: 'generating',
-        label: 'Generating',
-        tooltip: 'AI is analyzing responses and building the report.',
-      },
-      generated: {
-        code: 'ready',
-        label: 'Generated',
-        tooltip: 'The AI report was generated and is ready to post to Slack.',
-      },
-      posting: {
-        code: 'posting',
-        label: 'Generated',
-        tooltip: 'Delivering the report into the CheckIn Slack thread.',
-      },
-      completed: {
-        code: 'posted',
-        label: 'Generated',
-        tooltip: 'AI report was generated and posted in the Slack thread.',
-      },
-      generation_failed: {
-        code: 'generation_failed',
-        label: 'Failed',
-        tooltip: 'AI report generation failed. The system will retry automatically.',
-      },
-      posting_failed: {
-        code: 'posting_failed',
-        label: 'Failed',
-        tooltip: 'Report was saved but Slack posting failed. The system will retry automatically.',
-      },
-    };
-
-    if (run.reportStatus && statusMap[run.reportStatus]) {
-      if (run.reportStatus === 'waiting_for_responses') {
-        const allAnswered =
-          totalParticipants > 0 &&
-          participantsResponded === totalParticipants;
-
-        if (
-          allAnswered &&
-          run.checkIn?.reportTriggerMode === 'all_answered'
-        ) {
-          return statusMap.generating;
-        }
-
-        if (
-          run.reportDueAt &&
-          run.checkIn?.reportTriggerMode === 'timeout' &&
-          run.reportDueAt <= new Date()
-        ) {
-          return statusMap.generating;
-        }
-      }
-
-      return statusMap[run.reportStatus];
-    }
-
-    if (run.reportGeneratedAt) {
-      return statusMap.completed;
-    }
-
-    const allAnswered =
-      totalParticipants > 0 &&
-      participantsResponded === totalParticipants;
-
-    if (allAnswered && run.checkIn?.reportTriggerMode === 'all_answered') {
-      return statusMap.generating;
-    }
-
-    if (
-      run.reportDueAt &&
-      run.checkIn?.reportTriggerMode === 'timeout' &&
-      run.reportDueAt <= new Date()
-    ) {
-      return statusMap.generating;
-    }
-
-    return statusMap.waiting_for_responses;
   }
 
   private async resolveSlackThreadUrl(

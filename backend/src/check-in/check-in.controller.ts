@@ -47,11 +47,13 @@ export class CheckInController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('checkInId') checkInId?: string,
+    @Query('search') search?: string,
   ) {
     return this.checkInService.getRunHistory({
       page: page ? parseInt(page, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
       checkInId: checkInId?.trim() || undefined,
+      search: search?.trim() || undefined,
     });
   }
 
