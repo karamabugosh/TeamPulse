@@ -43,6 +43,7 @@ model Workspace {
   teams            Team[]
   inboundEvents    InboundEvent[]
   jiraIntegrations JiraIntegration[]
+  jiraOAuthStates  JiraOAuthState[]
 }
 
 model User {
@@ -62,6 +63,7 @@ model User {
   conversationStates  ConversationState[]
   threadUpdates       StandupThreadUpdate[]
   jiraConnections     JiraUserConnection[]
+  jiraOAuthStates     JiraOAuthState[]
   focusedSubmission   StandupSubmission? @relation("FocusedSubmission", fields: [focusedSubmissionId], references: [id], onDelete: SetNull)
 }
 
@@ -124,7 +126,7 @@ model CheckIn {
   reminderOnSlackActive     Boolean @default(false)
 
   reportCron           String?
-  reportTriggerMode    String  @default("scheduled")
+  reportTriggerMode    String @default("scheduled")
   reportTimeoutMinutes Int?
 
   publishStatus   String  @default("published")
@@ -229,7 +231,7 @@ model StandupSubmission {
   id               String    @id @default(uuid())
   runId            String
   userId           String
-  status           String    @default("pending")
+  status            String    @default("pending")
   startedAt        DateTime?
   completedAt      DateTime?
   slackDmChannelId String?
@@ -367,8 +369,8 @@ model JiraIntegration {
 
   cacheTtlMinutes Int @default(15)
 
-  health              JiraIntegrationHealth @default(NOT_CONFIGURED)
-  lastHealthCheckAt    DateTime?
+  health               JiraIntegrationHealth @default(NOT_CONFIGURED)
+  lastHealthCheckAt     DateTime?
   lastSuccessfulSyncAt DateTime?
 
   createdAt DateTime @default(now())
@@ -461,4 +463,23 @@ model JiraUserConnection {
   @@unique([jiraIntegrationId, jiraAccountId])
   @@index([jiraIntegrationId, status])
   @@index([status])
+}
+
+model JiraOAuthState {
+  id          String @id @default(uuid())
+  workspaceId String
+  userId      String
+  stateHash   String @unique
+
+  expiresAt DateTime
+  consumedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, expiresAt])
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
+  @@index([consumedAt])
 }
