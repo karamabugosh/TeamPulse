@@ -7,7 +7,7 @@
     "start": "ts-node src/main.ts",
     "start:dev": "nest start --watch",
     "build": "nest build",
-    "test:jira-config": "node --test -r ts-node/register src/jira/jira-config.service.spec.ts src/jira/jira-team-config.service.spec.ts",
+    "test:jira-config": "node --test -r ts-node/register src/jira/jira-config.service.spec.ts src/jira/jira-team-config.service.spec.ts src/jira/jira-question-config.service.spec.ts",
     "seed": "prisma db seed"
   },
   "prisma": {
