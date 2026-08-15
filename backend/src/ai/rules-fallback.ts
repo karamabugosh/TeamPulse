@@ -94,7 +94,7 @@ export function runRulesFallback(
             actionItems: [],
             participantUpdates: responses.map((response) => ({
               slackUserId: response.userId,
-              displayName: response.userId,
+              displayName: response.displayName ?? response.userId,
               answers: response.answers.map((answer) => ({
                 question: answer.questionText,
                 answer: answer.text,

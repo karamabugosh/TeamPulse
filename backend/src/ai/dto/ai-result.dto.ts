@@ -91,6 +91,7 @@ export interface ReportSections {
 
 export interface RawResponseForAnalysis {
   userId: string;
+  displayName?: string;
   answers: {
     questionId: string;
     questionText: string;

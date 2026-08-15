@@ -215,6 +215,7 @@ export function buildUserPrompt(
   const filteredResponses = responses
     .map((response) => ({
       userId: response.userId,
+      displayName: response.displayName ?? response.userId,
       answers: response.answers
         .filter(
           (answer) =>

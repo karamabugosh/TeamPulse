@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -119,37 +120,46 @@ export class CheckInRunService {
       },
     } as const;
 
-    if (triggerSource === 'scheduler') {
-      const activeRun = await this.prisma.standupRun.findFirst({
-        where: {
-          checkInId: checkIn.id,
-          status: 'collecting',
-        },
-        include: runInclude,
-        orderBy: { startedAt: 'desc' },
-      });
+    /*
+     * A CheckIn may have many participant submissions, but it must have
+     * only one collecting run at a time. Starting a second run would
+     * supersede the first one and make its Slack threads inactive.
+     */
+    const activeRun = await this.prisma.standupRun.findFirst({
+      where: {
+        checkInId: checkIn.id,
+        status: 'collecting',
+      },
+      include: runInclude,
+      orderBy: { startedAt: 'desc' },
+    });
 
-      if (activeRun) {
-        this.logger.log(
-          `Active collecting run ${activeRun.id} already exists for "${checkIn.name}" — scheduler skipping duplicate.`,
+    if (activeRun) {
+      if (triggerSource !== 'scheduler') {
+        throw new ConflictException(
+          `CheckIn "${checkIn.name}" already has an active run (${activeRun.id}). Complete or cancel it before starting another.`,
         );
-
-        return {
-          status: 'existing',
-          checkInId: checkIn.id,
-          checkInName: checkIn.name,
-          teamId: checkIn.team.id,
-          teamName: checkIn.team.name,
-          participantCount: activeParticipants.length,
-          totalQuestions: checkIn.questions.length,
-          createdSubmissionCount: activeRun.submissions.length,
-          skippedParticipantCount: 0,
-          queuedParticipantCount: 0,
-          skippedParticipants: [],
-          queuedParticipants: [],
-          run: activeRun,
-        };
       }
+
+      this.logger.log(
+        `Active collecting run ${activeRun.id} already exists for "${checkIn.name}" — scheduler skipping duplicate.`,
+      );
+
+      return {
+        status: 'existing',
+        checkInId: checkIn.id,
+        checkInName: checkIn.name,
+        teamId: checkIn.team.id,
+        teamName: checkIn.team.name,
+        participantCount: activeParticipants.length,
+        totalQuestions: checkIn.questions.length,
+        createdSubmissionCount: activeRun.submissions.length,
+        skippedParticipantCount: 0,
+        queuedParticipantCount: 0,
+        skippedParticipants: [],
+        queuedParticipants: [],
+        run: activeRun,
+      };
     }
 
     /*

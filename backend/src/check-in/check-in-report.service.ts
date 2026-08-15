@@ -444,12 +444,6 @@ export class CheckInReportService implements OnApplicationBootstrap {
               ],
             },
           },
-          {
-            reportStatus: 'generation_failed',
-          },
-          {
-            reportStatus: 'posting_failed',
-          },
         ],
       },
       orderBy: { reportDueAt: 'asc' },
@@ -463,11 +457,15 @@ export class CheckInReportService implements OnApplicationBootstrap {
     for (const dueRun of dueRuns) {
       if (!dueRun.checkInId) continue;
 
+      const completed = dueRun.submissions.filter(
+        (submission) => submission.status === 'completed',
+      ).length;
+      if (completed === 0) {
+        continue;
+      }
+
       if (dueRun.checkIn?.reportTriggerMode === 'all_answered') {
         const total = dueRun.submissions.length;
-        const completed = dueRun.submissions.filter(
-          (submission) => submission.status === 'completed',
-        ).length;
         if (total === 0 || completed < total) {
           continue;
         }
@@ -608,6 +606,7 @@ export class CheckInReportService implements OnApplicationBootstrap {
       )
       .map((submission) => ({
         userId: submission.user.slackUserId,
+        displayName: submission.user.slackDisplayName,
         answers: submission.answers.map((answer) => {
           const enriched = enrichAnswerForAnalysis({
             questionText: answer.question.question,
@@ -631,6 +630,12 @@ export class CheckInReportService implements OnApplicationBootstrap {
     this.appendAdditionalUpdatesToResponses(
       aiResponses,
       additionalUpdatesByUser,
+      new Map(
+        submissions.map((submission) => [
+          submission.user.slackUserId,
+          submission.user.slackDisplayName,
+        ]),
+      ),
     );
 
     let lastError: unknown = null;
@@ -716,12 +721,17 @@ export class CheckInReportService implements OnApplicationBootstrap {
   private appendAdditionalUpdatesToResponses(
     responses: RawResponseForAnalysis[],
     additionalUpdatesByUser: Map<string, string[]>,
+    displayNameByUserId: Map<string, string>,
   ): void {
     for (const [slackUserId, texts] of additionalUpdatesByUser.entries()) {
       let response = responses.find((item) => item.userId === slackUserId);
 
       if (!response) {
-        response = { userId: slackUserId, answers: [] };
+        response = {
+          userId: slackUserId,
+          displayName: displayNameByUserId.get(slackUserId) ?? slackUserId,
+          answers: [],
+        };
         responses.push(response);
       }
 
@@ -1271,6 +1281,33 @@ export class CheckInReportService implements OnApplicationBootstrap {
     }>,
     additionalUpdatesByUser: Map<string, string[]> = new Map(),
   ): AiDigestResult {
+    const displayNameByUserId = new Map(
+      submissions.map((submission) => [
+        submission.user.slackUserId,
+        submission.user.slackDisplayName,
+      ]),
+    );
+
+    const replaceParticipantIds = (text: string): string => {
+      let normalized = text;
+
+      for (const [slackUserId, displayName] of displayNameByUserId.entries()) {
+        normalized = normalized.split(slackUserId).join(displayName);
+      }
+
+      return normalized;
+    };
+
+    const normalizeNamedSections = (
+      sections: typeof digest.reportSections.namedBlockers,
+    ) =>
+      sections?.map((section) => ({
+        displayName:
+          displayNameByUserId.get(section.displayName) ??
+          replaceParticipantIds(section.displayName),
+        items: section.items.map(replaceParticipantIds),
+      }));
+
     const participantUpdates = submissions
       .filter(
         (submission) =>
@@ -1318,15 +1355,46 @@ export class CheckInReportService implements OnApplicationBootstrap {
 
     return {
       ...digest,
+      summary: replaceParticipantIds(digest.summary),
+      blockers: digest.blockers.map((blocker) => ({
+        ...blocker,
+        description: replaceParticipantIds(blocker.description),
+        dependency: blocker.dependency
+          ? replaceParticipantIds(blocker.dependency)
+          : null,
+      })),
+      themes: digest.themes.map((theme) => ({
+        ...theme,
+        theme: replaceParticipantIds(theme.theme),
+        summary: replaceParticipantIds(theme.summary),
+      })),
       reportSections: {
         ...digest.reportSections,
-        participantUpdates:
-          digest.reportSections.participantUpdates.length > 0
-            ? digest.reportSections.participantUpdates
-            : participantUpdates,
-        overallProgress:
-          digest.reportSections.overallProgress ||
-          digest.summary,
+        keyAccomplishments:
+          digest.reportSections.keyAccomplishments.map(replaceParticipantIds),
+        risks: digest.reportSections.risks.map(replaceParticipantIds),
+        aiInsights:
+          digest.reportSections.aiInsights.map(replaceParticipantIds),
+        actionItems:
+          digest.reportSections.actionItems.map(replaceParticipantIds),
+        participantUpdates,
+        overallProgress: replaceParticipantIds(
+          digest.reportSections.overallProgress || digest.summary,
+        ),
+        namedBlockers: normalizeNamedSections(
+          digest.reportSections.namedBlockers,
+        ),
+        helpRequests: normalizeNamedSections(
+          digest.reportSections.helpRequests,
+        ),
+        namedRisks: normalizeNamedSections(
+          digest.reportSections.namedRisks,
+        ),
+        namedAccomplishments: normalizeNamedSections(
+          digest.reportSections.namedAccomplishments,
+        ),
+        teamProgress:
+          digest.reportSections.teamProgress?.map(replaceParticipantIds),
       },
     };
   }
