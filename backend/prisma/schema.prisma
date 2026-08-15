@@ -14,6 +14,22 @@ enum QuestionType {
   YES_NO_MAYBE
   MULTIPLE_CHOICE
   SCALE_1_5
+  ISSUE_REF
+}
+
+enum JiraConnectionStatus {
+  PENDING
+  CONNECTED
+  EXPIRED
+  REVOKED
+  ERROR
+}
+
+enum JiraIntegrationHealth {
+  NOT_CONFIGURED
+  HEALTHY
+  DEGRADED
+  UNAVAILABLE
 }
 
 model Workspace {
@@ -23,9 +39,10 @@ model Workspace {
   botToken           String
   installedAt        DateTime @default(now())
 
-  users         User[]
-  teams         Team[]
-  inboundEvents InboundEvent[]
+  users            User[]
+  teams            Team[]
+  inboundEvents    InboundEvent[]
+  jiraIntegrations JiraIntegration[]
 }
 
 model User {
@@ -44,6 +61,7 @@ model User {
   submissions         StandupSubmission[]
   conversationStates  ConversationState[]
   threadUpdates       StandupThreadUpdate[]
+  jiraConnections     JiraUserConnection[]
   focusedSubmission   StandupSubmission? @relation("FocusedSubmission", fields: [focusedSubmissionId], references: [id], onDelete: SetNull)
 }
 
@@ -58,11 +76,12 @@ model Team {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  workspace   Workspace    @relation(fields: [workspaceId], references: [id])
+  workspace   Workspace       @relation(fields: [workspaceId], references: [id])
   teamMembers TeamMember[]
   standupRuns StandupRun[]
   aiDigests   AiDigest[]
   checkIns    CheckIn[]
+  jiraConfig  TeamJiraConfig?
 
   @@index([workspaceId])
 }
@@ -85,16 +104,16 @@ model TeamMember {
 }
 
 model CheckIn {
-  id          String  @id @default(uuid())
-  teamId      String
-  name        String
-  description String?
+  id           String  @id @default(uuid())
+  teamId       String
+  name         String
+  description  String?
   introMessage String?
   outroMessage String?
-  enabled     Boolean @default(true)
+  enabled      Boolean @default(true)
 
-  timezone       String
-  collectionCron String
+  timezone         String
+  collectionCron   String
   updatesChannelId String?
 
   reminderEnabled           Boolean @default(true)
@@ -139,7 +158,7 @@ model CheckInParticipant {
 }
 
 model Question {
-  id        String @id @default(uuid())
+  id        String  @id @default(uuid())
   checkInId String?
   question  String
   order     Int
@@ -152,22 +171,23 @@ model Question {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  checkIn            CheckIn?             @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+  checkIn            CheckIn?            @relation(fields: [checkInId], references: [id], onDelete: Cascade)
   answers            Answer[]
   conversationStates ConversationState[]
+  jiraConfig         JiraQuestionConfig?
 
   @@index([checkInId])
   @@index([isActive])
 }
 
 model StandupRun {
-  id            String   @id @default(uuid())
+  id            String    @id @default(uuid())
   teamId        String
   checkInId     String?
   scheduledFor  DateTime
-  status        String   @default("collecting")
-  triggerSource String   @default("scheduler")
-  startedAt     DateTime @default(now())
+  status        String    @default("collecting")
+  triggerSource String    @default("scheduler")
+  startedAt     DateTime  @default(now())
   completedAt   DateTime?
 
   reminderDueAt  DateTime?
@@ -175,23 +195,23 @@ model StandupRun {
   reminderCount  Int       @default(0)
   lastReminderAt DateTime?
 
-  slackChannelId      String?
-  slackThreadTs       String?
-  slackRootMessageTs  String?
-  slackThreadUrl      String?
-  threadReplyCount    Int @default(0)
+  slackChannelId     String?
+  slackThreadTs      String?
+  slackRootMessageTs String?
+  slackThreadUrl     String?
+  threadReplyCount   Int     @default(0)
 
   reportDueAt       DateTime?
   reportGeneratedAt DateTime?
-  reportStatus      String   @default("waiting_for_responses")
+  reportStatus      String    @default("waiting_for_responses")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  team        Team                @relation(fields: [teamId], references: [id])
-  checkIn     CheckIn?            @relation(fields: [checkInId], references: [id])
-  submissions StandupSubmission[]
-  aiDigest    AiDigest?
+  team          Team                  @relation(fields: [teamId], references: [id])
+  checkIn       CheckIn?              @relation(fields: [checkInId], references: [id])
+  submissions   StandupSubmission[]
+  aiDigest      AiDigest?
   threadUpdates StandupThreadUpdate[]
 
   @@unique([checkInId, scheduledFor])
@@ -206,23 +226,23 @@ model StandupRun {
 }
 
 model StandupSubmission {
-  id          String   @id @default(uuid())
-  runId       String
-  userId      String
-  status      String   @default("pending")
-  startedAt   DateTime?
-  completedAt DateTime?
+  id               String    @id @default(uuid())
+  runId            String
+  userId           String
+  status           String    @default("pending")
+  startedAt        DateTime?
+  completedAt      DateTime?
   slackDmChannelId String?
   slackDmThreadTs  String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  run               StandupRun         @relation(fields: [runId], references: [id])
-  user              User               @relation(fields: [userId], references: [id])
+  run               StandupRun            @relation(fields: [runId], references: [id])
+  user              User                  @relation(fields: [userId], references: [id])
   answers           Answer[]
   conversationState ConversationState?
   threadUpdates     StandupThreadUpdate[]
-  focusedByUser     User?              @relation("FocusedSubmission")
+  focusedByUser     User?                 @relation("FocusedSubmission")
 
   @@unique([runId, userId])
   @@index([runId])
@@ -270,20 +290,20 @@ model ConversationState {
 }
 
 model AiDigest {
-  id               String   @id @default(uuid())
-  teamId           String
-  runId            String   @unique
-  generatedAt      DateTime @default(now())
-  source           String
-  summary          String
-  blockers         Json
-  themes           Json
-  reportSections   Json?
-  slackReportText  String?
+  id                String   @id @default(uuid())
+  teamId            String
+  runId             String   @unique
+  generatedAt       DateTime @default(now())
+  source            String
+  summary           String
+  blockers          Json
+  themes            Json
+  reportSections    Json?
+  slackReportText   String?
   nonResponderNames Json?
   slackReportBlocks Json?
-  generationError  String?
-  createdAt        DateTime @default(now())
+  generationError   String?
+  createdAt         DateTime @default(now())
 
   team Team       @relation(fields: [teamId], references: [id])
   run  StandupRun @relation(fields: [runId], references: [id])
@@ -311,16 +331,16 @@ model StandupThreadUpdate {
 }
 
 model InboundEvent {
-  id              String   @id @default(uuid())
+  id              String    @id @default(uuid())
   workspaceId     String
-  provider        String   @default("slack")
-  idempotencyKey  String   @unique
+  provider        String    @default("slack")
+  idempotencyKey  String    @unique
   externalEventId String?
   eventType       String
   payloadHash     String?
-  status          String   @default("received")
+  status          String    @default("received")
   errorMessage    String?
-  receivedAt      DateTime @default(now())
+  receivedAt      DateTime  @default(now())
   processedAt     DateTime?
 
   workspace Workspace @relation(fields: [workspaceId], references: [id])
@@ -329,4 +349,116 @@ model InboundEvent {
   @@index([externalEventId])
   @@index([status])
   @@index([receivedAt])
+}
+
+model JiraIntegration {
+  id          String @id @default(uuid())
+  workspaceId String
+
+  cloudId  String
+  siteUrl  String
+  siteName String?
+
+  enabled   Boolean @default(true)
+  isDefault Boolean @default(false)
+
+  defaultProjectKey  String?
+  allowedProjectKeys String[] @default([])
+
+  cacheTtlMinutes Int @default(15)
+
+  health              JiraIntegrationHealth @default(NOT_CONFIGURED)
+  lastHealthCheckAt    DateTime?
+  lastSuccessfulSyncAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  teamConfigs     TeamJiraConfig[]
+  userConnections JiraUserConnection[]
+
+  @@unique([workspaceId, cloudId])
+  @@index([workspaceId])
+  @@index([workspaceId, enabled])
+  @@index([workspaceId, isDefault])
+  @@index([health])
+}
+
+model TeamJiraConfig {
+  id                String  @id @default(uuid())
+  teamId            String  @unique
+  jiraIntegrationId String?
+
+  enabled                Boolean @default(false)
+  issuePickerEnabled     Boolean @default(true)
+  activityPrefillEnabled Boolean @default(false)
+
+  commentProposalEnabled     Boolean @default(true)
+  transitionProposalEnabled  Boolean @default(true)
+  blockerProposalEnabled     Boolean @default(true)
+  issueLinkProposalEnabled   Boolean @default(true)
+  createIssueProposalEnabled Boolean @default(false)
+
+  defaultProjectKey String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  team            Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  jiraIntegration JiraIntegration? @relation(fields: [jiraIntegrationId], references: [id], onDelete: SetNull)
+
+  @@index([jiraIntegrationId])
+  @@index([enabled])
+}
+
+model JiraQuestionConfig {
+  id         String @id @default(uuid())
+  questionId String @unique
+
+  allowMultiple Boolean @default(false)
+  maxSelections Int     @default(1)
+
+  allowedProjectKeys String[] @default([])
+
+  plaintextFallbackEnabled Boolean @default(true)
+  actionProposalEnabled    Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([actionProposalEnabled])
+}
+
+model JiraUserConnection {
+  id                String @id @default(uuid())
+  userId            String
+  jiraIntegrationId String
+
+  jiraAccountId   String
+  jiraDisplayName String?
+  jiraEmail       String?
+
+  accessTokenCiphertext  String
+  refreshTokenCiphertext String
+  grantedScopes          String[] @default([])
+  accessTokenExpiresAt   DateTime
+
+  status          JiraConnectionStatus @default(CONNECTED)
+  lastValidatedAt DateTime?
+  lastUsedAt      DateTime?
+  disconnectedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jiraIntegration JiraIntegration @relation(fields: [jiraIntegrationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, jiraIntegrationId])
+  @@unique([jiraIntegrationId, jiraAccountId])
+  @@index([jiraIntegrationId, status])
+  @@index([status])
 }
