@@ -5,6 +5,7 @@ import { JiraQuestionConfigService } from './jira-question-config.service';
 import { JiraTokenCryptoService } from './jira-token-crypto.service';
 import { JiraOAuthStateService } from './jira-oauth-state.service';
 import { JiraOAuthClientService } from './jira-oauth-client.service';
+import { JiraOAuthService } from './jira-oauth.service';
 
 @Module({
   providers: [
@@ -14,6 +15,7 @@ import { JiraOAuthClientService } from './jira-oauth-client.service';
     JiraTokenCryptoService,
     JiraOAuthStateService,
     JiraOAuthClientService,
+    JiraOAuthService,
   ],
   exports: [
     JiraConfigService,
@@ -22,6 +24,7 @@ import { JiraOAuthClientService } from './jira-oauth-client.service';
     JiraTokenCryptoService,
     JiraOAuthStateService,
     JiraOAuthClientService,
+    JiraOAuthService,
   ],
 })
 export class JiraModule {}

@@ -7,7 +7,7 @@
     "start": "ts-node src/main.ts",
     "start:dev": "nest start --watch",
     "build": "nest build",
-    "test:jira": "node --test -r ts-node/register src/jira/jira-config.service.spec.ts src/jira/jira-team-config.service.spec.ts src/jira/jira-question-config.service.spec.ts src/jira/jira-token-crypto.service.spec.ts src/jira/jira-oauth-state.service.spec.ts src/jira/jira-oauth-client.service.spec.ts",
+    "test:jira": "node --test -r ts-node/register src/jira/jira-config.service.spec.ts src/jira/jira-team-config.service.spec.ts src/jira/jira-question-config.service.spec.ts src/jira/jira-token-crypto.service.spec.ts src/jira/jira-oauth-state.service.spec.ts src/jira/jira-oauth-client.service.spec.ts src/jira/jira-oauth.service.spec.ts",
     "seed": "prisma db seed"
   },
   "prisma": {
