@@ -32,6 +32,13 @@ enum JiraIntegrationHealth {
   UNAVAILABLE
 }
 
+enum JiraIssueLinkSource {
+  USER_SELECTED
+  EXPLICIT_KEY
+  AI_SUGGESTED
+  ACTIVITY_PREFILL
+}
+
 model Workspace {
   id                 String   @id @default(uuid())
   slackWorkspaceId   String   @unique
@@ -55,8 +62,8 @@ model User {
   timezone         String?
   createdAt        DateTime @default(now())
 
-  focusedSubmissionId String?            @unique
-  workspace           Workspace          @relation(fields: [workspaceId], references: [id])
+  focusedSubmissionId String?               @unique
+  workspace           Workspace             @relation(fields: [workspaceId], references: [id])
   teamMembers         TeamMember[]
   answers             Answer[]
   submissions         StandupSubmission[]
@@ -64,7 +71,7 @@ model User {
   threadUpdates       StandupThreadUpdate[]
   jiraConnections     JiraUserConnection[]
   jiraOAuthStates     JiraOAuthState[]
-  focusedSubmission   StandupSubmission? @relation("FocusedSubmission", fields: [focusedSubmissionId], references: [id], onDelete: SetNull)
+  focusedSubmission   StandupSubmission?    @relation("FocusedSubmission", fields: [focusedSubmissionId], references: [id], onDelete: SetNull)
 }
 
 model Team {
@@ -126,7 +133,7 @@ model CheckIn {
   reminderOnSlackActive     Boolean @default(false)
 
   reportCron           String?
-  reportTriggerMode    String @default("scheduled")
+  reportTriggerMode    String  @default("scheduled")
   reportTimeoutMinutes Int?
 
   publishStatus   String  @default("published")
@@ -231,7 +238,7 @@ model StandupSubmission {
   id               String    @id @default(uuid())
   runId            String
   userId           String
-  status            String    @default("pending")
+  status           String    @default("pending")
   startedAt        DateTime?
   completedAt      DateTime?
   slackDmChannelId String?
@@ -263,9 +270,10 @@ model Answer {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  user       User               @relation(fields: [userId], references: [id])
-  question   Question           @relation(fields: [questionId], references: [id])
-  submission StandupSubmission? @relation(fields: [submissionId], references: [id])
+  user           User                  @relation(fields: [userId], references: [id])
+  question       Question              @relation(fields: [questionId], references: [id])
+  submission     StandupSubmission?    @relation(fields: [submissionId], references: [id])
+  jiraIssueLinks JiraAnswerIssueLink[]
 
   @@unique([submissionId, questionId])
   @@index([userId])
@@ -370,15 +378,16 @@ model JiraIntegration {
   cacheTtlMinutes Int @default(15)
 
   health               JiraIntegrationHealth @default(NOT_CONFIGURED)
-  lastHealthCheckAt     DateTime?
+  lastHealthCheckAt    DateTime?
   lastSuccessfulSyncAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  teamConfigs     TeamJiraConfig[]
-  userConnections JiraUserConnection[]
+  workspace        Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  teamConfigs      TeamJiraConfig[]
+  userConnections  JiraUserConnection[]
+  answerIssueLinks JiraAnswerIssueLink[]
 
   @@unique([workspaceId, cloudId])
   @@index([workspaceId])
@@ -451,7 +460,7 @@ model JiraUserConnection {
   status          JiraConnectionStatus @default(CONNECTED)
   lastValidatedAt DateTime?
   lastUsedAt      DateTime?
-  disconnectedAt DateTime?
+  disconnectedAt  DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -471,9 +480,9 @@ model JiraOAuthState {
   userId      String
   stateHash   String @unique
 
-  expiresAt DateTime
+  expiresAt  DateTime
   consumedAt DateTime?
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -482,4 +491,38 @@ model JiraOAuthState {
   @@index([userId, expiresAt])
   @@index([expiresAt])
   @@index([consumedAt])
+}
+
+model JiraAnswerIssueLink {
+  id                String  @id @default(uuid())
+  answerId          String
+  jiraIntegrationId String?
+
+  jiraIssueId  String
+  jiraIssueKey String
+  projectKey   String
+  issueUrl     String
+
+  summarySnapshot    String
+  statusIdSnapshot   String?
+  statusNameSnapshot String?
+  issueTypeSnapshot  String?
+
+  source         JiraIssueLinkSource
+  confidence     Float?
+  confirmedAt    DateTime?
+  selectionOrder Int                 @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  answer          Answer           @relation(fields: [answerId], references: [id], onDelete: Cascade)
+  jiraIntegration JiraIntegration? @relation(fields: [jiraIntegrationId], references: [id], onDelete: SetNull)
+
+  @@unique([answerId, jiraIntegrationId, jiraIssueId])
+  @@index([answerId, selectionOrder])
+  @@index([jiraIntegrationId, jiraIssueKey])
+  @@index([projectKey])
+  @@index([jiraIssueKey])
+  @@index([confirmedAt])
 }
