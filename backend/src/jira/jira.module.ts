@@ -11,10 +11,12 @@ import { JiraOAuthService } from './jira-oauth.service';
 import { JiraOAuthController } from './jira-oauth.controller';
 import { JiraConnectionTokenService } from './jira-connection-token.service';
 import { JiraApiService } from './jira-api.service';
+import { JiraDevelopmentController } from './jira-development.controller';
 
 @Module({
   controllers: [
     JiraOAuthController,
+    JiraDevelopmentController,
   ],
   providers: [
     JiraConfigService,
