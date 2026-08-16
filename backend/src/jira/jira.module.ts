@@ -6,8 +6,12 @@ import { JiraTokenCryptoService } from './jira-token-crypto.service';
 import { JiraOAuthStateService } from './jira-oauth-state.service';
 import { JiraOAuthClientService } from './jira-oauth-client.service';
 import { JiraOAuthService } from './jira-oauth.service';
+import { JiraOAuthController } from './jira-oauth.controller';
 
 @Module({
+  controllers: [
+    JiraOAuthController,
+  ],
   providers: [
     JiraConfigService,
     JiraTeamConfigService,
