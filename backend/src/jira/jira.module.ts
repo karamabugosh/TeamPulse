@@ -7,6 +7,7 @@ import { JiraOAuthStateService } from './jira-oauth-state.service';
 import { JiraOAuthClientService } from './jira-oauth-client.service';
 import { JiraOAuthService } from './jira-oauth.service';
 import { JiraOAuthController } from './jira-oauth.controller';
+import { JiraConnectionTokenService } from './jira-connection-token.service';
 
 @Module({
   controllers: [
@@ -20,6 +21,7 @@ import { JiraOAuthController } from './jira-oauth.controller';
     JiraOAuthStateService,
     JiraOAuthClientService,
     JiraOAuthService,
+    JiraConnectionTokenService,
   ],
   exports: [
     JiraConfigService,
@@ -29,6 +31,7 @@ import { JiraOAuthController } from './jira-oauth.controller';
     JiraOAuthStateService,
     JiraOAuthClientService,
     JiraOAuthService,
+    JiraConnectionTokenService,
   ],
 })
 export class JiraModule {}
