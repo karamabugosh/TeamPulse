@@ -1,3 +1,5 @@
+// backend/src/jira/jira.module.ts
+
 import { Module } from '@nestjs/common';
 import { JiraConfigService } from './jira-config.service';
 import { JiraTeamConfigService } from './jira-team-config.service';
@@ -8,6 +10,7 @@ import { JiraOAuthClientService } from './jira-oauth-client.service';
 import { JiraOAuthService } from './jira-oauth.service';
 import { JiraOAuthController } from './jira-oauth.controller';
 import { JiraConnectionTokenService } from './jira-connection-token.service';
+import { JiraApiService } from './jira-api.service';
 
 @Module({
   controllers: [
@@ -22,6 +25,7 @@ import { JiraConnectionTokenService } from './jira-connection-token.service';
     JiraOAuthClientService,
     JiraOAuthService,
     JiraConnectionTokenService,
+    JiraApiService,
   ],
   exports: [
     JiraConfigService,
@@ -32,6 +36,7 @@ import { JiraConnectionTokenService } from './jira-connection-token.service';
     JiraOAuthClientService,
     JiraOAuthService,
     JiraConnectionTokenService,
+    JiraApiService,
   ],
 })
 export class JiraModule {}
