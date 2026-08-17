@@ -12,6 +12,7 @@ import { JiraOAuthController } from './jira-oauth.controller';
 import { JiraConnectionTokenService } from './jira-connection-token.service';
 import { JiraApiService } from './jira-api.service';
 import { JiraDevelopmentController } from './jira-development.controller';
+import { JiraAnswerIssueLinkService } from './jira-answer-issue-link.service';
 
 @Module({
   controllers: [
@@ -28,6 +29,7 @@ import { JiraDevelopmentController } from './jira-development.controller';
     JiraOAuthService,
     JiraConnectionTokenService,
     JiraApiService,
+    JiraAnswerIssueLinkService,
   ],
   exports: [
     JiraConfigService,
@@ -39,6 +41,7 @@ import { JiraDevelopmentController } from './jira-development.controller';
     JiraOAuthService,
     JiraConnectionTokenService,
     JiraApiService,
+    JiraAnswerIssueLinkService,
   ],
 })
 export class JiraModule {}
