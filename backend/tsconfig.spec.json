@@ -6,9 +6,10 @@
     "noEmit": true,
     "isolatedModules": true
   },
-  "include": [
+    "include": [
     "src/**/*",
     "test/**/*",
+    "integration/**/*",
     "jest.config.js"
   ],
   "exclude": ["node_modules", "dist"]
