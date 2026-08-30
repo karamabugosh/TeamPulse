@@ -119,11 +119,21 @@ jobs:
         run: npm ci
 
       # Existing Playwright usage is docs/capture-screenshots.mjs (no playwright.config).
-      - name: Install Playwright browsers
+      - name: Install Playwright and browsers
         working-directory: docs
         run: |
           npm install playwright
           npx playwright install --with-deps
+
+      - name: Verify Chromium is available
+        working-directory: docs
+        run: |
+          node --input-type=module -e "
+          import { chromium } from 'playwright';
+          const browser = await chromium.launch();
+          console.log('Chromium launch OK');
+          await browser.close();
+          "
 
       # Start apps and run Playwright in the same step so background servers
       # are not reaped between GitHub Actions steps.
@@ -132,32 +142,109 @@ jobs:
         env:
           PULSE_URL: http://127.0.0.1:5173
           PORT: "3000"
+          SLACK_SOCKET_MODE_ENABLED: "false"
+          CHECKIN_SCHEDULER_ENABLED: "false"
+          DIGEST_SCHEDULER_ENABLED: "false"
         run: |
-          set -e
-          cd frontend
-          npm run dev -- --host 0.0.0.0 --port 5173 --strictPort > /tmp/pulse-frontend.log 2>&1 &
-          cd ../backend
-          node dist/main.js > /tmp/pulse-backend.log 2>&1 &
-          cd ..
+          set -euo pipefail
+
+          echo "Building frontend for vite preview..."
+          (cd frontend && npm run build)
+
+          echo "Starting backend and frontend..."
+          (cd backend && node dist/main.js > /tmp/pulse-backend.log 2>&1) &
+          BACKEND_PID=$!
+          (cd frontend && npx vite preview --host 127.0.0.1 --port 5173 --strictPort > /tmp/pulse-frontend.log 2>&1) &
+          FRONTEND_PID=$!
+
           node -e "
           const http = require('http');
+          const net = require('net');
+
           const ping = (url) => new Promise((resolve, reject) => {
-            const req = http.get(url, (res) => { res.resume(); resolve(res.statusCode); });
+            const req = http.get(url, (res) => {
+              res.resume();
+              if (res.statusCode && res.statusCode >= 200 && res.statusCode < 500) {
+                resolve(res.statusCode);
+                return;
+              }
+              reject(new Error('HTTP ' + res.statusCode + ' for ' + url));
+            });
             req.on('error', reject);
-            req.setTimeout(3000, () => { req.destroy(); reject(new Error('timeout')); });
+            req.setTimeout(5000, () => {
+              req.destroy();
+              reject(new Error('timeout for ' + url));
+            });
           });
+
+          const portOpen = (port) => new Promise((resolve) => {
+            const socket = net.connect(port, '127.0.0.1', () => {
+              socket.end();
+              resolve(true);
+            });
+            socket.on('error', () => resolve(false));
+            socket.setTimeout(2000, () => {
+              socket.destroy();
+              resolve(false);
+            });
+          });
+
+          const alive = (pid) => {
+            try {
+              process.kill(pid, 0);
+              return true;
+            } catch {
+              return false;
+            }
+          };
+
           (async () => {
-            for (let i = 0; i < 45; i++) {
-              try {
-                await ping('http://127.0.0.1:5173/');
-                await ping('http://127.0.0.1:3000/api/questions');
+            let frontendReady = false;
+            let backendReady = false;
+
+            for (let attempt = 1; attempt <= 60; attempt++) {
+              if (!alive(${BACKEND_PID})) {
+                console.error('Backend process exited before becoming ready');
+                process.exit(2);
+              }
+              if (!alive(${FRONTEND_PID})) {
+                console.error('Frontend process exited before becoming ready');
+                process.exit(3);
+              }
+
+              if (!frontendReady) {
+                try {
+                  await ping('http://127.0.0.1:5173/');
+                  frontendReady = true;
+                  console.log('Frontend is ready');
+                } catch (err) {
+                  console.log('[frontend]', err.message || err);
+                }
+              }
+
+              if (!backendReady) {
+                const tcpReady = await portOpen(3000);
+                if (tcpReady) {
+                  try {
+                    await ping('http://127.0.0.1:3000/api/questions');
+                    backendReady = true;
+                    console.log('Backend is ready');
+                  } catch (err) {
+                    console.log('[backend]', err.message || err);
+                  }
+                } else {
+                  console.log('[backend] waiting for port 3000');
+                }
+              }
+
+              if (frontendReady && backendReady) {
                 console.log('Frontend and backend are ready');
                 process.exit(0);
-              } catch (err) {
-                console.log('Waiting for application...', err.message || err);
-                await new Promise((r) => setTimeout(r, 2000));
               }
+
+              await new Promise((resolve) => setTimeout(resolve, 2000));
             }
+
             console.error('Application did not become ready');
             process.exit(1);
           })();
@@ -166,10 +253,29 @@ jobs:
             cat /tmp/pulse-frontend.log || true
             echo '--- backend log ---'
             cat /tmp/pulse-backend.log || true
+            kill "$FRONTEND_PID" "$BACKEND_PID" 2>/dev/null || true
             exit 1
           }
+
+          # CI-only workaround: empty CheckIns page exposes two \"New CheckIn\" buttons.
+          node <<'PATCH'
+          const fs = require('fs');
+          const file = 'docs/capture-screenshots.mjs';
+          let source = fs.readFileSync(file, 'utf8');
+          const needle = ".getByRole('button', { name: /New CheckIn|Create CheckIn/i }).click()";
+          const patch = ".getByRole('button', { name: /New CheckIn|Create CheckIn/i }).first().click()";
+          if (source.includes(needle)) {
+            fs.writeFileSync(file, source.replace(needle, patch));
+            console.log('Applied CI-only strict-mode patch for New CheckIn button');
+          }
+          PATCH
+
+          rm -f docs/screenshots/0*.png docs/screenshots/06-checkin-create-dialog.png
+
           cd docs
           node capture-screenshots.mjs
+
+          kill "$FRONTEND_PID" "$BACKEND_PID" 2>/dev/null || true
 
       - name: Run unit tests with coverage
         if: success()
