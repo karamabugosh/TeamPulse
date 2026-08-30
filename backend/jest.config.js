@@ -38,7 +38,7 @@ module.exports = {
     '!src/main.ts',
   ],
   coverageDirectory: '<rootDir>/coverage',
-  coverageReporters: ['text', 'lcov', 'json-summary'],
+  coverageReporters: ['text', 'lcov', 'html', 'json-summary'],
 
   modulePathIgnorePatterns: ['<rootDir>/dist/'],
   testPathIgnorePatterns: ['/node_modules/', '/dist/'],
