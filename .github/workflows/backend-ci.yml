@@ -114,6 +114,62 @@ jobs:
       - name: Run integration tests
         run: npm run test:integration
 
+      - name: Build Docker Compose images
+        working-directory: ${{ github.workspace }}
+        run: docker compose build
+
+      - name: Start Docker Compose
+        working-directory: ${{ github.workspace }}
+        env:
+          POSTGRES_PORT: "5433"
+        run: docker compose up -d
+
+      - name: Wait for Docker services
+        working-directory: ${{ github.workspace }}
+        env:
+          POSTGRES_PORT: "5433"
+        run: |
+          set -e
+          wait_http() {
+            url="$1"
+            name="$2"
+            for attempt in $(seq 1 45); do
+              exited="$(docker compose ps -a --status exited -q || true)"
+              if [ -n "$exited" ]; then
+                echo "A Compose container exited unexpectedly"
+                docker compose ps -a
+                docker compose logs --tail 80
+                exit 1
+              fi
+              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$url" || true)
+              code=$(printf '%s' "$code" | tr -cd '0-9' | tail -c 3)
+              echo "Waiting for ${name} (attempt ${attempt}): HTTP ${code}"
+              if printf '%s' "$code" | grep -qE '^[23][0-9][0-9]$'; then
+                echo "${name} is ready"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "${name} did not become ready"
+            docker compose ps -a
+            docker compose logs --tail 80
+            return 1
+          }
+
+          wait_http "http://127.0.0.1:3000/api/questions" "backend"
+          wait_http "http://127.0.0.1:5173/" "frontend"
+
+          echo "Compose status:"
+          docker compose ps
+          docker compose exec -T postgres pg_isready -U postgres -d pulse
+
+      - name: Stop Docker Compose
+        if: always()
+        working-directory: ${{ github.workspace }}
+        env:
+          POSTGRES_PORT: "5433"
+        run: docker compose down -v
+
       # Placeholder Slack workspace/team for dashboard smoke tests. Not seed:demo.
       - name: Seed CI database for Playwright
         run: npx prisma db seed
