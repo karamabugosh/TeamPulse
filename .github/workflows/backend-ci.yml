@@ -218,6 +218,24 @@ jobs:
             tail -n 80 /tmp/pulse-frontend.log || true
             echo "--- backend log ---"
             tail -n 80 /tmp/pulse-backend.log || true
+            {
+              echo "## Playwright failure"
+              echo
+              echo "- URL and dumps are in the playwright-artifacts artifact."
+              echo
+              echo '### debug'
+              echo
+              echo '```'
+              cat screenshots/99-playwright-debug.txt || echo "(no debug)"
+              echo '```'
+              echo
+              echo '### failure.html (truncated)'
+              echo
+              echo '```html'
+              head -c 20000 screenshots/99-playwright-failure.html || echo "(no failure.html)"
+              echo
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             exit "$status"
           fi
 
