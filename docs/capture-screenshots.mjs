@@ -17,28 +17,28 @@ const pages = [
   { route: '/settings', file: '05-settings.png', heading: /Settings/i },
 ];
 
-function isWorkspacesResponse(response) {
-  try {
-    const { pathname } = new URL(response.url());
-    return pathname.endsWith('/api/admin/workspaces');
-  } catch {
-    return false;
-  }
-}
-
 async function gotoDashboard(page, route) {
   const url = `${baseUrl}${route}`;
   const workspaces = page
     .waitForResponse(
-      (response) => isWorkspacesResponse(response) && response.status() < 500,
-      { timeout: 60000 },
+      (response) => {
+        try {
+          return new URL(response.url()).pathname.endsWith('/api/admin/workspaces');
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 30000 },
     )
     .catch((error) => {
       console.warn(`workspaces API was not observed for ${route}:`, error.message);
       return null;
     });
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await workspaces;
+  await page.goto(url, { waitUntil: 'load', timeout: 60000 });
+  await Promise.race([
+    workspaces,
+    page.getByRole('heading').first().waitFor({ state: 'visible', timeout: 30000 }),
+  ]);
 }
 
 const browser = await chromium.launch({
@@ -81,12 +81,18 @@ try {
   // "Create CheckIn" is the dialog title / submit label, not the page button.
   console.log(`Opening CheckIn dialog at ${baseUrl}/checkins`);
   await gotoDashboard(page, '/checkins');
-  await page.getByRole('heading', { name: /CheckIns/i }).waitFor({
+  await page.getByRole('heading', { name: /CheckIns/i }).first().waitFor({
     state: 'visible',
     timeout: 60000,
   });
 
-  const openButton = page.getByRole('button', { name: /New CheckIn/i }).first();
+  const buttonLabels = await page.locator('button').allTextContents();
+  console.log('Visible button labels:', JSON.stringify(buttonLabels));
+
+  const openButton = page
+    .getByRole('button', { name: /New CheckIn|Create CheckIn/i })
+    .or(page.getByText(/New CheckIn/i))
+    .first();
   await openButton.waitFor({ state: 'visible', timeout: 30000 });
   await openButton.click();
   await page.getByRole('heading', { name: /Create CheckIn/i }).waitFor({
@@ -102,6 +108,8 @@ try {
   const failurePng = path.join(outDir, '99-playwright-failure.png');
   const failureHtml = path.join(outDir, '99-playwright-failure.html');
   try {
+    const labels = await page.locator('button').allTextContents();
+    console.error('Button labels at failure:', JSON.stringify(labels));
     await page.screenshot({ path: failurePng, fullPage: true });
     fs.writeFileSync(failureHtml, await page.content(), 'utf8');
     console.error(`Failure URL: ${page.url()}`);
