@@ -34,7 +34,7 @@ for (const item of pages) {
 
 // CheckIn creation dialog
 await page.goto(`${baseUrl}/checkins`, { waitUntil: 'networkidle' });
-await page.getByRole('button', { name: /Create CheckIn/i }).click();
+await page.getByRole('button', { name: /New CheckIn|Create CheckIn/i }).click();
 await page.waitForTimeout(1500);
 await page.screenshot({
   path: path.join(outDir, '06-checkin-create-dialog.png'),

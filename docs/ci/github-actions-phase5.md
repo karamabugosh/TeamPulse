@@ -64,7 +64,12 @@ Existing commands:
 | App | Command | URL |
 |-----|---------|-----|
 | Backend | `node dist/main.js` (after `npm run build`) | `http://127.0.0.1:3000` |
-Frontend is started with the existing **`npm run build`** then **`vite preview`** (`package.json` `preview` script) so CI does not depend on the Vite dev server.
+| Frontend | `npm run dev` (Vite dev server, port **5173**, `/api` proxy) | `http://127.0.0.1:5173` |
+| Backend | `node dist/main.js` | `http://127.0.0.1:3000` |
+
+Readiness polls **both** frontend `/` and backend `/api/questions` so the dashboard can load data before screenshots.
+
+The script clicks **New CheckIn** (current UI label; still accepts Create CheckIn if present).
 
 `PULSE_URL=http://127.0.0.1:5173` is set so the screenshot script matches Vite (the script default `5175` is not the Vite config port).
 
