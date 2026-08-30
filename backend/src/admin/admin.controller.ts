@@ -16,9 +16,19 @@ import { AdminService } from './admin.service';
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
+  @Get('workspaces')
+  listWorkspaces() {
+    return this.adminService.listWorkspaces();
+  }
+
   @Get('overview')
   getOverview() {
     return this.adminService.getOverviewStats();
+  }
+
+  @Get('analytics/snapshot')
+  getAnalyticsSnapshot() {
+    return this.adminService.getAnalyticsSnapshot();
   }
 
   @Get('analytics')
@@ -99,6 +109,24 @@ export class AdminController {
   @Get('users')
   getUsers(@Query('search') search?: string) {
     return this.adminService.getUsers(search);
+  }
+
+  @Get('workspace-members')
+  listWorkspaceMembers(
+    @Query('search') search?: string,
+    @Query('teamId') teamId?: string,
+    @Query('sync') sync?: string,
+  ) {
+    return this.adminService.listWorkspaceMembers({
+      search,
+      teamId,
+      sync: sync === 'false' ? false : true,
+    });
+  }
+
+  @Post('workspace-members/sync')
+  syncWorkspaceMembers() {
+    return this.adminService.syncWorkspaceMembers();
   }
 
   @Get('teams/:teamId/members')

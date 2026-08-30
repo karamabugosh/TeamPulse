@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -23,11 +23,13 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Card, CardContent } from '@/components/ui/card';
+import { JiraIssueCombobox } from '@/components/jira/JiraIssueCombobox';
+import { JiraIssueSummary } from '@/lib/jira-api';
 
 export type QuestionItem = {
   id: string;
   question: string;
-  type: 'FREE_TEXT' | 'NUMERICAL' | 'YES_NO' | 'YES_NO_MAYBE' | 'MULTIPLE_CHOICE' | 'SCALE_1_5';
+  type: 'FREE_TEXT' | 'NUMERICAL' | 'YES_NO' | 'YES_NO_MAYBE' | 'MULTIPLE_CHOICE' | 'SCALE_1_5' | 'ISSUE_REF' | 'BLOCKER';
   options?: string[];
   isRequired: boolean;
   enabled?: boolean;
@@ -39,8 +41,10 @@ const QUESTION_TYPES = [
   { value: 'NUMERICAL', label: 'Numerical' },
   { value: 'YES_NO', label: 'Yes / No' },
   { value: 'YES_NO_MAYBE', label: 'Yes / No / Maybe' },
+  { value: 'BLOCKER', label: 'Blocker (Yes → details)' },
   { value: 'MULTIPLE_CHOICE', label: 'Multiple Choice' },
   { value: 'SCALE_1_5', label: 'Rating (1-5)' },
+  { value: 'ISSUE_REF', label: 'Jira Issue' },
 ] as const;
 
 interface SortableQuestionProps {
@@ -64,6 +68,7 @@ const SortableQuestion: React.FC<SortableQuestionProps> = ({
   onUpdateOption,
   onRemoveOption,
 }) => {
+  const [previewIssue, setPreviewIssue] = useState<JiraIssueSummary | null>(null);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: question.id,
   });
@@ -146,6 +151,31 @@ const SortableQuestion: React.FC<SortableQuestionProps> = ({
               </Button>
             </div>
           </div>
+
+          {question.type === 'ISSUE_REF' && (
+            <div className="ml-10 space-y-2">
+              <Label className="text-xs text-muted-foreground">Jira Issue Selector</Label>
+              <JiraIssueCombobox
+                value={previewIssue}
+                onSelect={setPreviewIssue}
+                onClear={() => setPreviewIssue(null)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Standup participants search and pick a real Jira issue when answering this question.
+              </p>
+            </div>
+          )}
+
+          {question.type === 'BLOCKER' && (
+            <div className="ml-10 space-y-1 rounded-lg border border-dashed border-border p-3">
+              <p className="text-sm font-medium">Blocker flow</p>
+              <p className="text-xs text-muted-foreground">
+                Slack shows Yes/No. Yes opens the existing Blocker Details modal (title, reason,
+                severity, category, expected resolution, Jira link). No records that the user is
+                not blocked — no PulseBlocker is created.
+              </p>
+            </div>
+          )}
 
           {question.type === 'MULTIPLE_CHOICE' && (
             <div className="ml-10 space-y-2">

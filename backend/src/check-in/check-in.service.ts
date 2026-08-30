@@ -16,6 +16,10 @@ import { buildSlackArchiveUrl, buildSlackThreadUrl } from '../slack/slack-checki
 import { SlackService } from '../slack/slack.service';
 import { CreateCheckInDto } from './dto/create-check-in.dto';
 import { UpdateCheckInDto } from './dto/update-check-in.dto';
+import { resolveActiveWorkspaceId } from '../common/workspace-context';
+import { MemoryOutboxService } from '../memory/memory-outbox.service';
+import { MEMORY_SOURCE } from '../memory/memory-source.constants';
+import { isMemoryEligibleAnswerType } from '../memory/memory-ingestion.policy';
 
 @Injectable()
 export class CheckInService {
@@ -25,6 +29,7 @@ export class CheckInService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly moduleRef: ModuleRef,
+    private readonly memoryOutbox: MemoryOutboxService,
   ) {}
 
   private readonly includeRelations = {
@@ -38,6 +43,9 @@ export class CheckInService {
     },
 
     questions: {
+      where: {
+        retiredAt: null,
+      },
       orderBy: {
         order: 'asc' as const,
       },
@@ -129,21 +137,45 @@ export class CheckInService {
     }
   }
 
+  private async assertTeamInActiveWorkspace(teamId: string) {
+    const team = await this.prisma.team.findUnique({
+      where: { id: teamId },
+    });
+
+    if (!team) {
+      throw new NotFoundException(`Team ${teamId} was not found.`);
+    }
+
+    const workspaceId = await resolveActiveWorkspaceId(this.prisma);
+    if (workspaceId && team.workspaceId !== workspaceId) {
+      throw new NotFoundException(`Team ${teamId} was not found.`);
+    }
+
+    return { team, workspaceId };
+  }
+
+  private async assertCheckInInActiveWorkspace(id: string) {
+    const workspaceId = await resolveActiveWorkspaceId(this.prisma);
+    const checkIn = await this.prisma.checkIn.findFirst({
+      where: {
+        id,
+        ...(workspaceId ? { team: { workspaceId } } : {}),
+      },
+    });
+
+    if (!checkIn) {
+      throw new NotFoundException(`Check-in ${id} was not found.`);
+    }
+
+    return { checkIn, workspaceId };
+  }
+
   async create(dto: CreateCheckInDto) {
     this.validateBasicConfiguration(dto);
 
-    const team =
-      await this.prisma.team.findUnique({
-        where: {
-          id: dto.teamId,
-        },
-      });
-
-    if (!team) {
-      throw new NotFoundException(
-        `Team ${dto.teamId} was not found.`,
-      );
-    }
+    const { team, workspaceId } = await this.assertTeamInActiveWorkspace(
+      dto.teamId,
+    );
 
     const participantIds = [
       ...new Set(
@@ -157,6 +189,10 @@ export class CheckInService {
         participantIds,
       );
     }
+
+    this.logger.log(
+      `CheckIn create workspace=${workspaceId ?? 'none'} team=${team.id} name="${dto.name.trim()}" questions=${dto.questions?.length ?? 0} participants=${participantIds.length}`,
+    );
 
     const created =
       await this.prisma.$transaction(
@@ -302,16 +338,20 @@ export class CheckInService {
       `create ${created?.id ?? 'unknown'}`,
     );
 
+    this.logger.log(
+      `CheckIn created id=${created?.id} questions=${created?.questions?.length ?? 0} participants=${created?.participants?.length ?? 0}`,
+    );
+
     return created;
   }
 
   async findAll(teamId?: string) {
+    const workspaceId = await resolveActiveWorkspaceId(this.prisma);
     return this.prisma.checkIn.findMany({
-      where: teamId
-        ? {
-            teamId,
-          }
-        : undefined,
+      where: {
+        ...(teamId ? { teamId } : {}),
+        ...(workspaceId ? { team: { workspaceId } } : {}),
+      },
 
       include: {
         ...this.includeRelations,
@@ -323,22 +363,20 @@ export class CheckInService {
       },
 
       orderBy: {
-        createdAt:
-          'desc',
+        createdAt: 'desc',
       },
     });
   }
 
   async findOne(id: string) {
-    const checkIn =
-      await this.prisma.checkIn.findUnique({
-        where: {
-          id,
-        },
-
-        include:
-          this.includeRelations,
-      });
+    const workspaceId = await resolveActiveWorkspaceId(this.prisma);
+    const checkIn = await this.prisma.checkIn.findFirst({
+      where: {
+        id,
+        ...(workspaceId ? { team: { workspaceId } } : {}),
+      },
+      include: this.includeRelations,
+    });
 
     if (!checkIn) {
       throw new NotFoundException(
@@ -353,20 +391,19 @@ export class CheckInService {
     id: string,
     dto: UpdateCheckInDto,
   ) {
-    const existing =
-      await this.prisma.checkIn.findUnique({
-        where: {
-          id,
-        },
-      });
-
-    if (!existing) {
-      throw new NotFoundException(
-        `Check-in ${id} was not found.`,
-      );
-    }
+    const { checkIn: existing, workspaceId } =
+      await this.assertCheckInInActiveWorkspace(id);
 
     this.validateUpdate(dto);
+
+    let effectiveTeamId = existing.teamId;
+    if (dto.teamId !== undefined) {
+      if (!dto.teamId.trim()) {
+        throw new BadRequestException('teamId cannot be empty.');
+      }
+      const { team } = await this.assertTeamInActiveWorkspace(dto.teamId.trim());
+      effectiveTeamId = team.id;
+    }
 
     /*
      * Validate the effective timezone + cron pair.
@@ -427,10 +464,14 @@ export class CheckInService {
       participantIds !== undefined
     ) {
       await this.validateParticipants(
-        existing.teamId,
+        effectiveTeamId,
         participantIds,
       );
     }
+
+    this.logger.log(
+      `CheckIn update id=${id} workspace=${workspaceId ?? 'none'} team=${effectiveTeamId} questions=${dto.questions?.length ?? 'unchanged'} participants=${participantIds?.length ?? 'unchanged'}`,
+    );
 
     const updated =
       await this.prisma.$transaction(
@@ -481,6 +522,11 @@ export class CheckInService {
             },
 
             data: {
+              teamId:
+                dto.teamId !== undefined
+                  ? effectiveTeamId
+                  : undefined,
+
               name:
                 dto.name !== undefined
                   ? dto.name.trim()
@@ -578,6 +624,10 @@ export class CheckInService {
       `update ${id}`,
     );
 
+    this.logger.log(
+      `CheckIn updated id=${id} questions=${updated?.questions?.length ?? 0} participants=${updated?.participants?.length ?? 0}`,
+    );
+
     return updated;
   }
 
@@ -585,6 +635,12 @@ export class CheckInService {
     tx: Prisma.TransactionClient,
     checkInId: string,
   ) {
+    const checkIn = await tx.checkIn.findUnique({
+      where: { id: checkInId },
+      select: { team: { select: { workspaceId: true } } },
+    });
+    const workspaceId = checkIn?.team.workspaceId ?? null;
+
     const runs = await tx.standupRun.findMany({
       where: { checkInId },
       select: { id: true },
@@ -597,6 +653,37 @@ export class CheckInService {
         select: { id: true },
       });
       const submissionIds = submissions.map((s) => s.id);
+
+      if (submissionIds.length > 0 && workspaceId) {
+        const answers = await tx.answer.findMany({
+          where: { submissionId: { in: submissionIds } },
+          select: { id: true, question: { select: { type: true } } },
+        });
+        for (const answer of answers) {
+          if (!isMemoryEligibleAnswerType(answer.question.type)) continue;
+          await this.memoryOutbox.enqueueDelete({
+            tx,
+            workspaceId,
+            sourceType: MEMORY_SOURCE.STANDUP_ANSWER,
+            sourceId: answer.id,
+          });
+        }
+      }
+
+      if (workspaceId) {
+        const digests = await tx.aiDigest.findMany({
+          where: { runId: { in: runIds } },
+          select: { id: true },
+        });
+        for (const digest of digests) {
+          await this.memoryOutbox.enqueueDelete({
+            tx,
+            workspaceId,
+            sourceType: MEMORY_SOURCE.REPORT,
+            sourceId: digest.id,
+          });
+        }
+      }
 
       if (submissionIds.length > 0) {
         await tx.answer.deleteMany({
@@ -633,22 +720,15 @@ export class CheckInService {
   }
 
   async remove(id: string) {
-    const checkIn =
-      await this.prisma.checkIn.findUnique({
-        where: { id },
-      });
-
-    if (!checkIn) {
-      throw new NotFoundException(
-        `Check-in ${id} was not found.`,
-      );
-    }
+    await this.assertCheckInInActiveWorkspace(id);
 
     await this.prisma.$transaction(async (tx) => {
       await this.deleteCheckInWithRuns(tx, id);
     });
 
     await this.refreshSchedulerAfterMutation(`delete ${id}`);
+
+    this.logger.log(`CheckIn deleted id=${id}`);
 
     return {
       deleted: true,
@@ -660,7 +740,7 @@ export class CheckInService {
     id: string,
     enabled: boolean,
   ) {
-    await this.findOne(id);
+    await this.assertCheckInInActiveWorkspace(id);
 
     const updated =
       await this.prisma.checkIn.update({
@@ -760,6 +840,15 @@ export class CheckInService {
   private validateUpdate(
     dto: UpdateCheckInDto,
   ) {
+    if (
+      dto.teamId !== undefined &&
+      !dto.teamId.trim()
+    ) {
+      throw new BadRequestException(
+        'teamId cannot be empty.',
+      );
+    }
+
     if (
       dto.name !== undefined &&
       !dto.name.trim()
@@ -937,7 +1026,10 @@ export class CheckInService {
 
         await tx.question.update({
           where: { id: question.id },
-          data,
+          data: {
+            ...data,
+            retiredAt: null,
+          },
         });
         continue;
       }
@@ -946,6 +1038,7 @@ export class CheckInService {
         data: {
           checkInId,
           ...data,
+          retiredAt: null,
         },
       });
     }
@@ -958,7 +1051,10 @@ export class CheckInService {
       if (existing._count.answers > 0) {
         await tx.question.update({
           where: { id: existing.id },
-          data: { isActive: false },
+          data: {
+            isActive: false,
+            retiredAt: new Date(),
+          },
         });
         continue;
       }
@@ -1246,10 +1342,12 @@ export class CheckInService {
   }
 
   async getActiveRuns() {
+    const workspaceId = await resolveActiveWorkspaceId(this.prisma);
     const runs = await this.prisma.standupRun.findMany({
       where: {
         checkInId: { not: null },
         status: 'collecting',
+        ...(workspaceId ? { team: { workspaceId } } : {}),
       },
       include: this.runIncludeRelations,
       orderBy: { startedAt: 'desc' },
@@ -1306,12 +1404,14 @@ export class CheckInService {
     const page = Math.max(1, options?.page ?? 1);
     const limit = Math.min(100, Math.max(1, options?.limit ?? 25));
     const skip = (page - 1) * limit;
+    const workspaceId = await resolveActiveWorkspaceId(this.prisma);
 
     const where: Prisma.StandupRunWhereInput = {
       status: 'completed',
       checkInId: options?.checkInId
         ? options.checkInId
         : { not: null },
+      ...(workspaceId ? { team: { workspaceId } } : {}),
     };
 
     const [runs, total] = await Promise.all([
@@ -1681,12 +1781,18 @@ export class CheckInService {
   async deleteRun(runId: string) {
     const run = await this.prisma.standupRun.findUnique({
       where: { id: runId },
-      select: { id: true, checkInId: true },
+      select: {
+        id: true,
+        checkInId: true,
+        team: { select: { workspaceId: true } },
+      },
     });
 
     if (!run) {
       throw new NotFoundException(`Run ${runId} was not found.`);
     }
+
+    const workspaceId = run.team.workspaceId;
 
     await this.prisma.$transaction(async (tx) => {
       const submissions = await tx.standupSubmission.findMany({
@@ -1696,11 +1802,38 @@ export class CheckInService {
       const submissionIds = submissions.map((submission) => submission.id);
 
       if (submissionIds.length > 0) {
+        const answers = await tx.answer.findMany({
+          where: { submissionId: { in: submissionIds } },
+          select: { id: true, question: { select: { type: true } } },
+        });
+        for (const answer of answers) {
+          if (!isMemoryEligibleAnswerType(answer.question.type)) continue;
+          await this.memoryOutbox.enqueueDelete({
+            tx,
+            workspaceId,
+            sourceType: MEMORY_SOURCE.STANDUP_ANSWER,
+            sourceId: answer.id,
+          });
+        }
+
         await tx.answer.deleteMany({
           where: { submissionId: { in: submissionIds } },
         });
         await tx.conversationState.deleteMany({
           where: { submissionId: { in: submissionIds } },
+        });
+      }
+
+      const digests = await tx.aiDigest.findMany({
+        where: { runId },
+        select: { id: true },
+      });
+      for (const digest of digests) {
+        await this.memoryOutbox.enqueueDelete({
+          tx,
+          workspaceId,
+          sourceType: MEMORY_SOURCE.REPORT,
+          sourceId: digest.id,
         });
       }
 

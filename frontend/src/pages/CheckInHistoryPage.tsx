@@ -324,6 +324,7 @@ export const CheckInHistoryPage: React.FC = () => {
         <PageHeader
           title="Run History"
           description="Completed standup runs — Slack threads and AI reports."
+          accent="slack"
         >
           <Button variant="outline" asChild>
             <Link to="/checkins">

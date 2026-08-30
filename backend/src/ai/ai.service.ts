@@ -1,6 +1,7 @@
 // backend/src/ai/ai.service.ts
 
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   AiDigestResult,
   RawResponseForAnalysis,
@@ -17,6 +18,10 @@ import { parseAndValidateAiResponse } from './ai-response-validator';
 import { CostAccumulator } from './cost-tracker';
 import { PrismaService } from '../prisma/prisma.service';
 import { AiReportGenerationError } from './ai-report-generation.error';
+import { WORKSPACE_KNOWLEDGE_CHANGED } from './workspace/retrieval/knowledge-events';
+import { MemoryOutboxService } from '../memory/memory-outbox.service';
+import { MEMORY_SOURCE } from '../memory/memory-source.constants';
+import { isMemoryEligibleDigest } from '../memory/memory-ingestion.policy';
 
 @Injectable()
 export class AiService implements OnModuleInit {
@@ -29,6 +34,8 @@ export class AiService implements OnModuleInit {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly events: EventEmitter2,
+    private readonly memoryOutbox: MemoryOutboxService,
   ) {}
 
   onModuleInit(): void {
@@ -163,6 +170,16 @@ export class AiService implements OnModuleInit {
     result: AiDigestResult,
   ): Promise<void> {
     try {
+      const team = await this.prisma.team.findUnique({
+        where: { id: result.teamId },
+        select: { workspaceId: true },
+      });
+      if (!team?.workspaceId) {
+        throw new Error(
+          `Cannot save AiDigest — team ${result.teamId} has no workspaceId`,
+        );
+      }
+
       const existing = await this.prisma.aiDigest.findUnique({
         where: { runId: result.runId },
         select: {
@@ -172,39 +189,63 @@ export class AiService implements OnModuleInit {
         },
       });
 
-      await this.prisma.aiDigest.upsert({
-        where: { runId: result.runId },
-        create: {
-          teamId: result.teamId,
-          runId: result.runId,
-          generatedAt: new Date(result.generatedAt),
-          source: result.source,
-          summary: result.summary,
-          blockers: result.blockers as any,
-          themes: result.themes as any,
-          reportSections: result.reportSections as any,
-        },
-        update: {
-          generatedAt: new Date(result.generatedAt),
-          source: result.source,
-          summary: result.summary,
-          blockers: result.blockers as any,
-          themes: result.themes as any,
-          reportSections: result.reportSections as any,
-          generationError: result.generationError ?? null,
-          ...(existing?.slackReportText && result.source === 'ai'
-            ? {
-                slackReportText: existing.slackReportText,
-                slackReportBlocks: existing.slackReportBlocks as any,
-                nonResponderNames: existing.nonResponderNames as any,
-              }
-            : {}),
-        },
+      const digest = await this.prisma.$transaction(async (tx) => {
+        const row = await tx.aiDigest.upsert({
+          where: { runId: result.runId },
+          create: {
+            teamId: result.teamId,
+            runId: result.runId,
+            generatedAt: new Date(result.generatedAt),
+            source: result.source,
+            summary: result.summary,
+            blockers: result.blockers as any,
+            themes: result.themes as any,
+            reportSections: result.reportSections as any,
+          },
+          update: {
+            generatedAt: new Date(result.generatedAt),
+            source: result.source,
+            summary: result.summary,
+            blockers: result.blockers as any,
+            themes: result.themes as any,
+            reportSections: result.reportSections as any,
+            generationError: result.generationError ?? null,
+            ...(existing?.slackReportText && result.source === 'ai'
+              ? {
+                  slackReportText: existing.slackReportText,
+                  slackReportBlocks: existing.slackReportBlocks as any,
+                  nonResponderNames: existing.nonResponderNames as any,
+                }
+              : {}),
+          },
+        });
+
+        if (
+          isMemoryEligibleDigest({
+            source: result.source,
+            summary: result.summary,
+            generationError: result.generationError,
+          })
+        ) {
+          await this.memoryOutbox.enqueueUpsert({
+            tx,
+            workspaceId: team.workspaceId,
+            sourceType: MEMORY_SOURCE.REPORT,
+            sourceId: row.id,
+          });
+        }
+
+        return row;
       });
 
       this.logger.log(
-        `Saved ${result.source} digest for run ${result.runId} to database`,
+        `Saved ${result.source} digest ${digest.id} for run ${result.runId} to database`,
       );
+
+      this.events.emit(WORKSPACE_KNOWLEDGE_CHANGED, {
+        workspaceId: team.workspaceId,
+        reason: `ai_digest:${result.runId}`,
+      });
     } catch (error: unknown) {
       const message =
         error instanceof Error

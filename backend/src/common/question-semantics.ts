@@ -62,7 +62,10 @@ export function parseYesNoChoice(params: {
 }): YesNoChoice | null {
   const normalized = params.text.trim().toLowerCase();
 
-  if (params.type === QuestionType.YES_NO) {
+  if (
+    params.type === QuestionType.YES_NO ||
+    params.type === QuestionType.BLOCKER
+  ) {
     const value = (params.structuredValue as { value?: boolean } | null)?.value;
     if (value === true || normalized === 'yes' || normalized === 'y') {
       return 'yes';
@@ -112,7 +115,11 @@ export function getSemanticSentiment(params: {
     return 'neutral';
   }
 
-  const polarity = inferYesNoPolarity(params.question);
+  // BLOCKER type: Yes is always a negative outcome (blocked).
+  const polarity =
+    params.type === QuestionType.BLOCKER
+      ? 'yes_negative'
+      : inferYesNoPolarity(params.question);
   const answeredYes = choice === 'yes';
 
   if (polarity === 'yes_negative') {
@@ -138,7 +145,8 @@ export function sentimentIndicator(sentiment: SemanticSentiment): string {
 }
 
 function capitalizeChoice(choice: YesNoChoice): string {
-  return choice.charAt(0).toUpperCase() + choice.slice(1);
+  const value = choice ?? 'unknown';
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 /** Colored display label for yes/no style answers. */
@@ -187,6 +195,13 @@ export function describeSemanticAnswer(params: {
   const choice = parseYesNoChoice(params);
   if (!choice) {
     return null;
+  }
+
+  // Type-driven blocker questions always map to blocked / not blocked.
+  if (params.type === QuestionType.BLOCKER) {
+    if (choice === 'yes') return 'Reported being blocked';
+    if (choice === 'no') return 'Not blocked';
+    return 'Uncertain / needs follow-up';
   }
 
   const polarity = inferYesNoPolarity(params.question);
@@ -252,10 +267,14 @@ export function enrichAnswerForAnalysis(params: {
 } {
   const formattedAnswer =
     params.questionType === QuestionType.YES_NO ||
-    params.questionType === QuestionType.YES_NO_MAYBE
+    params.questionType === QuestionType.YES_NO_MAYBE ||
+    params.questionType === QuestionType.BLOCKER
       ? formatColoredYesNoAnswer({
           question: params.questionText,
-          type: params.questionType,
+          type:
+            params.questionType === QuestionType.BLOCKER
+              ? QuestionType.YES_NO
+              : params.questionType,
           text: params.text,
           structuredValue: params.structuredValue,
         })

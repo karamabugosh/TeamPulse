@@ -33,6 +33,18 @@ type ReportGroup = {
   totalReports: number;
 };
 
+type WorkspaceAnalyticsSnapshot = {
+  generatedAt: string;
+  blockers: { openBlockers: number; total: number; critical: number };
+  jira: { totalIssues: number; openIssues: number; inProgressIssues: number };
+  standups: {
+    completedSubmissions: number;
+    participationRate: number | null;
+    runsInRange: number;
+  };
+  members: { total: number; activeParticipants: number };
+};
+
 function formatGenerated(iso: string) {
   return new Intl.DateTimeFormat('en-US', {
     month: 'short',
@@ -46,6 +58,20 @@ export const ReportsPage: React.FC = () => {
   const [groups, setGroups] = useState<ReportGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const [analytics, setAnalytics] = useState<WorkspaceAnalyticsSnapshot | null>(
+    null,
+  );
+
+  const loadAnalytics = useCallback(async () => {
+    try {
+      const data = await apiFetch<WorkspaceAnalyticsSnapshot>(
+        '/api/admin/analytics/snapshot',
+      );
+      setAnalytics(data);
+    } catch (err) {
+      console.error('Failed to load workspace analytics:', err);
+    }
+  }, []);
 
   const loadReports = useCallback(async () => {
     try {
@@ -70,16 +96,89 @@ export const ReportsPage: React.FC = () => {
   }, [loadReports, searchTerm]);
 
   useEffect(() => {
-    const interval = setInterval(loadReports, 15000);
+    loadAnalytics();
+    const interval = setInterval(() => {
+      loadReports();
+      loadAnalytics();
+    }, 15000);
     return () => clearInterval(interval);
-  }, [loadReports]);
+  }, [loadReports, loadAnalytics]);
 
   return (
-    <div className="mx-auto max-w-4xl space-y-8">
+    <div className="mx-auto max-w-4xl space-y-8 accent-reports">
       <PageHeader
         title="Reports"
         description="Saved standup reports — one per completed Check-In run (same content as Slack)."
+        accent="reports"
+        badge={
+          <span className="inline-flex items-center rounded-full border border-module-reports/25 bg-module-reports/10 px-2.5 py-0.5 text-xs font-medium text-orange-300">
+            Standup intelligence
+          </span>
+        }
       />
+
+      {analytics && (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Card className="border-module-reports/20">
+            <CardContent className="p-4">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                Open blockers
+              </p>
+              <p className="mt-1 text-2xl font-semibold">
+                {analytics.blockers.openBlockers}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {analytics.blockers.total} total · {analytics.blockers.critical}{' '}
+                critical
+              </p>
+            </CardContent>
+          </Card>
+          <Card className="border-module-reports/20">
+            <CardContent className="p-4">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                Jira issues
+              </p>
+              <p className="mt-1 text-2xl font-semibold">
+                {analytics.jira.totalIssues}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {analytics.jira.openIssues} open ·{' '}
+                {analytics.jira.inProgressIssues} in progress
+              </p>
+            </CardContent>
+          </Card>
+          <Card className="border-module-reports/20">
+            <CardContent className="p-4">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                Standups (7d)
+              </p>
+              <p className="mt-1 text-2xl font-semibold">
+                {analytics.standups.completedSubmissions}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {analytics.standups.participationRate ?? 'n/a'}% participation ·{' '}
+                {analytics.standups.runsInRange} runs
+              </p>
+            </CardContent>
+          </Card>
+          <Card className="border-module-reports/20">
+            <CardContent className="p-4">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                Workspace members
+              </p>
+              <p className="mt-1 text-2xl font-semibold">
+                {analytics.members.total}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {analytics.members.activeParticipants} active participants
+              </p>
+              <p className="mt-1 text-[10px] text-muted-foreground/70">
+                Recalculated {formatGenerated(analytics.generatedAt)}
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       <div className="relative max-w-md">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -113,9 +212,9 @@ export const ReportsPage: React.FC = () => {
             const hasHistory = group.totalReports > 1;
 
             return (
-              <Card key={group.checkInId} className="overflow-hidden">
+              <Card key={group.checkInId} className="card-lift overflow-hidden border-module-reports/15 hover:border-module-reports/30 hover:shadow-glow-reports">
                 <CardContent className="p-0">
-                  <div className="border-b border-border/60 px-6 py-4">
+                  <div className="border-b border-white/[0.06] bg-gradient-to-r from-module-reports/8 via-transparent to-transparent px-6 py-4">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <h2 className="text-lg font-semibold tracking-tight">
@@ -123,7 +222,7 @@ export const ReportsPage: React.FC = () => {
                         </h2>
                         <p className="text-sm text-muted-foreground">{group.teamName}</p>
                       </div>
-                      <Badge variant={report.reportPosted ? 'success' : 'secondary'}>
+                      <Badge variant={report.reportPosted ? 'success' : 'reports'}>
                         {report.reportPosted ? 'Posted' : 'Saved'}
                       </Badge>
                     </div>

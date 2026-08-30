@@ -12,6 +12,9 @@ export type UpdateCheckInQuestionDto = {
 };
 
 export class UpdateCheckInDto {
+  /** When set, CheckIn moves to this team (must belong to the active workspace). */
+  teamId?: string;
+
   name?: string;
   description?: string | null;
   introMessage?: string | null;

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Plus, Search, Loader2, Radio, History } from 'lucide-react';
+import { Plus, Search, Loader2, Radio, History, ClipboardList } from 'lucide-react';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -11,6 +11,7 @@ import { ActiveRunCard } from '@/components/checkins/ActiveRunCard';
 import { CheckInCard } from '@/components/checkins/CheckInCard';
 import { apiFetch, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
+import { useWorkspace } from '@/lib/workspace-context';
 import { EnrichedRun, normalizeRun } from '@/lib/run-status';
 
 type DeleteTarget = {
@@ -20,6 +21,7 @@ type DeleteTarget = {
 
 export const CheckInsPage: React.FC = () => {
   const { toast } = useToast();
+  const { workspaceId } = useWorkspace();
   const [checkIns, setCheckIns] = useState<any[]>([]);
   const [teams, setTeams] = useState<any[]>([]);
   const [activeRuns, setActiveRuns] = useState<EnrichedRun[]>([]);
@@ -47,12 +49,24 @@ export const CheckInsPage: React.FC = () => {
   const loadData = useCallback(async (options?: { silent?: boolean }) => {
     if (!options?.silent) setLoading(true);
     try {
-      const [checkInsData, teamsData] = await Promise.all([
-        apiFetch<any[]>('/api/check-ins'),
-        apiFetch<any[]>('/api/admin/teams'),
-      ]);
-      setCheckIns(Array.isArray(checkInsData) ? checkInsData : []);
-      setTeams(Array.isArray(teamsData) ? teamsData : []);
+      // Load independently so a teams failure cannot blank the CheckIns list.
+      const checkInsResult = await apiFetch<any[]>('/api/check-ins');
+      setCheckIns(Array.isArray(checkInsResult) ? checkInsResult : []);
+
+      try {
+        const teamsResult = await apiFetch<any[]>('/api/admin/teams');
+        setTeams(Array.isArray(teamsResult) ? teamsResult : []);
+      } catch (teamsError) {
+        console.error(teamsError);
+        toast({
+          title: 'Could not load teams',
+          description:
+            teamsError instanceof ApiError
+              ? teamsError.message
+              : 'Team list failed — create/edit may be unavailable until this is fixed.',
+          variant: 'destructive',
+        });
+      }
     } catch (error) {
       const message = error instanceof ApiError ? error.message : 'Failed to load CheckIns';
       toast({ title: 'Could not load data', description: message, variant: 'destructive' });
@@ -62,15 +76,16 @@ export const CheckInsPage: React.FC = () => {
   }, [toast]);
 
   useEffect(() => {
-    loadData();
-    loadActiveRuns();
+    if (!workspaceId) return;
+    void loadData();
+    void loadActiveRuns();
     const runsInterval = setInterval(loadActiveRuns, 10000);
     const dataInterval = setInterval(() => loadData({ silent: true }), 30000);
     return () => {
       clearInterval(runsInterval);
       clearInterval(dataInterval);
     };
-  }, [loadData, loadActiveRuns]);
+  }, [loadData, loadActiveRuns, workspaceId]);
 
   const filteredCheckIns = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
@@ -128,22 +143,9 @@ export const CheckInsPage: React.FC = () => {
     }
   };
 
-  const handleCheckInSaved = (saved?: any) => {
-    if (saved?.id) {
-      setCheckIns((current) => {
-        const exists = current.some((c) => c.id === saved.id);
-        const merged = {
-          ...(exists ? current.find((c) => c.id === saved.id) : {}),
-          ...saved,
-          _count: saved._count ?? (exists ? current.find((c) => c.id === saved.id)?._count : { runs: 0 }),
-        };
-        return exists
-          ? current.map((c) => (c.id === saved.id ? merged : c))
-          : [merged, ...current];
-      });
-    } else {
-      void loadData({ silent: true });
-    }
+  const handleCheckInSaved = (_saved?: any) => {
+    // Always reload from PostgreSQL so the UI matches persisted data.
+    void loadData({ silent: true });
     void loadActiveRuns();
   };
 
@@ -152,12 +154,24 @@ export const CheckInsPage: React.FC = () => {
   };
 
   return (
-    <div className="mx-auto max-w-6xl space-y-10">
+    <div className="mx-auto max-w-6xl space-y-10 accent-slack">
       <PageHeader
         title="CheckIns"
         description="Configure standup schedules, questions, and participants."
+        accent="slack"
+        badge={
+          <span className="inline-flex items-center rounded-full border border-module-slack/25 bg-module-slack/10 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
+            Slack standups
+          </span>
+        }
       >
         <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" asChild>
+            <Link to="/checkins/standup">
+              <ClipboardList className="h-4 w-4" />
+              Daily Standup Form
+            </Link>
+          </Button>
           <Button variant="outline" size="sm" asChild>
             <Link to="/checkins/history">
               <History className="h-4 w-4" />
@@ -174,9 +188,9 @@ export const CheckInsPage: React.FC = () => {
       {!runsLoading && activeRuns.length > 0 && (
         <section className="space-y-3">
           <div className="flex items-center gap-2">
-            <Radio className="h-4 w-4 text-emerald-600" />
+            <Radio className="h-4 w-4 text-module-slack" />
             <h2 className="text-sm font-medium text-foreground">Active Runs</h2>
-            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
+            <span className="rounded-full border border-module-slack/25 bg-module-slack/12 px-2 py-0.5 text-xs font-medium text-emerald-300">
               {activeRuns.length} collecting
             </span>
           </div>

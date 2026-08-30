@@ -7,6 +7,7 @@ import {
   AiDigestResult,
   RawResponseForAnalysis,
   EMPTY_REPORT_SECTIONS,
+  BlockerSeverity,
 } from '../ai/dto/ai-result.dto';
 import { AiService } from '../ai/ai.service';
 import { CollectionService } from '../collection/collection.service';
@@ -27,6 +28,17 @@ import {
   buildReportStatistics,
   groupBlockersByPerson,
 } from './report-participant.utils';
+import { MemoryOutboxService } from '../memory/memory-outbox.service';
+import { MEMORY_SOURCE } from '../memory/memory-source.constants';
+import { isMemoryEligibleDigest } from '../memory/memory-ingestion.policy';
+import { WorkspaceMembersService } from '../common/workspace-members.service';
+import { SlackMemberCacheService } from '../slack/slack-member-cache.service';
+import {
+  digestContainsSlackUserIds,
+  resolveSlackIdsInDigest,
+  resolveSlackIdsInRawResponses,
+} from '../common/report-slack-resolution.util';
+import { resolveAllSlackIdsInText } from '../common/slack-member.util';
 
 export type RunReportStatus =
   | 'waiting_for_responses'
@@ -61,6 +73,9 @@ export class CheckInReportService implements OnApplicationBootstrap {
     private readonly digestService: DigestService,
     private readonly reportsService: ReportsService,
     private readonly checkInThreadService: CheckInThreadService,
+    private readonly memoryOutbox: MemoryOutboxService,
+    private readonly workspaceMembers: WorkspaceMembersService,
+    private readonly slackMemberCache: SlackMemberCacheService,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
@@ -71,8 +86,10 @@ export class CheckInReportService implements OnApplicationBootstrap {
     } catch (error: unknown) {
       const message =
         error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
       this.logger.error(
-        `[Report] Startup canonical report backfill failed: ${message}`,
+        `[Report] Startup canonical report backfill failed (non-fatal): ${message}`,
+        stack,
       );
     }
   }
@@ -279,10 +296,32 @@ export class CheckInReportService implements OnApplicationBootstrap {
     } else if (!hasCanonicalAiReport && aiDigest) {
       const additionalUpdatesByUser =
         await this.fetchAdditionalUpdatesByUser(run.id);
+      const participantOverrides = run.submissions.map((submission) => ({
+        slackUserId: submission.user.slackUserId,
+        displayName: submission.user.slackDisplayName,
+      }));
+      const team = await this.prisma.team.findUnique({
+        where: { id: run.checkIn.teamId },
+        select: { workspaceId: true },
+      });
+      const nameMap = team?.workspaceId
+        ? await this.workspaceMembers.buildReportNameMap(
+            team.workspaceId,
+            participantOverrides,
+          )
+        : null;
+      if (team?.workspaceId && nameMap) {
+        aiDigest = await this.resolveDigestForWorkspace(
+          aiDigest,
+          team.workspaceId,
+          participantOverrides,
+        );
+      }
       aiDigest = this.enrichDigestWithParticipants(
         aiDigest,
         run.submissions,
         additionalUpdatesByUser,
+        nameMap,
       );
       const persisted = await this.persistReportForRun(
         aiDigest,
@@ -601,13 +640,19 @@ export class CheckInReportService implements OnApplicationBootstrap {
     const additionalUpdatesByUser =
       await this.fetchAdditionalUpdatesByUser(runId);
 
-    const aiResponses: RawResponseForAnalysis[] = submissions
+    const participantOverrides = submissions.map((submission) => ({
+      slackUserId: submission.user.slackUserId,
+      displayName: submission.user.slackDisplayName,
+    }));
+
+    let aiResponses: RawResponseForAnalysis[] = submissions
       .filter(
         (submission) =>
           submission.status === 'completed' && submission.answers.length > 0,
       )
       .map((submission) => ({
         userId: submission.user.slackUserId,
+        displayName: submission.user.slackDisplayName,
         answers: submission.answers.map((answer) => {
           const enriched = enrichAnswerForAnalysis({
             questionText: answer.question.question,
@@ -632,6 +677,19 @@ export class CheckInReportService implements OnApplicationBootstrap {
       aiResponses,
       additionalUpdatesByUser,
     );
+
+    const team = await this.prisma.team.findUnique({
+      where: { id: teamId },
+      select: { workspaceId: true },
+    });
+
+    if (team?.workspaceId) {
+      let nameMap = await this.workspaceMembers.buildReportNameMap(
+        team.workspaceId,
+        participantOverrides,
+      );
+      aiResponses = resolveSlackIdsInRawResponses(aiResponses, nameMap);
+    }
 
     let lastError: unknown = null;
     let generated: AiDigestResult | null = null;
@@ -680,11 +738,61 @@ export class CheckInReportService implements OnApplicationBootstrap {
           : new AiReportGenerationError(String(lastError));
     }
 
+    if (team?.workspaceId) {
+      generated = await this.resolveDigestForWorkspace(
+        generated,
+        team.workspaceId,
+        participantOverrides,
+      );
+    }
+
+    const nameMap = team?.workspaceId
+      ? await this.workspaceMembers.buildReportNameMap(
+          team.workspaceId,
+          participantOverrides,
+        )
+      : null;
+
     return this.enrichDigestWithParticipants(
       generated,
       submissions,
       additionalUpdatesByUser,
+      nameMap,
     );
+  }
+
+  private async resolveDigestForWorkspace(
+    digest: AiDigestResult,
+    workspaceId: string,
+    participantOverrides: Array<{
+      slackUserId: string;
+      displayName?: string | null;
+    }>,
+  ): Promise<AiDigestResult> {
+    let nameMap = await this.workspaceMembers.buildReportNameMap(
+      workspaceId,
+      participantOverrides,
+    );
+    let resolved = resolveSlackIdsInDigest(digest, nameMap);
+
+    if (digestContainsSlackUserIds(resolved)) {
+      try {
+        await this.slackMemberCache.syncFromLive(workspaceId);
+        nameMap = await this.workspaceMembers.buildReportNameMap(
+          workspaceId,
+          participantOverrides,
+        );
+        resolved = resolveSlackIdsInDigest(resolved, nameMap);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Slack live sync for report name resolution failed: ${message}`,
+        );
+      }
+    }
+
+    return resolved;
   }
 
   private async fetchAdditionalUpdatesByUser(
@@ -743,7 +851,7 @@ export class CheckInReportService implements OnApplicationBootstrap {
     digest: AiDigestResult,
     run: {
       id: string;
-      checkIn: { name: string };
+      checkIn: { name: string; teamId: string };
       submissions: Array<{
         status: string;
         answers: Array<{
@@ -760,17 +868,35 @@ export class CheckInReportService implements OnApplicationBootstrap {
     slackReportText: string;
     slackReportBlocks: unknown[];
   }> {
+    const team = await this.prisma.team.findUnique({
+      where: { id: run.checkIn.teamId },
+      select: { workspaceId: true },
+    });
+    const participantOverrides = run.submissions.map((submission) => ({
+      slackUserId: submission.user.slackUserId,
+      displayName: submission.user.slackDisplayName,
+    }));
+    let digestToPersist = digest;
+    if (team?.workspaceId) {
+      digestToPersist = await this.resolveDigestForWorkspace(
+        digest,
+        team.workspaceId,
+        participantOverrides,
+      );
+    }
+
     const completedCount = run.submissions.filter(
       (submission) => submission.status === 'completed',
     ).length;
     const totalCount = run.submissions.length;
-    const reportSections = this.buildPersistedReportSections(
-      digest,
+    const reportSections = await this.buildPersistedReportSections(
+      digestToPersist,
       run,
       nonResponderNames,
+      team?.workspaceId ?? null,
     );
     const digestWithSections: AiDigestResult = {
-      ...digest,
+      ...digestToPersist,
       reportSections,
     };
     const { slackReportText, slackReportBlocks } =
@@ -781,38 +907,64 @@ export class CheckInReportService implements OnApplicationBootstrap {
         nonResponderNames,
       });
 
-    await this.prisma.aiDigest.upsert({
-      where: { runId: run.id },
-      create: {
-        teamId: digest.teamId,
-        runId: digest.runId,
-        generatedAt: new Date(digest.generatedAt),
-        source: digest.source,
-        summary: digest.summary,
-        blockers: digest.blockers as any,
-        themes: digest.themes as any,
-        reportSections: reportSections as any,
-        slackReportText,
-        nonResponderNames: nonResponderNames as any,
-        slackReportBlocks: slackReportBlocks as any,
-        generationError: digest.generationError ?? null,
-      },
-      update: {
-        generatedAt: new Date(digest.generatedAt),
-        source: digest.source,
-        summary: digest.summary,
-        blockers: digest.blockers as any,
-        themes: digest.themes as any,
-        reportSections: reportSections as any,
-        slackReportText,
-        nonResponderNames: nonResponderNames as any,
-        slackReportBlocks: slackReportBlocks as any,
-        generationError: digest.generationError ?? null,
-      },
+    await this.prisma.$transaction(async (tx) => {
+      const row = await tx.aiDigest.upsert({
+        where: { runId: run.id },
+        create: {
+          teamId: digestToPersist.teamId,
+          runId: digestToPersist.runId,
+          generatedAt: new Date(digestToPersist.generatedAt),
+          source: digestToPersist.source,
+          summary: digestToPersist.summary,
+          blockers: digestToPersist.blockers as any,
+          themes: digestToPersist.themes as any,
+          reportSections: reportSections as any,
+          slackReportText,
+          nonResponderNames: nonResponderNames as any,
+          slackReportBlocks: slackReportBlocks as any,
+          generationError: digestToPersist.generationError ?? null,
+        },
+        update: {
+          generatedAt: new Date(digestToPersist.generatedAt),
+          source: digestToPersist.source,
+          summary: digestToPersist.summary,
+          blockers: digestToPersist.blockers as any,
+          themes: digestToPersist.themes as any,
+          reportSections: reportSections as any,
+          slackReportText,
+          nonResponderNames: nonResponderNames as any,
+          slackReportBlocks: slackReportBlocks as any,
+          generationError: digestToPersist.generationError ?? null,
+        },
+      });
+
+      if (
+        isMemoryEligibleDigest({
+          source: digestToPersist.source,
+          summary: digestToPersist.summary,
+          generationError: digestToPersist.generationError,
+        })
+      ) {
+        const teamRow = await tx.team.findUnique({
+          where: { id: digestToPersist.teamId },
+          select: { workspaceId: true },
+        });
+        if (!teamRow?.workspaceId) {
+          throw new Error(
+            `Cannot enqueue REPORT memory — team ${digestToPersist.teamId} has no workspaceId`,
+          );
+        }
+        await this.memoryOutbox.enqueueUpsert({
+          tx,
+          workspaceId: teamRow.workspaceId,
+          sourceType: MEMORY_SOURCE.REPORT,
+          sourceId: row.id,
+        });
+      }
     });
 
     this.logger.log(
-      `[Report] Saved canonical report for run ${run.id} (source=${digest.source})`,
+      `[Report] Saved canonical report for run ${run.id} (source=${digestToPersist.source})`,
     );
 
     return { digest: digestWithSections, slackReportText, slackReportBlocks };
@@ -880,17 +1032,41 @@ export class CheckInReportService implements OnApplicationBootstrap {
         continue;
       }
 
-      const nonResponders = await this.collectionService.getRunNonResponders(
-        digestRecord.runId,
-      );
-      const digest = this.mapStoredDigest(digestRecord);
+      try {
+        const nonResponders = await this.collectionService.getRunNonResponders(
+          digestRecord.runId,
+        );
+        const digest = this.mapStoredDigest(digestRecord);
 
-      await this.persistReportForRun(
-        digest,
-        digestRecord.run,
-        nonResponders.map((member) => member.name),
-      );
-      refreshed += 1;
+        await this.persistReportForRun(
+          digest,
+          digestRecord.run,
+          nonResponders.map((member) => member.name),
+        );
+        refreshed += 1;
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        this.logger.error(
+          `[Report] Failed refreshing canonical Slack report for run ${digestRecord.runId}: ${message}`,
+        );
+        this.logger.warn(
+          `[Report] Offending digest snapshot (run=${digestRecord.runId}): ${JSON.stringify(
+            {
+              runId: digestRecord.runId,
+              source: digestRecord.source,
+              summary: digestRecord.summary?.slice?.(0, 120),
+              blockers: digestRecord.blockers,
+              themes: digestRecord.themes,
+              hasReportSections: Boolean(digestRecord.reportSections),
+              submissionUsers: digestRecord.run.submissions.map((s) => ({
+                slackUserId: s.user?.slackUserId,
+                slackDisplayName: s.user?.slackDisplayName,
+              })),
+            },
+          )}`,
+        );
+      }
     }
 
     if (refreshed > 0) {
@@ -1034,7 +1210,7 @@ export class CheckInReportService implements OnApplicationBootstrap {
     return backfilled;
   }
 
-  private buildPersistedReportSections(
+  private async buildPersistedReportSections(
     digest: AiDigestResult,
     run: {
       submissions: Array<{
@@ -1048,6 +1224,7 @@ export class CheckInReportService implements OnApplicationBootstrap {
       }>;
     },
     nonResponderNames: string[],
+    workspaceId: string | null,
   ) {
     const completedCount = run.submissions.filter(
       (submission) => submission.status === 'completed',
@@ -1072,12 +1249,20 @@ export class CheckInReportService implements OnApplicationBootstrap {
       totalCount,
     );
 
-    const userIdToName = new Map(
-      run.submissions.map((submission) => [
-        submission.user.slackUserId,
-        submission.user.slackDisplayName,
-      ]),
-    );
+    const userIdToName = workspaceId
+      ? await this.workspaceMembers.buildReportNameMap(
+          workspaceId,
+          run.submissions.map((submission) => ({
+            slackUserId: submission.user.slackUserId,
+            displayName: submission.user.slackDisplayName,
+          })),
+        )
+      : new Map(
+          run.submissions.map((submission) => [
+            submission.user.slackUserId,
+            submission.user.slackDisplayName,
+          ]),
+        );
 
     const namedBlockers =
       digest.reportSections.namedBlockers &&
@@ -1220,16 +1405,88 @@ export class CheckInReportService implements OnApplicationBootstrap {
           : digest.source === 'failed'
             ? 'failed'
             : 'rules_fallback',
-      summary: digest.summary,
-      blockers: Array.isArray(digest.blockers)
-        ? (digest.blockers as AiDigestResult['blockers'])
-        : [],
-      themes: Array.isArray(digest.themes)
-        ? (digest.themes as AiDigestResult['themes'])
-        : [],
+      summary: digest.summary ?? '',
+      blockers: this.normalizeStoredBlockers(digest.blockers, digest.runId),
+      themes: this.normalizeStoredThemes(digest.themes, digest.runId),
       reportSections: sections,
       generationError: digest.generationError,
     };
+  }
+
+  private normalizeStoredBlockers(
+    value: unknown,
+    runId: string,
+  ): AiDigestResult['blockers'] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    const normalized: AiDigestResult['blockers'] = [];
+    for (const raw of value) {
+      if (!raw || typeof raw !== 'object') {
+        this.logger.warn(
+          `[Report] Skipping non-object blocker on run ${runId}: ${JSON.stringify(raw)}`,
+        );
+        continue;
+      }
+      const blocker = raw as Partial<AiDigestResult['blockers'][number]>;
+      if (!blocker.userId?.trim()) {
+        this.logger.warn(
+          `[Report] Blocker missing userId on run ${runId}; defaulting to "unknown": ${JSON.stringify(blocker)}`,
+        );
+      }
+      const severityValues = Object.values(BlockerSeverity) as string[];
+      const severity =
+        typeof blocker.severity === 'string' &&
+        severityValues.includes(blocker.severity)
+          ? (blocker.severity as BlockerSeverity)
+          : BlockerSeverity.MEDIUM;
+      normalized.push({
+        userId: blocker.userId?.trim() || 'unknown',
+        questionId: blocker.questionId?.trim() || 'unknown',
+        description:
+          typeof blocker.description === 'string' && blocker.description.trim()
+            ? blocker.description
+            : 'Reported a blocker',
+        severity,
+        dependency:
+          typeof blocker.dependency === 'string' ? blocker.dependency : null,
+        confidence:
+          typeof blocker.confidence === 'number' ? blocker.confidence : 0,
+      });
+    }
+    return normalized;
+  }
+
+  private normalizeStoredThemes(
+    value: unknown,
+    runId: string,
+  ): AiDigestResult['themes'] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    const normalized: AiDigestResult['themes'] = [];
+    for (const raw of value) {
+      if (!raw || typeof raw !== 'object') {
+        this.logger.warn(
+          `[Report] Skipping non-object theme on run ${runId}: ${JSON.stringify(raw)}`,
+        );
+        continue;
+      }
+      const theme = raw as Partial<AiDigestResult['themes'][number]>;
+      normalized.push({
+        theme:
+          typeof theme.theme === 'string' && theme.theme.trim()
+            ? theme.theme
+            : 'Theme',
+        mentionCount:
+          typeof theme.mentionCount === 'number' ? theme.mentionCount : 0,
+        summary:
+          typeof theme.summary === 'string' ? theme.summary : '',
+      });
+    }
+    return normalized;
   }
 
   private parseReportSections(value: unknown): AiDigestResult['reportSections'] {
@@ -1270,6 +1527,7 @@ export class CheckInReportService implements OnApplicationBootstrap {
       user: { slackUserId: string; slackDisplayName: string };
     }>,
     additionalUpdatesByUser: Map<string, string[]> = new Map(),
+    nameMap: Map<string, string> | null = null,
   ): AiDigestResult {
     const participantUpdates = submissions
       .filter(
@@ -1300,10 +1558,13 @@ export class CheckInReportService implements OnApplicationBootstrap {
           additionalUpdatesByUser.get(submission.user.slackUserId) ?? [];
 
         for (const extraText of extras) {
+          const resolvedExtra = nameMap
+            ? resolveAllSlackIdsInText(extraText, nameMap)
+            : extraText;
           answers.push({
             question: 'Additional update',
-            answer: extraText,
-            formattedAnswer: extraText,
+            answer: resolvedExtra,
+            formattedAnswer: resolvedExtra,
             sentiment: undefined,
             semanticInterpretation: null,
           });
@@ -1312,11 +1573,20 @@ export class CheckInReportService implements OnApplicationBootstrap {
         return {
           slackUserId: submission.user.slackUserId,
           displayName: submission.user.slackDisplayName,
-          answers,
+          answers: nameMap
+            ? answers.map((answer) => ({
+                ...answer,
+                question: resolveAllSlackIdsInText(answer.question, nameMap),
+                answer: resolveAllSlackIdsInText(answer.answer, nameMap),
+                formattedAnswer: answer.formattedAnswer
+                  ? resolveAllSlackIdsInText(answer.formattedAnswer, nameMap)
+                  : answer.formattedAnswer,
+              }))
+            : answers,
         };
       });
 
-    return {
+    const enriched: AiDigestResult = {
       ...digest,
       reportSections: {
         ...digest.reportSections,
@@ -1329,6 +1599,8 @@ export class CheckInReportService implements OnApplicationBootstrap {
           digest.summary,
       },
     };
+
+    return nameMap ? resolveSlackIdsInDigest(enriched, nameMap) : enriched;
   }
 
   private delay(ms: number): Promise<void> {

@@ -4,6 +4,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   Prisma,
   QuestionType,
@@ -15,6 +16,17 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { QuestionPayloadDto } from '../slack/dto/question-payload.dto';
 import { CollectionGateway } from '../slack/interfaces/collection.gateway';
+import {
+  formatAnswerForDisplay,
+  formatIssueRefDisplay,
+  parseIssueRefPayload,
+} from '../jira/jira-issue-ref.types';
+import { JiraIssueRefService } from '../jira/jira-issue-ref.service';
+import { AnswerJiraLinkService } from '../jira/answer-jira-link.service';
+import { WORKSPACE_KNOWLEDGE_CHANGED } from '../ai/workspace/retrieval/knowledge-events';
+import { MemoryOutboxService } from '../memory/memory-outbox.service';
+import { MEMORY_SOURCE } from '../memory/memory-source.constants';
+import { isMemoryEligibleAnswerType } from '../memory/memory-ingestion.policy';
 
 export type AppHomeSummary = {
   activeQuestionCount: number;
@@ -49,6 +61,13 @@ type ValidatedAnswer = {
     | typeof Prisma.JsonNull;
 };
 
+export type SubmitAnswerOptions = {
+  /** Overrides stored answer text after type validation (e.g. Yes + blocker details). */
+  displayText?: string;
+  /** Merged into structuredValue after type validation. */
+  structuredExtras?: Record<string, unknown>;
+};
+
 @Injectable()
 export class CollectionService
   implements CollectionGateway
@@ -58,6 +77,10 @@ export class CollectionService
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly jiraIssueRefService: JiraIssueRefService,
+    private readonly answerJiraLinkService: AnswerJiraLinkService,
+    private readonly events: EventEmitter2,
+    private readonly memoryOutbox: MemoryOutboxService,
   ) {}
 
   private async getOrCreateUser(
@@ -488,6 +511,7 @@ export class CollectionService
             Prisma.JsonNull,
         };
 
+      case QuestionType.BLOCKER:
       case QuestionType.YES_NO: {
         const yesValues =
           new Set([
@@ -693,6 +717,21 @@ export class CollectionService
         return {
           text: trimmed,
           structuredValue: { value: numberValue },
+        };
+      }
+
+      case QuestionType.ISSUE_REF: {
+        const snapshot = parseIssueRefPayload(trimmed);
+        if (snapshot) {
+          return {
+            text: formatIssueRefDisplay(snapshot),
+            structuredValue: snapshot,
+          };
+        }
+
+        return {
+          text: trimmed,
+          structuredValue: Prisma.JsonNull,
         };
       }
 
@@ -1014,6 +1053,7 @@ export class CollectionService
     questionId: string,
     answer: string,
     submissionId?: string,
+    options?: SubmitAnswerOptions,
   ): Promise<QuestionPayloadDto | null> {
     const normalizedAnswer =
       answer?.trim();
@@ -1127,8 +1167,45 @@ export class CollectionService
         normalizedAnswer,
       );
 
-    const nextQuestion = await this.prisma.$transaction(async (tx) => {
-      await tx.answer.upsert({
+    let answerToStore = validatedAnswer;
+    if (
+      question.type === QuestionType.FREE_TEXT ||
+      (question.type === QuestionType.ISSUE_REF &&
+        validatedAnswer.structuredValue === Prisma.JsonNull)
+    ) {
+      const enriched = await this.jiraIssueRefService.enrichFreeTextAnswer({
+        userId,
+        text: validatedAnswer.text,
+      });
+      if (enriched.structuredValue) {
+        answerToStore = {
+          text: enriched.text,
+          structuredValue: enriched.structuredValue,
+        };
+      }
+    }
+
+    if (options?.displayText?.trim() || options?.structuredExtras) {
+      const baseStructured =
+        answerToStore.structuredValue === Prisma.JsonNull ||
+        answerToStore.structuredValue == null
+          ? {}
+          : typeof answerToStore.structuredValue === 'object' &&
+              !Array.isArray(answerToStore.structuredValue)
+            ? (answerToStore.structuredValue as Record<string, unknown>)
+            : { value: answerToStore.structuredValue };
+
+      answerToStore = {
+        text: options.displayText?.trim() || answerToStore.text,
+        structuredValue: {
+          ...baseStructured,
+          ...(options.structuredExtras ?? {}),
+        } as Prisma.InputJsonValue,
+      };
+    }
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const savedAnswer = await tx.answer.upsert({
         where: {
           submissionId_questionId: {
             submissionId: session.submissionId,
@@ -1136,17 +1213,26 @@ export class CollectionService
           },
         },
         update: {
-          text: validatedAnswer.text,
-          structuredValue: validatedAnswer.structuredValue,
+          text: answerToStore.text,
+          structuredValue: answerToStore.structuredValue,
         },
         create: {
           userId,
           questionId,
           submissionId: session.submissionId,
-          text: validatedAnswer.text,
-          structuredValue: validatedAnswer.structuredValue,
+          text: answerToStore.text,
+          structuredValue: answerToStore.structuredValue,
         },
       });
+
+      if (isMemoryEligibleAnswerType(question.type)) {
+        await this.memoryOutbox.enqueueUpsert({
+          tx,
+          workspaceId: user.workspaceId,
+          sourceType: MEMORY_SOURCE.STANDUP_ANSWER,
+          sourceId: savedAnswer.id,
+        });
+      }
 
       if (session.submission.status === 'pending') {
         await tx.standupSubmission.update({
@@ -1180,19 +1266,38 @@ export class CollectionService
       });
 
       if (nextIndex === -1) {
-        return null;
+        return { nextQuestion: null, answerId: savedAnswer.id };
       }
 
       const next = activeQuestions[nextIndex];
       this.logger.log(
         `[Pipeline] nextQuestion queried submission=${session.submissionId} answered=${answeredIds.size}/${activeQuestions.length} next=#${nextIndex + 1} id=${next.id}`,
       );
-      return this.toQuestionPayload(
-        next,
-        nextIndex + 1,
-        activeQuestions.length,
-      );
+      return {
+        nextQuestion: this.toQuestionPayload(
+          next,
+          nextIndex + 1,
+          activeQuestions.length,
+        ),
+        answerId: savedAnswer.id,
+      };
     });
+
+    try {
+      await this.answerJiraLinkService.attachPendingLinksToAnswer({
+        submissionId: session.submissionId,
+        questionId,
+        answerId: result.answerId,
+      });
+    } catch (error: unknown) {
+      this.logger.warn(
+        `[Answer Saved] Jira link attach failed for submission ${session.submissionId} question ${questionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    const nextQuestion = result.nextQuestion;
 
     this.logger.log(
       `[Answer Saved] Answer saved for question ${questionId} by user ${userId} in submission ${session.submissionId}.`,
@@ -1475,6 +1580,17 @@ export class CollectionService
       },
     );
 
+    const completedUser = await this.prisma.user.findUnique({
+      where: { id: session.userId },
+      select: { workspaceId: true },
+    });
+    if (completedUser?.workspaceId) {
+      this.events.emit(WORKSPACE_KNOWLEDGE_CHANGED, {
+        workspaceId: completedUser.workspaceId,
+        reason: `standup_submission:${session.submissionId}`,
+      });
+    }
+
     const incompleteSubmissionCount =
       await this.prisma.standupSubmission.count({
         where: {
@@ -1737,7 +1853,7 @@ export class CollectionService
           updateAnswers
             .map(
               (answer) =>
-                `*${answer.question.question}*\n${answer.text}`,
+                `*${answer.question.question}*\n${formatAnswerForDisplay(answer)}`,
             )
             .join('\n'),
 
@@ -1871,7 +1987,7 @@ export class CollectionService
           updateAnswers
             .map(
               (answer) =>
-                `*${answer.question.question}*\n${answer.text}`,
+                `*${answer.question.question}*\n${formatAnswerForDisplay(answer)}`,
             )
             .join('\n'),
 
@@ -2285,7 +2401,7 @@ export class CollectionService
               updateAnswers
                 .map(
                   (answer) =>
-                    `*${answer.question.question}*\n${answer.text}`,
+                    `*${answer.question.question}*\n${formatAnswerForDisplay(answer)}`,
                 )
                 .join(
                   '\n',
@@ -2426,6 +2542,24 @@ export class CollectionService
     );
 
     return null;
+  }
+
+  async getAnswerForQuestion(
+    submissionId: string,
+    questionId: string,
+  ): Promise<{ id: string; text: string } | null> {
+    return this.prisma.answer.findUnique({
+      where: {
+        submissionId_questionId: {
+          submissionId,
+          questionId,
+        },
+      },
+      select: {
+        id: true,
+        text: true,
+      },
+    });
   }
 
   async getCurrentQuestionForSubmission(

@@ -1,3 +1,5 @@
+import { getStoredWorkspaceId } from '@/lib/workspace-storage';
+
 export class ApiError extends Error {
   status: number;
 
@@ -8,16 +10,32 @@ export class ApiError extends Error {
   }
 }
 
+function formatApiErrorMessage(body: unknown, status: number): string {
+  if (body && typeof body === 'object' && 'message' in body) {
+    const raw = (body as { message: unknown }).message;
+    if (Array.isArray(raw)) {
+      return raw.map(String).filter(Boolean).join('; ') || `Request failed (${status})`;
+    }
+    if (typeof raw === 'string' && raw.trim()) {
+      return raw;
+    }
+  }
+  return `Request failed (${status})`;
+}
+
 export async function apiFetch<T = unknown>(
   url: string,
   options?: RequestInit,
 ): Promise<T> {
+  const workspaceId = getStoredWorkspaceId();
+
   const response = await fetch(url, {
+    ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...(workspaceId ? { 'X-Workspace-Id': workspaceId } : {}),
       ...(options?.headers ?? {}),
     },
-    ...options,
   });
 
   const contentType = response.headers.get('content-type') ?? '';
@@ -25,10 +43,7 @@ export async function apiFetch<T = unknown>(
   const body = isJson ? await response.json().catch(() => null) : null;
 
   if (!response.ok) {
-    const message =
-      (body && typeof body === 'object' && 'message' in body && String(body.message)) ||
-      `Request failed (${response.status})`;
-    throw new ApiError(message, response.status);
+    throw new ApiError(formatApiErrorMessage(body, response.status), response.status);
   }
 
   return body as T;

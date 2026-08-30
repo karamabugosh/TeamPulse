@@ -1,10 +1,18 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
-import { AdminController } from './admin.controller';
+import { WorkspaceMembersModule } from '../common/workspace-members.module';
+import { SlackMemberCacheModule } from '../slack/slack-member-cache.module';
+import { AnalyticsModule } from '../analytics/analytics.module';
 import { AdminService } from './admin.service';
+import { AdminController } from './admin.controller';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [
+    PrismaModule,
+    WorkspaceMembersModule,
+    SlackMemberCacheModule,
+    AnalyticsModule,
+  ],
   controllers: [AdminController],
   providers: [AdminService],
   exports: [AdminService],

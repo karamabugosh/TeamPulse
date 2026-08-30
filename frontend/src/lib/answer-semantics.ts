@@ -1,11 +1,21 @@
 export type SemanticSentiment = 'positive' | 'negative' | 'neutral';
 
+export type LinkedJiraIssue = {
+  issueKey: string;
+  summary: string;
+  status?: string | null;
+  assigneeName?: string | null;
+  projectKey?: string | null;
+  issueUrl?: string | null;
+};
+
 export type FormattedAnswer = {
   question: string;
   answer: string;
   formattedAnswer?: string;
   sentiment?: SemanticSentiment;
   semanticInterpretation?: string | null;
+  linkedJiraIssues?: LinkedJiraIssue[];
 };
 
 export function sentimentTextClass(sentiment?: SemanticSentiment): string {

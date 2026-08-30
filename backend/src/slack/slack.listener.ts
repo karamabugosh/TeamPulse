@@ -12,6 +12,7 @@ import { IncomingMessageDto } from './dto/incoming-message.dto';
 import { SlackGateway } from './slack.gateway';
 import { buildAppHomeBlocks } from './slack-app-home.view';
 import { SlackService } from './slack.service';
+import { SlackAiAssistantService } from './slack-ai-assistant.service';
 
 @Injectable()
 export class SlackListener implements OnApplicationBootstrap {
@@ -24,6 +25,7 @@ export class SlackListener implements OnApplicationBootstrap {
     private readonly collectionService: CollectionService,
     private readonly reportsService: ReportsService,
     private readonly prisma: PrismaService,
+    private readonly slackAiAssistant: SlackAiAssistantService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -417,16 +419,15 @@ export class SlackListener implements OnApplicationBootstrap {
             .replace(/<@[^>]+>/g, '')
             .trim();
 
-          const payload: IncomingMessageDto = {
-            userId: event.user,
+          // Channel @PulseBot mentions → Pulse AI (same AiChatService as AI Workspace).
+          await this.slackAiAssistant.handleQuestion({
+            slackUserId: event.user,
             channelId: event.channel,
-            message: normalizedMessage,
-            timestamp: event.ts,
-          };
-
-          await this.slackGateway.handleIncomingMessage(
-            payload,
-          );
+            question: normalizedMessage,
+            messageTs: event.ts,
+            threadTs: event.thread_ts,
+            source: 'app_mention',
+          });
         } catch (error: unknown) {
           const message =
             error instanceof Error

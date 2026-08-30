@@ -4,6 +4,8 @@ import {
   getSemanticSentiment,
   parseYesNoChoice,
 } from '../common/question-semantics';
+import { formatAnswerForDisplay } from '../jira/jira-issue-ref.types';
+import { lookupSlackDisplayName } from '../common/slack-member.util';
 import {
   ExtractedBlocker,
   NamedPersonSection,
@@ -40,7 +42,11 @@ const CONFIDENCE_PATTERN =
 const HELP_PATTERN = /\b(help|assistance|support|need.*from)\b/i;
 const STATUS_PATTERN = /\b(status|progress|on track|task status)\b/i;
 
-function classifyQuestionRole(questionText: string): QuestionRole {
+function classifyQuestionRole(
+  questionText: string,
+  questionType?: QuestionType,
+): QuestionRole {
+  if (questionType === QuestionType.BLOCKER) return 'blocked';
   const normalized = questionText.trim();
   if (BLOCKED_PATTERN.test(normalized)) return 'blocked';
   if (HELP_PATTERN.test(normalized)) return 'help';
@@ -54,19 +60,26 @@ function classifyQuestionRole(questionText: string): QuestionRole {
 function pickAnswerText(
   answer: SubmissionInput['answers'][number],
 ): string {
-  const enriched = enrichAnswerForAnalysis({
-    questionText: answer.question.question,
-    questionType: answer.question.type,
+  const displayText = formatAnswerForDisplay({
     text: answer.text,
     structuredValue: answer.structuredValue,
   });
-  return enriched.formattedAnswer?.trim() || answer.text.trim();
+  const enriched = enrichAnswerForAnalysis({
+    questionText: answer.question.question,
+    questionType: answer.question.type,
+    text: displayText,
+    structuredValue: answer.structuredValue,
+  });
+  return enriched.formattedAnswer?.trim() || displayText.trim();
 }
 
 function isBlockedAnswer(
   answer: SubmissionInput['answers'][number],
 ): boolean {
-  if (classifyQuestionRole(answer.question.question) !== 'blocked') {
+  if (
+    classifyQuestionRole(answer.question.question, answer.question.type) !==
+    'blocked'
+  ) {
     return false;
   }
 
@@ -91,7 +104,7 @@ function isBlockedAnswer(
 function isHelpRequestedAnswer(
   answer: SubmissionInput['answers'][number],
 ): boolean {
-  if (classifyQuestionRole(answer.question.question) !== 'help') {
+  if (classifyQuestionRole(answer.question.question, answer.question.type) !== 'help') {
     return false;
   }
 
@@ -152,7 +165,7 @@ export function buildParticipantProfiles(
       let taskStatus = '';
 
       for (const answer of sorted) {
-        const role = classifyQuestionRole(answer.question.question);
+        const role = classifyQuestionRole(answer.question.question, answer.question.type);
         const text = pickAnswerText(answer);
 
         switch (role) {
@@ -162,9 +175,17 @@ export function buildParticipantProfiles(
           case 'today':
             if (!todaysPlan && text) todaysPlan = text;
             break;
-          case 'blocked':
+          case 'blocked': {
+            const choice = parseYesNoChoice({
+              type: answer.question.type,
+              text: answer.text,
+              structuredValue: answer.structuredValue,
+            });
+            // Explicit "No" means not blocked — do not treat the word "No" as blocker detail.
+            if (choice === 'no') break;
             if (!blockedDetail && text) blockedDetail = text;
             break;
+          }
           case 'help':
             if (!helpDetail && text) helpDetail = text;
             break;
@@ -184,17 +205,20 @@ export function buildParticipantProfiles(
         }
       }
 
-      const blocked =
-        isBlockedAnswer(
-          sorted.find(
-            (answer) => classifyQuestionRole(answer.question.question) === 'blocked',
-          ) ?? sorted[0],
-        ) || blockedDetail.length > 0;
+      const blockedRoleAnswer =
+        sorted.find(
+          (answer) =>
+            classifyQuestionRole(answer.question.question, answer.question.type) ===
+            'blocked',
+        ) ?? null;
+      const blocked = blockedRoleAnswer
+        ? isBlockedAnswer(blockedRoleAnswer)
+        : blockedDetail.length > 0;
 
       const helpRequested =
         isHelpRequestedAnswer(
           sorted.find(
-            (answer) => classifyQuestionRole(answer.question.question) === 'help',
+            (answer) => classifyQuestionRole(answer.question.question, answer.question.type) === 'help',
           ) ?? sorted[0],
         ) || helpDetail.length > 0;
 
@@ -321,11 +345,16 @@ export function groupBlockersByPerson(
 ): NamedPersonSection[] {
   const grouped = new Map<string, string[]>();
 
-  for (const blocker of blockers) {
-    const name = userIdToName.get(blocker.userId) ?? blocker.userId;
-    const item = blocker.dependency
-      ? `${blocker.description} (${blocker.dependency})`
-      : blocker.description;
+  for (const blocker of blockers ?? []) {
+    const userId = blocker?.userId?.trim() || '';
+    const name = userId
+      ? (userIdToName.get(userId) ??
+        lookupSlackDisplayName(userId, userIdToName))
+      : 'Unknown User';
+    const description = blocker?.description?.trim() || 'Reported a blocker';
+    const item = blocker?.dependency
+      ? `${description} (${blocker.dependency})`
+      : description;
     const existing = grouped.get(name) ?? [];
     existing.push(item);
     grouped.set(name, existing);

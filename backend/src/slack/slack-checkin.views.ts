@@ -11,6 +11,13 @@ import {
 
 export const CHECKIN_ANSWER_ACTION = 'checkin_answer';
 export const CHECKIN_ANSWER_SELECT_ACTION = 'checkin_answer_select';
+export const CHECKIN_ISSUE_REF_ACTION = 'checkin_issue_ref';
+export const CHECKIN_LINK_JIRA_ACTION = 'checkin_link_jira';
+export const CHECKIN_JIRA_REFRESH_ACTION = 'checkin_jira_refresh';
+export const JIRA_ACTION_APPROVE = 'jira_action_approve';
+export const JIRA_ACTION_CANCEL = 'jira_action_cancel';
+export const JIRA_ACTION_RETRY = 'jira_action_retry';
+export const JIRA_ACTION_DISMISS = 'jira_action_dismiss';
 
 export function buildCheckinAnswerActionId(
   submissionId: string,
@@ -26,6 +33,627 @@ export function buildCheckinAnswerSelectActionId(
   questionId: string,
 ): string {
   return `${CHECKIN_ANSWER_SELECT_ACTION}:${submissionId}:${questionId}`;
+}
+
+export function buildCheckinIssueRefActionId(
+  submissionId: string,
+  questionId: string,
+): string {
+  return `${CHECKIN_ISSUE_REF_ACTION}:${submissionId}:${questionId}`;
+}
+
+export function parseCheckinIssueRefActionId(actionId: string): {
+  submissionId: string;
+  questionId: string;
+} | null {
+  const prefix = `${CHECKIN_ISSUE_REF_ACTION}:`;
+  if (!actionId.startsWith(prefix)) {
+    return null;
+  }
+  const parts = actionId.slice(prefix.length).split(':');
+  if (parts.length < 2 || !parts[0] || !parts[1]) {
+    return null;
+  }
+  return { submissionId: parts[0], questionId: parts[1] };
+}
+
+export function buildCheckinLinkJiraActionId(
+  submissionId: string,
+  questionId: string,
+): string {
+  return `${CHECKIN_LINK_JIRA_ACTION}:${submissionId}:${questionId}`;
+}
+
+export function parseCheckinLinkJiraActionId(actionId: string): {
+  submissionId: string;
+  questionId: string;
+} | null {
+  const prefix = `${CHECKIN_LINK_JIRA_ACTION}:`;
+  if (!actionId.startsWith(prefix)) {
+    return null;
+  }
+  const parts = actionId.slice(prefix.length).split(':');
+  if (parts.length < 2 || !parts[0] || !parts[1]) {
+    return null;
+  }
+  return { submissionId: parts[0], questionId: parts[1] };
+}
+
+export function buildCheckinJiraRefreshActionId(
+  submissionId: string,
+  questionId: string,
+): string {
+  return `${CHECKIN_JIRA_REFRESH_ACTION}:${submissionId}:${questionId}`;
+}
+
+export function parseCheckinJiraRefreshActionId(actionId: string): {
+  submissionId: string;
+  questionId: string;
+} | null {
+  const prefix = `${CHECKIN_JIRA_REFRESH_ACTION}:`;
+  if (!actionId.startsWith(prefix)) {
+    return null;
+  }
+  const parts = actionId.slice(prefix.length).split(':');
+  if (parts.length < 2 || !parts[0] || !parts[1]) {
+    return null;
+  }
+  return { submissionId: parts[0], questionId: parts[1] };
+}
+
+export function buildJiraLinkBlocks(
+  submissionId: string,
+  questionId: string,
+): KnownBlock[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '🔗 *Link Jira Issue*',
+      },
+    },
+    {
+      type: 'actions',
+      block_id: `jira_link_${questionId}`,
+      elements: [
+        {
+          type: 'external_select',
+          action_id: buildCheckinLinkJiraActionId(submissionId, questionId),
+          placeholder: {
+            type: 'plain_text',
+            text: 'Select Jira Issue',
+          },
+          min_query_length: 0,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Refresh' },
+          action_id: buildCheckinJiraRefreshActionId(submissionId, questionId),
+          value: 'refresh',
+        },
+      ],
+    },
+  ];
+}
+
+export function buildJiraLinkConfirmationBlocks(
+  issues: Array<{ issueKey: string; summary: string; issueUrl?: string | null }>,
+): KnownBlock[] {
+  const lines = issues
+    .map((issue) => {
+      const label = issue.issueUrl
+        ? `<${issue.issueUrl}|${issue.issueKey}>`
+        : issue.issueKey;
+      return `• *${label}*\n  ${issue.summary}`;
+    })
+    .join('\n');
+
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `✅ *Linked:*\n${lines}`,
+      },
+    },
+  ];
+}
+
+export function isBlockerQuestionText(questionText: string): boolean {
+  const normalized = questionText.trim().toLowerCase();
+  return (
+    /\bare you blocked\b/.test(normalized) ||
+    /\bare there any blockers?\b/.test(normalized) ||
+    /\bany blockers?\b/.test(normalized)
+  );
+}
+
+/**
+ * Primary gate for opening the Blocker Details modal.
+ * Prefer persisted QuestionType.BLOCKER. Legacy YES_NO (+ classic phrases)
+ * remains supported so existing check-ins keep working.
+ */
+export function isBlockerCapableQuestion(params: {
+  type?: QuestionType | string | null;
+  text: string;
+}): boolean {
+  if (params.type === QuestionType.BLOCKER || params.type === 'BLOCKER') {
+    return true;
+  }
+  if (
+    params.type === QuestionType.YES_NO ||
+    params.type === QuestionType.YES_NO_MAYBE ||
+    params.type === 'YES_NO' ||
+    params.type === 'YES_NO_MAYBE'
+  ) {
+    return isBlockerQuestionText(params.text);
+  }
+  // Unknown/missing type: do not open modal from free text
+  return false;
+}
+
+export const CHECKIN_BLOCKER_MODAL_CALLBACK = 'checkin_blocker_details_submit';
+
+export type BlockerDetailsModalMetadata = {
+  submissionId: string;
+  questionId: string;
+  channelId: string;
+  threadTs: string;
+};
+
+export function buildBlockerDetailsModal(params: {
+  submissionId: string;
+  questionId: string;
+  channelId: string;
+  threadTs: string;
+}): Record<string, unknown> {
+  const metadata: BlockerDetailsModalMetadata = {
+    submissionId: params.submissionId,
+    questionId: params.questionId,
+    channelId: params.channelId,
+    threadTs: params.threadTs,
+  };
+
+  return {
+    type: 'modal',
+    callback_id: `${CHECKIN_BLOCKER_MODAL_CALLBACK}:${params.submissionId}:${params.questionId}`,
+    private_metadata: JSON.stringify(metadata),
+    title: { type: 'plain_text', text: 'Blocker Details' },
+    submit: { type: 'plain_text', text: 'Save Blocker' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: '🚨 Blocker Details', emoji: true },
+      },
+      {
+        type: 'input',
+        block_id: 'blocker_title_block',
+        label: { type: 'plain_text', text: 'Blocker Title *' },
+        element: {
+          type: 'plain_text_input',
+          action_id: 'blocker_title',
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'blocker_description_block',
+        label: { type: 'plain_text', text: 'Description *' },
+        element: {
+          type: 'plain_text_input',
+          action_id: 'blocker_description',
+          multiline: true,
+          placeholder: {
+            type: 'plain_text',
+            text: 'Describe what is blocking your work...',
+          },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'blocker_severity_block',
+        label: { type: 'plain_text', text: 'Severity *' },
+        element: {
+          type: 'static_select',
+          action_id: 'blocker_severity',
+          placeholder: { type: 'plain_text', text: 'Select severity' },
+          options: [
+            { text: { type: 'plain_text', text: '🟢 Low' }, value: 'Low' },
+            { text: { type: 'plain_text', text: '🟡 Medium' }, value: 'Medium' },
+            { text: { type: 'plain_text', text: '🟠 High' }, value: 'High' },
+            { text: { type: 'plain_text', text: '🔴 Critical' }, value: 'Critical' },
+          ],
+          initial_option: {
+            text: { type: 'plain_text', text: '🟡 Medium' },
+            value: 'Medium',
+          },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'blocker_category_block',
+        label: { type: 'plain_text', text: 'Category *' },
+        element: {
+          type: 'static_select',
+          action_id: 'blocker_category',
+          placeholder: { type: 'plain_text', text: 'Select category' },
+          options: [
+            'Backend',
+            'Frontend',
+            'API',
+            'Authentication',
+            'Database',
+            'QA',
+            'DevOps',
+            'Infrastructure',
+            'Design',
+            'Deployment',
+            'Review',
+            'Testing',
+            'Documentation',
+            'Other',
+          ].map((label) => ({
+            text: { type: 'plain_text', text: label },
+            value: label,
+          })),
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'blocker_category_other_block',
+        optional: true,
+        label: { type: 'plain_text', text: 'Specify category' },
+        hint: {
+          type: 'plain_text',
+          text: 'Only needed when Category is Other',
+        },
+        element: {
+          type: 'plain_text_input',
+          action_id: 'blocker_category_other',
+          placeholder: { type: 'plain_text', text: 'Specify category' },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'blocker_owner_block',
+        optional: true,
+        label: { type: 'plain_text', text: 'Who is blocking you?' },
+        element: {
+          type: 'users_select',
+          action_id: 'blocker_owner',
+          placeholder: { type: 'plain_text', text: 'Search teammate…' },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'blocker_jira_block',
+        optional: true,
+        label: { type: 'plain_text', text: 'Related Jira Issue' },
+        element: {
+          type: 'external_select',
+          action_id: buildCheckinLinkJiraActionId(
+            params.submissionId,
+            params.questionId,
+          ),
+          placeholder: {
+            type: 'plain_text',
+            text: 'Search Jira issue...',
+          },
+          min_query_length: 0,
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'blocker_resolution_block',
+        optional: true,
+        label: { type: 'plain_text', text: 'Expected Resolution' },
+        element: {
+          type: 'datepicker',
+          action_id: 'blocker_resolution',
+          placeholder: { type: 'plain_text', text: 'Select a date' },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'blocker_preventing_block',
+        optional: true,
+        label: {
+          type: 'plain_text',
+          text: 'Is this blocker preventing all your work?',
+        },
+        element: {
+          type: 'static_select',
+          action_id: 'blocker_preventing',
+          placeholder: { type: 'plain_text', text: 'Select Yes or No' },
+          options: [
+            { text: { type: 'plain_text', text: 'Yes' }, value: 'Yes' },
+            { text: { type: 'plain_text', text: 'No' }, value: 'No' },
+          ],
+          initial_option: {
+            text: { type: 'plain_text', text: 'No' },
+            value: 'No',
+          },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'blocker_continue_block',
+        optional: true,
+        label: {
+          type: 'plain_text',
+          text: 'Can you continue working on another task?',
+        },
+        element: {
+          type: 'radio_buttons',
+          action_id: 'blocker_continue',
+          options: [
+            { text: { type: 'plain_text', text: 'Yes' }, value: 'Yes' },
+            { text: { type: 'plain_text', text: 'No' }, value: 'No' },
+          ],
+        },
+      },
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: '_Screenshot attachments can be shared in the thread after saving. Critical severity and “preventing all work” will be highlighted in the success card._',
+          },
+        ],
+      },
+    ],
+  };
+}
+
+export function parseBlockerDetailsModalMetadata(
+  raw: string | undefined,
+): BlockerDetailsModalMetadata | null {
+  if (!raw?.trim()) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<BlockerDetailsModalMetadata>;
+    if (
+      !parsed.submissionId ||
+      !parsed.questionId ||
+      !parsed.channelId ||
+      !parsed.threadTs
+    ) {
+      return null;
+    }
+    return {
+      submissionId: parsed.submissionId,
+      questionId: parsed.questionId,
+      channelId: parsed.channelId,
+      threadTs: parsed.threadTs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function formatBlockerAnswerText(params: {
+  title: string;
+  description: string;
+  severity: string;
+  category: string;
+  expectedResolution?: string | null;
+  issueKey?: string | null;
+  preventingAllWork?: boolean;
+  canContinueOtherTask?: string | null;
+  ownerLabel?: string | null;
+}): string {
+  const lines = [
+    params.title.trim(),
+    '',
+    params.description.trim(),
+    '',
+    `Severity: ${params.severity}`,
+    `Category: ${params.category}`,
+  ];
+  if (params.ownerLabel) {
+    lines.push(`Blocked by: ${params.ownerLabel}`);
+  }
+  if (params.expectedResolution) {
+    lines.push(`Expected Resolution: ${params.expectedResolution}`);
+  }
+  if (params.issueKey) {
+    lines.push(`Linked Jira: ${params.issueKey}`);
+  }
+  if (params.preventingAllWork) {
+    lines.push('Preventing all work: Yes');
+  }
+  if (params.canContinueOtherTask) {
+    lines.push(`Can continue other task: ${params.canContinueOtherTask}`);
+  }
+  return lines.join('\n');
+}
+
+export function buildBlockerSavedSuccessBlocks(params: {
+  title: string;
+  description?: string | null;
+  severity: string;
+  category?: string | null;
+  issueKey?: string | null;
+  expectedResolution?: string | null;
+  preventingAllWork?: boolean;
+  ownerLabel?: string | null;
+}): KnownBlock[] {
+  const lines = ['✅ *Blocker saved successfully*', '', `*Title:*\n${params.title}`];
+
+  if (params.description?.trim()) {
+    lines.push('', `*Reason:*\n${params.description.trim()}`);
+  }
+
+  if (params.severity?.trim()) {
+    lines.push('', `*Severity:*\n${params.severity}`);
+  }
+
+  if (params.category?.trim()) {
+    lines.push('', `*Category:*\n${params.category.trim()}`);
+  }
+
+  if (params.expectedResolution?.trim()) {
+    lines.push(
+      '',
+      `*Expected resolution:*\n${params.expectedResolution.trim()}`,
+    );
+  }
+
+  if (params.ownerLabel?.trim()) {
+    lines.push('', `*Blocked by:*\n${params.ownerLabel.trim()}`);
+  }
+
+  if (params.issueKey?.trim()) {
+    lines.push('', `*Linked Jira:*\n${params.issueKey.trim()}`);
+  }
+
+  if (params.preventingAllWork) {
+    lines.push('', '🚨 *Critical blocker affecting current work.*');
+  }
+
+  if (params.severity.toLowerCase() === 'critical') {
+    lines.push('', '_This blocker requires immediate attention._');
+  }
+
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: lines.join('\n'),
+      },
+    },
+  ];
+}
+
+export function parseJiraActionId(
+  actionId: string,
+  prefix: string,
+): { actionId: string } | null {
+  const fullPrefix = `${prefix}:`;
+  if (!actionId.startsWith(fullPrefix)) {
+    return null;
+  }
+  const actionValue = actionId.slice(fullPrefix.length);
+  return actionValue ? { actionId: actionValue } : null;
+}
+
+export function buildJiraActionProposalBlocks(params: {
+  actionId: string;
+  actionType: string;
+  issueKey?: string | null;
+  summaryText: string;
+}): KnownBlock[] {
+  const issueLine = params.issueKey ? `\n*Issue:* ${params.issueKey}` : '';
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Suggested Jira action*\n${params.summaryText}${issueLine}`,
+      },
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Approve' },
+          style: 'primary',
+          action_id: `${JIRA_ACTION_APPROVE}:${params.actionId}`,
+          value: params.actionId,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Cancel' },
+          action_id: `${JIRA_ACTION_CANCEL}:${params.actionId}`,
+          value: params.actionId,
+        },
+      ],
+    },
+  ];
+}
+
+export function buildJiraActionResultBlocks(executed: {
+  id?: string;
+  status: string;
+  jiraIssueKey?: string | null;
+  result?: unknown;
+  errorMessage?: string | null;
+  actionType?: string;
+}): KnownBlock[] {
+  if (executed.status === 'executed') {
+    const issueKey =
+      executed.jiraIssueKey ||
+      ((executed.result as { issueKey?: string } | null)?.issueKey ?? 'Issue');
+    const successText =
+      executed.actionType === 'create_issue'
+        ? `✅ *Jira issue created successfully*\n${issueKey}`
+        : `✅ *Jira updated*\n${issueKey}`;
+    return [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: successText,
+        },
+      },
+    ];
+  }
+
+  if (executed.status === 'cancelled') {
+    return [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '_Jira action dismissed._',
+        },
+      },
+    ];
+  }
+
+  const reason =
+    executed.errorMessage?.trim() || 'Jira rejected the request.';
+  const blocks: KnownBlock[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: [
+          '⚠ *Could not create Jira issue.*',
+          '',
+          '*Reason:*',
+          reason,
+        ].join('\n'),
+      },
+    },
+  ];
+
+  if (executed.id) {
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Retry' },
+          style: 'primary',
+          action_id: `${JIRA_ACTION_RETRY}:${executed.id}`,
+          value: executed.id,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Dismiss' },
+          action_id: `${JIRA_ACTION_DISMISS}:${executed.id}`,
+          value: executed.id,
+        },
+      ],
+    });
+  }
+
+  return blocks;
 }
 
 function truncatePlainText(text: string, maxLength: number): string {
@@ -227,6 +855,19 @@ export function validateSlackBlocks(blocks: KnownBlock[]): {
             selectValues.add(value);
           }
         }
+
+        if (
+          element.type === 'external_select' ||
+          element.type === 'multi_external_select'
+        ) {
+          const placeholder =
+            (element.placeholder as { text?: string } | undefined)?.text ?? '';
+          if (!placeholder.trim()) {
+            errors.push(
+              `${element.type} missing placeholder in block ${blockIndex} element ${elementIndex}.`,
+            );
+          }
+        }
       }
     }
   }
@@ -259,6 +900,52 @@ function buildQuestionInteractiveBlocks(
   );
 
   switch (question.type) {
+    case QuestionType.BLOCKER: {
+      // Always 🔴 Yes / 🟢 No — blocker Yes is a negative outcome regardless of wording.
+      return [
+        {
+          type: 'actions',
+          block_id: `checkin_q_${questionId}`,
+          elements: [
+            {
+              type: 'button',
+              text: {
+                type: 'plain_text',
+                text: getSlackButtonLabel('yes', 'negative'),
+                emoji: true,
+              },
+              action_id: buildCheckinAnswerActionId(
+                submissionId,
+                questionId,
+                'yes',
+              ),
+              value: 'Yes',
+              ...(getSlackButtonStyle('negative')
+                ? { style: getSlackButtonStyle('negative') }
+                : {}),
+            },
+            {
+              type: 'button',
+              text: {
+                type: 'plain_text',
+                text: getSlackButtonLabel('no', 'positive'),
+                emoji: true,
+              },
+              action_id: buildCheckinAnswerActionId(
+                submissionId,
+                questionId,
+                'no',
+              ),
+              value: 'No',
+              ...(getSlackButtonStyle('positive')
+                ? { style: getSlackButtonStyle('positive') }
+                : {}),
+            },
+          ],
+        },
+      ];
+    }
+
     case QuestionType.YES_NO: {
       const polarity = inferYesNoPolarity(question.text);
       const yesSentiment =
@@ -477,6 +1164,25 @@ function buildQuestionInteractiveBlocks(
       ];
     }
 
+    case QuestionType.ISSUE_REF:
+      return [
+        {
+          type: 'actions',
+          block_id: `checkin_q_${questionId}`,
+          elements: [
+            {
+              type: 'external_select',
+              action_id: buildCheckinIssueRefActionId(submissionId, questionId),
+              placeholder: {
+                type: 'plain_text',
+                text: 'Search your issues...',
+              },
+              min_query_length: 0,
+            },
+          ],
+        },
+      ];
+
     default:
       return [];
   }
@@ -488,8 +1194,10 @@ export function buildDmQuestionMessage(params: {
   submissionId: string;
   checkInName?: string;
   isParent?: boolean;
+  includeJiraLink?: boolean;
 }): { text: string; blocks: KnownBlock[]; usedBlocks: boolean } {
-  const { question, submissionId, checkInName, isParent } = params;
+  const { question, submissionId, checkInName, isParent, includeJiraLink } =
+    params;
   const questionNumber = question.questionNumber ?? 1;
   const totalQuestions = question.totalQuestions ?? 1;
 
@@ -523,22 +1231,30 @@ export function buildDmQuestionMessage(params: {
     submissionId,
   );
 
-  if (interactiveBlocks.length === 0) {
+  const jiraLinkBlocks =
+    includeJiraLink && question.type !== QuestionType.ISSUE_REF
+      ? buildJiraLinkBlocks(submissionId, question.questionId)
+      : [];
+
+  if (interactiveBlocks.length === 0 && jiraLinkBlocks.length === 0) {
     return { text, blocks: [sectionBlock], usedBlocks: false };
   }
 
-  const blocks: KnownBlock[] = [sectionBlock, ...interactiveBlocks];
+  const blocks: KnownBlock[] = [
+    sectionBlock,
+    ...interactiveBlocks,
+    ...jiraLinkBlocks,
+  ];
+
+  if (jiraLinkBlocks.length > 0) {
+    return { text, blocks, usedBlocks: true };
+  }
+
   const validation = validateSlackBlocks(blocks);
 
   if (validation.valid) {
     return { text, blocks, usedBlocks: true };
   }
-
-  text = [
-    text,
-    '',
-    '_Please reply with your answer in this thread._',
-  ].join('\n');
 
   return {
     text,
@@ -630,11 +1346,12 @@ export function formatSummaryAnswer(params: {
   const { type, text, structuredValue, question } = params;
 
   switch (type) {
+    case QuestionType.BLOCKER:
     case QuestionType.YES_NO:
     case QuestionType.YES_NO_MAYBE:
       return formatColoredYesNoAnswer({
         question: question ?? '',
-        type,
+        type: type === QuestionType.BLOCKER ? QuestionType.YES_NO : type,
         text,
         structuredValue,
       });
@@ -821,9 +1538,9 @@ export function buildDmThreadCompletionText(params: {
   checkInName: string;
 }): string {
   return [
-    '✅ Thank you.',
+    '✅ Standup completed successfully',
     '',
-    `Your *${params.checkInName}* has been submitted successfully.`,
+    `Your *${params.checkInName}* has been submitted.`,
   ].join('\n');
 }
 

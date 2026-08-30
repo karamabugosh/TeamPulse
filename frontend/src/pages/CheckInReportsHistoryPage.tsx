@@ -90,6 +90,7 @@ export const CheckInReportsHistoryPage: React.FC = () => {
       <PageHeader
         title={data.checkInName}
         description={`${data.teamName} · Report history`}
+        accent="reports"
       >
         <Button variant="outline" size="sm" asChild>
           <Link to="/reports">

@@ -1,12 +1,27 @@
-import 'dotenv/config';
+import { IncomingMessage, ServerResponse } from 'http';
+import { config as loadEnv } from 'dotenv';
+import { existsSync } from 'fs';
+import {
+  getJiraEnvDiagnostics,
+  resolveBackendEnvPath,
+} from './config/env.config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { runWithWorkspaceId } from './common/workspace-context';
+
+const envFilePath = resolveBackendEnvPath();
+loadEnv({ path: envFilePath });
 
 async function bootstrap(): Promise<void> {
   // Log only whether secrets are set, never their actual values
+  console.log('Env file:', envFilePath, '(exists:', existsSync(envFilePath), ')');
   console.log('SLACK_BOT_TOKEN set:', !!process.env.SLACK_BOT_TOKEN);
   console.log('SLACK_SIGNING_SECRET set:', !!process.env.SLACK_SIGNING_SECRET);
   console.log('SLACK_APP_TOKEN set:', !!process.env.SLACK_APP_TOKEN);
+  const jiraDiagnostics = getJiraEnvDiagnostics();
+  console.log('JIRA_CLIENT_ID set:', jiraDiagnostics.jiraClientIdSet);
+  console.log('JIRA_CLIENT_SECRET set:', jiraDiagnostics.jiraClientSecretSet);
+  console.log('JIRA_REDIRECT_URI set:', jiraDiagnostics.jiraRedirectUriSet);
   const appToken = process.env.SLACK_APP_TOKEN ?? '';
   if (appToken && !appToken.startsWith('xapp-')) {
     console.warn(
@@ -15,8 +30,18 @@ async function bootstrap(): Promise<void> {
   }
 
   const app = await NestFactory.create(AppModule);
-  app.enableCors();
+  app.enableCors({
+    exposedHeaders: ['X-Workspace-Id'],
+  });
   app.setGlobalPrefix('api');
+
+  // Propagate selected workspace to AsyncLocalStorage for tenant-scoped queries
+  app.use((req: IncomingMessage, _res: ServerResponse, next: () => void) => {
+    const raw = req.headers['x-workspace-id'];
+    const workspaceId = Array.isArray(raw) ? raw[0] : raw;
+    runWithWorkspaceId(workspaceId?.trim() || null, () => next());
+  });
+
   const port = Number(process.env.PORT) || 3000;
   await app.listen(port, '0.0.0.0');
   console.log(`Application is running on: http://localhost:${port}`);

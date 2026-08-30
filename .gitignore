@@ -12,6 +12,9 @@ frontend/node_modules/
 dist/
 build/
 backend/dist/
+backend/coverage/
+backend/exports/*.json
+backend/exports/*.csv
 
 # Logs
 *.log

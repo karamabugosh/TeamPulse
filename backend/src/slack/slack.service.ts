@@ -111,7 +111,14 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
       `[Slack Socket] Config OK — bot=${maskToken(token)} app=${maskToken(appToken)} instance=#${this.socketInstanceId}`,
     );
 
-    await this.startSocketMode();
+    // Do not block Nest bootstrap / HTTP listen on Slack websocket handshake.
+    // Socket Mode reconnects in the background if the pong/connect path is slow.
+    void this.startSocketMode().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `[Slack Socket] Background start failed: ${message}`,
+      );
+    });
   }
 
   private async startSocketMode(): Promise<void> {
@@ -379,6 +386,17 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
       slackUser.name?.trim() ||
       slackUser.id;
 
+    const realName =
+      slackUser.profile?.real_name?.trim() ||
+      slackUser.real_name?.trim() ||
+      displayName;
+
+    const avatarUrl =
+      slackUser.profile?.image_192 ||
+      slackUser.profile?.image_72 ||
+      slackUser.profile?.image_48 ||
+      null;
+
     const user =
       await this.prisma.user.upsert({
         where: {
@@ -400,6 +418,14 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
           timezone: slackUser.tz ?? null,
         },
       });
+
+    await this.prisma.$executeRaw`
+      UPDATE "User"
+      SET
+        "slackRealName" = ${realName},
+        "slackAvatarUrl" = ${avatarUrl}
+      WHERE id = ${user.id}
+    `;
 
     const existingMembership =
       await this.prisma.teamMember.findFirst({
@@ -896,6 +922,48 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
     } catch (error: unknown) {
       this.logSlackError(`Failed to update message ${payload.ts}`, error);
       return false;
+    }
+  }
+
+  /**
+   * Upload a text/markdown file into a Slack channel/thread (for large AI reports).
+   */
+  public async uploadTextFile(params: {
+    channelId: string;
+    threadTs?: string;
+    filename: string;
+    content: string;
+    initialComment?: string;
+    title?: string;
+  }): Promise<{ ok: boolean; error?: string }> {
+    if (!this.webClient) {
+      return {
+        ok: false,
+        error: 'Slack WebClient is not initialized (missing SLACK_BOT_TOKEN).',
+      };
+    }
+
+    try {
+      await this.webClient.files.uploadV2({
+        channel_id: params.channelId,
+        thread_ts: params.threadTs,
+        filename: params.filename,
+        content: params.content,
+        title: params.title ?? params.filename,
+        initial_comment: params.initialComment,
+      } as any);
+
+      this.logger.log(
+        `Uploaded Slack file ${params.filename} to ${params.channelId}`,
+      );
+      return { ok: true };
+    } catch (error: unknown) {
+      this.logSlackError(
+        `Failed to upload Slack file ${params.filename}`,
+        error,
+      );
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, error: message };
     }
   }
 

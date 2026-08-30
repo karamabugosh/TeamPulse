@@ -1,5 +1,5 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { QuestionType } from '@prisma/client';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Prisma, QuestionType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   describeSemanticAnswer,
@@ -11,25 +11,89 @@ import {
   groupBlockersByPerson,
 } from '../check-in/report-participant.utils';
 import { buildSlackThreadUrl } from '../slack/slack-checkin.views';
+import {
+  resolveActiveWorkspaceId,
+  workspaceCheckInFilter,
+  workspaceDigestFilter,
+  workspaceRunFilter,
+  workspaceSubmissionFilter,
+  workspaceTeamFilter,
+  workspaceUserFilter,
+} from '../common/workspace-context';
+import {
+  isPlaceholderSlackUser,
+  isUsableSlackBotToken,
+} from '../common/slack-member.util';
+import { WorkspaceMembersService } from '../common/workspace-members.service';
+import { SlackMemberCacheService } from '../slack/slack-member-cache.service';
+import { WorkspaceAnalyticsService } from '../analytics/workspace-analytics.service';
+import { resolveSlackIdsInDigest } from '../common/report-slack-resolution.util';
+import {
+  lookupSlackDisplayName,
+  resolveAllSlackIdsInText,
+} from '../common/slack-member.util';
+import { AiDigestResult } from '../ai/dto/ai-result.dto';
 
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly workspaceMembers: WorkspaceMembersService,
+    private readonly slackMemberCache: SlackMemberCacheService,
+    private readonly workspaceAnalytics: WorkspaceAnalyticsService,
+  ) {}
+
+  async listWorkspaces() {
+    const workspaces = await this.prisma.workspace.findMany({
+      orderBy: { installedAt: 'asc' },
+      select: {
+        id: true,
+        slackWorkspaceId: true,
+        slackWorkspaceName: true,
+        installedAt: true,
+        _count: {
+          select: { users: true, teams: true },
+        },
+      },
+    });
+
+    return workspaces.map((ws) => ({
+      id: ws.id,
+      slackWorkspaceId: ws.slackWorkspaceId,
+      name: ws.slackWorkspaceName,
+      installedAt: ws.installedAt,
+      userCount: ws._count.users,
+      teamCount: ws._count.teams,
+      plan: 'Pro',
+    }));
+  }
+
+  private async activeWorkspaceId(): Promise<string | null> {
+    return resolveActiveWorkspaceId(this.prisma);
+  }
 
   async getOverviewStats() {
+    const workspaceId = await this.activeWorkspaceId();
+    const teamScope = workspaceId ? workspaceTeamFilter(workspaceId) : {};
+    const checkInScope = workspaceId ? workspaceCheckInFilter(workspaceId) : {};
+    const submissionScope = workspaceId ? workspaceSubmissionFilter(workspaceId) : {};
+    const digestScope = workspaceId ? workspaceDigestFilter(workspaceId) : {};
+
     const activeCheckInsCount = await this.prisma.checkIn.count({
-      where: { enabled: true, publishStatus: 'published' },
+      where: { enabled: true, publishStatus: 'published', ...checkInScope },
     });
 
     const activeTeamsCount = await this.prisma.team.count({
-      where: { schedulerEnabled: true },
+      where: { schedulerEnabled: true, ...teamScope },
     });
 
-    const totalSubmissions = await this.prisma.standupSubmission.count();
+    const totalSubmissions = await this.prisma.standupSubmission.count({
+      where: submissionScope,
+    });
     const completedSubmissions = await this.prisma.standupSubmission.count({
-      where: { status: 'completed' },
+      where: { status: 'completed', ...submissionScope },
     });
 
     const completionRate =
@@ -38,14 +102,14 @@ export class AdminService {
         : 0;
 
     const pendingResponses = await this.prisma.standupSubmission.count({
-      where: { status: { in: ['pending', 'in_progress'] } },
+      where: { status: { in: ['pending', 'in_progress'] }, ...submissionScope },
     });
 
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
     const todayReportsCount = await this.prisma.aiDigest.count({
-      where: { generatedAt: { gte: todayStart } },
+      where: { generatedAt: { gte: todayStart }, ...digestScope },
     });
 
     const completedWithTime = await this.prisma.standupSubmission.findMany({
@@ -53,6 +117,7 @@ export class AdminService {
         status: 'completed',
         startedAt: { not: null },
         completedAt: { not: null },
+        ...submissionScope,
       },
       select: { startedAt: true, completedAt: true },
       take: 500,
@@ -68,14 +133,22 @@ export class AdminService {
       avgResponseTimeMinutes = Math.round((totalMs / completedWithTime.length / 60000) * 10) / 10;
     }
 
-    const weeklyParticipation = await this.buildWeeklyParticipation();
-    const completionTrend = await this.buildCompletionTrend();
-    const topBlockers = await this.buildTopBlockers();
-    const recentActivity = await this.buildRecentActivity();
-    const upcomingCheckIns = await this.buildUpcomingCheckIns();
+    const weeklyParticipation = await this.buildWeeklyParticipation(workspaceId);
+    const completionTrend = await this.buildCompletionTrend(workspaceId);
+    const topBlockers = await this.buildTopBlockers(workspaceId);
+    const recentActivity = await this.buildRecentActivity(workspaceId);
+    const upcomingCheckIns = await this.buildUpcomingCheckIns(workspaceId);
 
-    const aiInsights = await this.buildAiInsights();
-    const aiAnalytics = await this.buildAiAnalytics(activeCheckInsCount);
+    const aiInsights = await this.buildAiInsights(workspaceId);
+    const aiAnalytics = await this.buildAiAnalytics(activeCheckInsCount, workspaceId);
+
+    let workspaceSnapshot = null;
+    if (workspaceId) {
+      workspaceSnapshot = await this.workspaceAnalytics.collectSnapshot({
+        workspaceId,
+        refreshJira: true,
+      });
+    }
 
     return {
       stats: {
@@ -85,6 +158,11 @@ export class AdminService {
         pendingResponses,
         avgResponseTimeMinutes,
         todayReports: todayReportsCount,
+        openBlockers: workspaceSnapshot?.blockers.openBlockers ?? null,
+        totalBlockers: workspaceSnapshot?.blockers.total ?? null,
+        workspaceMembers: workspaceSnapshot?.members.total ?? null,
+        jiraIssues: workspaceSnapshot?.jira.totalIssues ?? null,
+        standupSubmissions: workspaceSnapshot?.standups.totalSubmissions ?? null,
       },
       weeklyParticipation,
       completionTrend,
@@ -96,9 +174,10 @@ export class AdminService {
     };
   }
 
-  private async buildWeeklyParticipation() {
+  private async buildWeeklyParticipation(workspaceId?: string | null) {
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const result = [];
+    const submissionScope = workspaceId ? workspaceSubmissionFilter(workspaceId) : {};
 
     for (let i = 6; i >= 0; i--) {
       const dayStart = new Date();
@@ -108,10 +187,14 @@ export class AdminService {
       dayEnd.setDate(dayEnd.getDate() + 1);
 
       const total = await this.prisma.standupSubmission.count({
-        where: { createdAt: { gte: dayStart, lt: dayEnd } },
+        where: { createdAt: { gte: dayStart, lt: dayEnd }, ...submissionScope },
       });
       const completed = await this.prisma.standupSubmission.count({
-        where: { status: 'completed', createdAt: { gte: dayStart, lt: dayEnd } },
+        where: {
+          status: 'completed',
+          createdAt: { gte: dayStart, lt: dayEnd },
+          ...submissionScope,
+        },
       });
 
       result.push({
@@ -125,8 +208,9 @@ export class AdminService {
     return result;
   }
 
-  private async buildCompletionTrend() {
+  private async buildCompletionTrend(workspaceId?: string | null) {
     const result = [];
+    const submissionScope = workspaceId ? workspaceSubmissionFilter(workspaceId) : {};
     for (let i = 6; i >= 0; i--) {
       const dayStart = new Date();
       dayStart.setDate(dayStart.getDate() - i);
@@ -135,10 +219,14 @@ export class AdminService {
       dayEnd.setDate(dayEnd.getDate() + 1);
 
       const total = await this.prisma.standupSubmission.count({
-        where: { createdAt: { gte: dayStart, lt: dayEnd } },
+        where: { createdAt: { gte: dayStart, lt: dayEnd }, ...submissionScope },
       });
       const completed = await this.prisma.standupSubmission.count({
-        where: { status: 'completed', createdAt: { gte: dayStart, lt: dayEnd } },
+        where: {
+          status: 'completed',
+          createdAt: { gte: dayStart, lt: dayEnd },
+          ...submissionScope,
+        },
       });
 
       result.push({
@@ -149,48 +237,38 @@ export class AdminService {
     return result;
   }
 
-  private async buildTopBlockers() {
-    const digests = await this.prisma.aiDigest.findMany({
-      orderBy: { generatedAt: 'desc' },
-      take: 20,
-      include: { team: { select: { name: true } } },
+  private async buildTopBlockers(workspaceId?: string | null) {
+    if (!workspaceId) return [];
+
+    const snapshot = await this.workspaceAnalytics.collectSnapshot({
+      workspaceId,
+      refreshJira: false,
     });
 
-    const blockerMap = new Map<string, { description: string; count: number; team: string }>();
-
-    for (const digest of digests) {
-      const blockers = Array.isArray(digest.blockers) ? (digest.blockers as any[]) : [];
-      for (const b of blockers) {
-        const key = b.description || 'Unknown';
-        const existing = blockerMap.get(key);
-        if (existing) {
-          existing.count += 1;
-        } else {
-          blockerMap.set(key, {
-            description: key,
-            count: 1,
-            team: digest.team?.name || 'General',
-          });
-        }
-      }
-    }
-
-    return [...blockerMap.values()]
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5)
-      .map((b, idx) => ({
-        id: String(idx + 1),
-        description: b.description,
-        count: b.count,
-        severity: b.count >= 3 ? 'high' : b.count >= 2 ? 'medium' : 'low',
-        team: b.team,
-      }));
+    return snapshot.blockers.active.slice(0, 5).map((blocker, idx) => ({
+      id: String(idx + 1),
+      description: blocker.title,
+      count: 1,
+      severity:
+        blocker.severity?.toLowerCase() === 'critical'
+          ? 'high'
+          : blocker.severity?.toLowerCase() === 'high'
+            ? 'high'
+            : blocker.severity?.toLowerCase() === 'medium'
+              ? 'medium'
+              : 'low',
+      team: blocker.reporter,
+    }));
   }
 
-  private async buildRecentActivity() {
+  private async buildRecentActivity(workspaceId?: string | null) {
     const activities: any[] = [];
+    const digestScope = workspaceId ? workspaceDigestFilter(workspaceId) : {};
+    const submissionScope = workspaceId ? workspaceSubmissionFilter(workspaceId) : {};
+    const runScope = workspaceId ? workspaceRunFilter(workspaceId) : {};
 
     const recentDigests = await this.prisma.aiDigest.findMany({
+      where: digestScope,
       take: 5,
       orderBy: { generatedAt: 'desc' },
       include: { team: { select: { name: true } } },
@@ -208,7 +286,7 @@ export class AdminService {
     }
 
     const recentSubmissions = await this.prisma.standupSubmission.findMany({
-      where: { status: 'completed' },
+      where: { status: 'completed', ...submissionScope },
       take: 5,
       orderBy: { completedAt: 'desc' },
       include: {
@@ -229,19 +307,20 @@ export class AdminService {
     }
 
     const recentRuns = await this.prisma.standupRun.findMany({
+      where: runScope,
       take: 5,
       orderBy: { startedAt: 'desc' },
-      include: { checkIn: { select: { name: true } }, team: { select: { name: true } } },
+      include: { team: { select: { name: true } }, checkIn: { select: { name: true } } },
     });
 
     for (const r of recentRuns) {
       activities.push({
         id: `run-${r.id}`,
-        type: 'checkin_triggered',
-        title: `${r.checkIn?.name || 'Check-in'} collection started`,
+        type: 'run_started',
+        title: `${r.checkIn?.name || 'Check-in'} run started`,
         team: r.team?.name || 'General',
         timestamp: r.startedAt.toISOString(),
-        status: 'info',
+        status: r.status,
       });
     }
 
@@ -250,9 +329,14 @@ export class AdminService {
       .slice(0, 10);
   }
 
-  private async buildUpcomingCheckIns() {
+  private async buildUpcomingCheckIns(workspaceId?: string | null) {
     const checkIns = await this.prisma.checkIn.findMany({
-      where: { enabled: true, publishStatus: 'published', scheduleEnabled: true },
+      where: {
+        enabled: true,
+        publishStatus: 'published',
+        scheduleEnabled: true,
+        ...(workspaceId ? workspaceCheckInFilter(workspaceId) : {}),
+      },
       include: { team: { select: { name: true } } },
       orderBy: { name: 'asc' },
     });
@@ -301,13 +385,16 @@ export class AdminService {
     );
   }
 
-  private async buildAiInsights() {
+  private async buildAiInsights(workspaceId?: string | null) {
     const latestDigest = await this.prisma.aiDigest.findFirst({
       where: {
         source: 'ai',
         generationError: null,
         slackReportText: { not: null },
-        run: { checkInId: { not: null } },
+        run: {
+          checkInId: { not: null },
+          ...(workspaceId ? { team: { workspaceId } } : {}),
+        },
       },
       orderBy: { generatedAt: 'desc' },
       select: {
@@ -346,11 +433,12 @@ export class AdminService {
     };
   }
 
-  private async buildAiAnalytics(activeCheckInsCount: number) {
+  private async buildAiAnalytics(activeCheckInsCount: number, workspaceId?: string | null) {
     const recentRuns = await this.prisma.standupRun.findMany({
       where: {
         status: 'completed',
         checkInId: { not: null },
+        ...(workspaceId ? { team: { workspaceId } } : {}),
         aiDigest: {
           is: {
             slackReportText: { not: null },
@@ -482,6 +570,12 @@ export class AdminService {
 
     const answerBlockers = await this.extractAnswerBlockers(latestRun.id);
     const activeBlockers = this.mergeBlockers(aiBlockers, answerBlockers);
+
+    const authoritativeBlockerStats = workspaceId
+      ? await this.workspaceAnalytics.getBlockerStats(workspaceId)
+      : null;
+    const openBlockerCount = authoritativeBlockerStats?.openBlockers ?? 0;
+
     const blockedMemberCount = new Set(
       activeBlockers.map((blocker) => blocker.memberKey),
     ).size;
@@ -533,7 +627,7 @@ export class AdminService {
 
     const teamHealth = this.computeTeamHealth({
       completionRate,
-      blockerCount: blockedMemberCount,
+      blockerCount: openBlockerCount,
       highBlockers,
       summary: this.isPlaceholderAnalyticsText(latestDigest.summary)
         ? ''
@@ -545,7 +639,7 @@ export class AdminService {
       sections: latestSections,
       productivityTrend,
       recentRuns,
-      blockedMemberCount,
+      blockedMemberCount: openBlockerCount,
       completionRate,
     });
 
@@ -571,7 +665,7 @@ export class AdminService {
       completionRateLabel:
         completionRate !== null ? `${completionRate}%` : 'Not enough responses',
       completionTrendDelta,
-      activeBlockersCount: blockedMemberCount,
+      activeBlockersCount: openBlockerCount,
       activeBlockers: activeBlockers.map(({ memberKey: _memberKey, ...blocker }) => blocker),
       averageConfidence,
       averageConfidenceLabel:
@@ -690,7 +784,13 @@ export class AdminService {
       where: {
         submission: { runId, status: 'completed' },
         question: {
-          type: { in: [QuestionType.YES_NO, QuestionType.YES_NO_MAYBE] },
+          type: {
+            in: [
+              QuestionType.YES_NO,
+              QuestionType.YES_NO_MAYBE,
+              QuestionType.BLOCKER,
+            ],
+          },
         },
       },
       include: {
@@ -954,32 +1054,78 @@ export class AdminService {
   }
 
   async getAnalyticsData() {
+    const workspaceId = await this.activeWorkspaceId();
+    if (!workspaceId) {
+      return {
+        stats: {
+          overallCompletion: 0,
+          pendingResponses: 0,
+          missedCheckIns: 0,
+          avgResponseTimeMinutes: 0,
+        },
+        completionRateTrend: [],
+        responseSpeedDistribution: [],
+        teamPerformance: [],
+        recurringBlockers: [],
+        missedStandups: [],
+        aiInsights: {
+          headline: 'No workspace selected',
+          summary: 'Select a workspace to view analytics.',
+          recommendation: '',
+        },
+      };
+    }
+
+    const snapshot = await this.workspaceAnalytics.collectSnapshot({
+      workspaceId,
+      refreshJira: true,
+    });
+
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const submissionScope = workspaceSubmissionFilter(workspaceId);
 
-    const totalSubmissions = await this.prisma.standupSubmission.count({
-      where: { createdAt: { gte: thirtyDaysAgo } },
-    });
-    const completedSubmissions = await this.prisma.standupSubmission.count({
-      where: { status: 'completed', createdAt: { gte: thirtyDaysAgo } },
-    });
-    const pendingSubmissions = await this.prisma.standupSubmission.count({
-      where: { status: { in: ['pending', 'in_progress'] } },
-    });
-    const missedSubmissions = await this.prisma.standupSubmission.count({
+    const completedWithTime = await this.prisma.standupSubmission.findMany({
       where: {
-        status: { not: 'completed' },
-        run: { status: 'completed' },
-        createdAt: { gte: thirtyDaysAgo },
+        status: 'completed',
+        startedAt: { not: null },
+        completedAt: { not: null, gte: thirtyDaysAgo },
+        ...submissionScope,
       },
+      select: { startedAt: true, completedAt: true },
+      take: 500,
+      orderBy: { completedAt: 'desc' },
     });
 
-    const overallCompletion =
-      totalSubmissions > 0
-        ? Math.round((completedSubmissions / totalSubmissions) * 100)
-        : 0;
+    let avgResponseTimeMinutes = 0;
+    if (completedWithTime.length > 0) {
+      const totalMs = completedWithTime.reduce(
+        (sum, s) => sum + (s.completedAt!.getTime() - s.startedAt!.getTime()),
+        0,
+      );
+      avgResponseTimeMinutes =
+        Math.round((totalMs / completedWithTime.length / 60000) * 10) / 10;
+    }
+
+    const responseSpeedDistribution = [
+      { timeSlot: '< 5 min', count: 0 },
+      { timeSlot: '5-15 min', count: 0 },
+      { timeSlot: '15-30 min', count: 0 },
+      { timeSlot: '30-60 min', count: 0 },
+      { timeSlot: '> 1 hr', count: 0 },
+    ];
+    for (const row of completedWithTime) {
+      const minutes =
+        (row.completedAt!.getTime() - row.startedAt!.getTime()) / 60000;
+      if (minutes < 5) responseSpeedDistribution[0].count += 1;
+      else if (minutes < 15) responseSpeedDistribution[1].count += 1;
+      else if (minutes < 30) responseSpeedDistribution[2].count += 1;
+      else if (minutes < 60) responseSpeedDistribution[3].count += 1;
+      else responseSpeedDistribution[4].count += 1;
+    }
 
     const teams = await this.prisma.team.findMany({
+      where: workspaceTeamFilter(workspaceId),
       include: {
         teamMembers: { where: { optedOut: false } },
         standupRuns: {
@@ -993,40 +1139,15 @@ export class AdminService {
       const subs = team.standupRuns.flatMap((r) => r.submissions);
       const completed = subs.filter((s) => s.status === 'completed').length;
       const rate = subs.length > 0 ? Math.round((completed / subs.length) * 100) : 0;
-
-      const completedWithTime = subs.filter((s) => s.startedAt && s.completedAt);
-      let avgMinutes = 0;
-      if (completedWithTime.length > 0) {
-        const totalMs = completedWithTime.reduce(
-          (sum, s) => sum + (s.completedAt!.getTime() - s.startedAt!.getTime()),
-          0,
-        );
-        avgMinutes = Math.round((totalMs / completedWithTime.length / 60000) * 10) / 10;
-      }
-
       return {
         teamName: team.name,
         completionRate: rate,
-        avgTime: `${avgMinutes || 0} min`,
+        avgTime: 'n/a',
         activeMembers: team.teamMembers.length,
       };
     });
 
-    const digests = await this.prisma.aiDigest.findMany({
-      where: { generatedAt: { gte: thirtyDaysAgo } },
-      select: { blockers: true },
-    });
-
-    const blockerMap = new Map<string, number>();
-    for (const digest of digests) {
-      const blockers = Array.isArray(digest.blockers) ? digest.blockers : [];
-      for (const b of blockers as any[]) {
-        const key = b.description?.slice(0, 80) || 'Unknown';
-        blockerMap.set(key, (blockerMap.get(key) || 0) + 1);
-      }
-    }
-
-    const recurringBlockers = [...blockerMap.entries()]
+    const recurringBlockers = Object.entries(snapshot.blockers.byOwner)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5)
       .map(([category, occurrences]) => ({
@@ -1035,44 +1156,68 @@ export class AdminService {
         impact: occurrences >= 5 ? 'High' : occurrences >= 2 ? 'Medium' : 'Low',
       }));
 
+    const overallCompletion =
+      snapshot.standups.totalSubmissions > 0
+        ? Math.round(
+            (snapshot.standups.completedSubmissions /
+              snapshot.standups.totalSubmissions) *
+              100,
+          )
+        : 0;
+
     return {
       stats: {
         overallCompletion,
-        pendingResponses: pendingSubmissions,
-        missedCheckIns: missedSubmissions,
-        avgResponseTimeMinutes: 0,
+        pendingResponses: snapshot.standups.pendingSubmissions,
+        missedCheckIns: snapshot.standups.missedSubmissions,
+        avgResponseTimeMinutes,
+        openBlockers: snapshot.blockers.openBlockers,
+        criticalBlockers: snapshot.blockers.critical,
+        jiraIssues: snapshot.jira.totalIssues,
+        workspaceMembers: snapshot.members.total,
       },
-      completionRateTrend: [
-        { week: 'Week 1', rate: Math.max(overallCompletion - 16, 0), target: 85 },
-        { week: 'Week 2', rate: Math.max(overallCompletion - 10, 0), target: 85 },
-        { week: 'Week 3', rate: Math.max(overallCompletion - 5, 0), target: 85 },
-        { week: 'Week 4', rate: overallCompletion, target: 85 },
-      ],
-      responseSpeedDistribution: [
-        { timeSlot: '< 5 min', count: Math.round(completedSubmissions * 0.55) },
-        { timeSlot: '5-15 min', count: Math.round(completedSubmissions * 0.25) },
-        { timeSlot: '15-30 min', count: Math.round(completedSubmissions * 0.12) },
-        { timeSlot: '30-60 min', count: Math.round(completedSubmissions * 0.05) },
-        { timeSlot: '> 1 hr', count: Math.round(completedSubmissions * 0.03) },
-      ],
+      completionRateTrend: snapshot.standups.weeklyTrend.map((w) => ({
+        week: w.weekLabel,
+        rate: w.rate,
+        target: 85,
+      })),
+      responseSpeedDistribution,
       teamPerformance,
       recurringBlockers,
       missedStandups: [],
       aiInsights: {
-        headline: `Team completion rate is ${overallCompletion}%`,
-        summary: `${pendingSubmissions} responses are still pending across active check-ins.`,
-        recommendation: 'Review recurring blockers and adjust reminder settings for low-participation teams.',
+        headline: `${snapshot.standups.completedSubmissions} of ${snapshot.members.activeParticipants} members submitted standups (${snapshot.standups.participationRate ?? 'n/a'}%).`,
+        summary: `${snapshot.blockers.openBlockers} blockers remain open. ${snapshot.jira.inProgressIssues} Jira issues in progress. Completion rate ${overallCompletion}%.`,
+        recommendation:
+          snapshot.blockers.openBlockers > 0
+            ? `Review ${snapshot.blockers.openBlockers} open blocker(s) on the Blockers page.`
+            : 'No open blockers — maintain current standup cadence.',
       },
+      generatedAt: snapshot.generatedAt,
+      workspaceId: snapshot.workspaceId,
     };
   }
 
+  async getAnalyticsSnapshot() {
+    const workspaceId = await this.activeWorkspaceId();
+    if (!workspaceId) {
+      throw new NotFoundException('No active workspace');
+    }
+    return this.workspaceAnalytics.collectSnapshot({
+      workspaceId,
+      refreshJira: true,
+    });
+  }
+
   async getReportsList(search?: string, timeframe?: string) {
+    const workspaceId = await this.activeWorkspaceId();
     const where: any = {
       source: 'ai',
       slackReportText: { not: null },
       generationError: null,
       run: {
         checkInId: { not: null },
+        ...(workspaceId ? { team: { workspaceId } } : {}),
       },
     };
 
@@ -1272,6 +1417,7 @@ export class AdminService {
           select: {
             id: true,
             name: true,
+            workspaceId: true,
             workspace: {
               select: {
                 slackWorkspaceId: true,
@@ -1303,6 +1449,9 @@ export class AdminService {
                   include: { question: true },
                   orderBy: { createdAt: 'asc' },
                 },
+                jiraIssueLinks: {
+                  orderBy: [{ questionId: 'asc' }, { issueKey: 'asc' }],
+                },
               },
               orderBy: { completedAt: 'asc' },
             },
@@ -1326,7 +1475,7 @@ export class AdminService {
     }
 
     const listItem = this.mapReportListItem(digest);
-    const reportSections = this.enrichReportSectionsForDetail(
+    let reportSections = this.enrichReportSectionsForDetail(
       digest,
       digest.run.submissions,
     );
@@ -1334,32 +1483,137 @@ export class AdminService {
       ? (digest.nonResponderNames as string[])
       : [];
 
+    let summary = listItem.summary;
+    let slackReportText = digest.slackReportText ?? null;
+    let nameMap: Map<string, string> | null = null;
+
+    if (digest.team.workspaceId) {
+      nameMap = await this.workspaceMembers.buildReportNameMap(
+        digest.team.workspaceId,
+        digest.run.submissions.map((submission) => ({
+          slackUserId: submission.user.slackUserId,
+          displayName: submission.user.slackDisplayName,
+        })),
+      );
+      const resolved = resolveSlackIdsInDigest(
+        {
+          teamId: digest.teamId,
+          runId: digest.runId,
+          generatedAt: digest.generatedAt.toISOString(),
+          source: digest.source as 'ai' | 'rules_fallback' | 'failed',
+          summary: digest.summary ?? '',
+          blockers:
+            (digest.blockers as unknown as AiDigestResult['blockers']) ?? [],
+          themes: (digest.themes as unknown as AiDigestResult['themes']) ?? [],
+          reportSections: reportSections as AiDigestResult['reportSections'],
+        },
+        nameMap,
+      );
+      summary = resolved.summary;
+      reportSections = resolved.reportSections as typeof reportSections;
+      slackReportText = slackReportText
+        ? resolveAllSlackIdsInText(slackReportText, nameMap)
+        : null;
+    }
+
     const blockers = Array.isArray(digest.blockers)
-      ? (digest.blockers as Array<Record<string, unknown>>).map((blocker) => ({
-          ...blocker,
-          displayName:
-            digest.run.submissions.find(
-              (submission) =>
-                submission.user.slackUserId === blocker.userId,
-            )?.user.slackDisplayName ?? String(blocker.userId ?? 'Unknown'),
-        }))
+      ? (digest.blockers as Array<Record<string, unknown>>).map((blocker) => {
+          const userId = String(blocker.userId ?? '');
+          return {
+            ...blocker,
+            displayName: nameMap
+              ? lookupSlackDisplayName(userId, nameMap)
+              : digest.run.submissions.find(
+                  (submission) => submission.user.slackUserId === userId,
+                )?.user.slackDisplayName ?? 'Unknown User',
+          };
+        })
       : [];
 
     return {
       ...listItem,
+      summary,
       description: digest.run.checkIn.description,
       runStatus: digest.run.status,
       reportStatus: digest.run.reportStatus,
       nonResponderNames,
-      slackReportText: digest.slackReportText ?? null,
+      slackReportText,
       generationError: digest.generationError ?? null,
       reportSections,
-      participants: reportSections.participantUpdates,
+      participants: this.buildParticipantsFromSubmissions(
+        digest.run.submissions,
+      ),
       participantProfiles: reportSections.participantProfiles ?? [],
       statistics: reportSections.statistics ?? null,
       blockers,
       themes: digest.themes,
     };
+  }
+
+  private buildParticipantsFromSubmissions(
+    submissions: Array<{
+      status: string;
+      answers: Array<{
+        text: string;
+        questionId: string;
+        question: { question: string; order?: number | null };
+      }>;
+      jiraIssueLinks?: Array<{
+        questionId: string;
+        issueKey: string;
+        summary: string;
+        status: string | null;
+        assigneeName: string | null;
+        projectKey: string | null;
+        issueUrl: string | null;
+      }>;
+      user: { slackUserId: string; slackDisplayName: string };
+    }>,
+  ) {
+    return submissions
+      .filter((submission) => submission.status === 'completed')
+      .map((submission) => {
+        const linksByQuestion = new Map<
+          string,
+          Array<{
+            issueKey: string;
+            summary: string;
+            status: string | null;
+            assigneeName: string | null;
+            projectKey: string | null;
+            issueUrl: string | null;
+          }>
+        >();
+
+        for (const link of submission.jiraIssueLinks ?? []) {
+          const existing = linksByQuestion.get(link.questionId) ?? [];
+          existing.push({
+            issueKey: link.issueKey,
+            summary: link.summary,
+            status: link.status,
+            assigneeName: link.assigneeName,
+            projectKey: link.projectKey,
+            issueUrl: link.issueUrl,
+          });
+          linksByQuestion.set(link.questionId, existing);
+        }
+
+        return {
+          slackUserId: submission.user.slackUserId,
+          displayName: submission.user.slackDisplayName,
+          answers: [...submission.answers]
+            .sort(
+              (left, right) =>
+                (left.question.order ?? 0) - (right.question.order ?? 0),
+            )
+            .map((answer) => ({
+              question: answer.question.question,
+              answer: answer.text,
+              linkedJiraIssues:
+                linksByQuestion.get(answer.questionId) ?? [],
+            })),
+        };
+      });
   }
 
   private enrichReportSectionsForDetail(
@@ -1733,7 +1987,9 @@ ${JSON.stringify(digest.themes, null, 2)}
   }
 
   async getTeams() {
+    const workspaceId = await this.activeWorkspaceId();
     const teams = await this.prisma.team.findMany({
+      where: workspaceId ? workspaceTeamFilter(workspaceId) : undefined,
       include: {
         workspace: true,
         teamMembers: {
@@ -1755,10 +2011,39 @@ ${JSON.stringify(digest.themes, null, 2)}
       orderBy: { createdAt: 'desc' },
     });
 
+    const userIds = [...new Set(teams.flatMap((team) => team.teamMembers.map((m) => m.userId)))];
+    const profiles =
+      userIds.length > 0
+        ? await this.prisma.$queryRaw<
+            Array<{
+              id: string;
+              slackRealName: string | null;
+              slackAvatarUrl: string | null;
+            }>
+          >`
+            SELECT id, "slackRealName", "slackAvatarUrl"
+            FROM "User"
+            WHERE id IN (${Prisma.join(userIds)})
+          `
+        : [];
+    const profileById = new Map(profiles.map((p) => [p.id, p]));
+
     return teams.map((team) => {
-      const lead = team.teamMembers.find((member) => member.role === 'lead');
-      const memberNames = team.teamMembers.map(
+      const enrichedMembers = team.teamMembers.map((member) => {
+        const profile = profileById.get(member.userId);
+        return {
+          ...member,
+          user: {
+            ...member.user,
+            slackRealName: profile?.slackRealName ?? null,
+            slackAvatarUrl: profile?.slackAvatarUrl ?? null,
+          },
+        };
+      });
+      const lead = enrichedMembers.find((member) => member.role === 'lead');
+      const memberNames = enrichedMembers.map(
         (member) =>
+          member.user.slackRealName ||
           member.user.slackDisplayName ||
           member.user.email ||
           member.user.slackUserId,
@@ -1775,18 +2060,19 @@ ${JSON.stringify(digest.themes, null, 2)}
         createdAt: team.createdAt,
         updatedAt: team.updatedAt,
         workspace: team.workspace,
-        teamMembers: team.teamMembers,
+        teamMembers: enrichedMembers,
         teamLead: lead
           ? {
               id: lead.id,
               userId: lead.userId,
               name:
+                lead.user.slackRealName ||
                 lead.user.slackDisplayName ||
                 lead.user.email ||
                 lead.user.slackUserId,
             }
           : null,
-        memberCount: team.teamMembers.length,
+        memberCount: enrichedMembers.length,
         memberNames,
         checkInCount: team._count.checkIns,
         activeRunCount: team._count.standupRuns,
@@ -1795,14 +2081,14 @@ ${JSON.stringify(digest.themes, null, 2)}
   }
 
   async createTeam(data: { name: string; slackChannelId?: string; timezone?: string; scheduleCron?: string }) {
-    const workspace = await this.prisma.workspace.findFirst();
-    if (!workspace) {
+    const workspaceId = await this.activeWorkspaceId();
+    if (!workspaceId) {
       throw new NotFoundException('No workspace found');
     }
 
     return this.prisma.team.create({
       data: {
-        workspaceId: workspace.id,
+        workspaceId,
         name: data.name,
         slackChannelId: data.slackChannelId || null,
         timezone: data.timezone || 'Asia/Riyadh',
@@ -1813,36 +2099,273 @@ ${JSON.stringify(digest.themes, null, 2)}
   }
 
   async deleteTeam(id: string) {
+    const workspaceId = await this.activeWorkspaceId();
+    const team = await this.prisma.team.findUnique({ where: { id } });
+    if (!team) throw new NotFoundException(`Team ${id} not found`);
+    if (workspaceId && team.workspaceId !== workspaceId) {
+      throw new NotFoundException(`Team ${id} was not found.`);
+    }
     return this.prisma.team.delete({ where: { id } });
   }
 
   async getUsers(search?: string) {
-    return this.prisma.user.findMany({
-      where: search
-        ? {
-            OR: [
-              { slackDisplayName: { contains: search, mode: 'insensitive' } },
-              { slackUserId: { contains: search, mode: 'insensitive' } },
-              { email: { contains: search, mode: 'insensitive' } },
-            ],
-          }
-        : undefined,
+    const workspaceId = await this.activeWorkspaceId();
+    if (!workspaceId) return [];
+
+    const members = await this.workspaceMembers.listHumanMembers(workspaceId, {
+      search,
+    });
+
+    // Preserve prior getUsers shape (team memberships included).
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: members.map((m) => m.id) } },
       include: {
         teamMembers: { include: { team: true } },
       },
-      orderBy: { createdAt: 'desc' },
     });
+
+    const order = new Map(members.map((m, index) => [m.id, index]));
+    return users.sort(
+      (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
+    );
+  }
+
+  /**
+   * Slack workspace members for the active Pulse workspace.
+   * Prefers a live Slack users.list sync into the User table, then returns
+   * human members only (no bots/apps/deleted/placeholders), scoped by workspaceId.
+   */
+  async listWorkspaceMembers(params?: {
+    search?: string;
+    teamId?: string;
+    sync?: boolean;
+  }) {
+    const workspaceId = await this.activeWorkspaceId();
+    if (!workspaceId) {
+      return {
+        members: [],
+        source: 'none' as const,
+        synced: false,
+        workspaceId: null,
+      };
+    }
+
+    const workspace = await this.prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: {
+        id: true,
+        botToken: true,
+        slackWorkspaceId: true,
+        slackWorkspaceName: true,
+      },
+    });
+
+    if (!workspace) {
+      throw new NotFoundException('Workspace not found');
+    }
+
+    let synced = false;
+    let source: 'slack_api' | 'database' = 'database';
+
+    const shouldSync = params?.sync !== false;
+    if (shouldSync && isUsableSlackBotToken(workspace.botToken)) {
+      try {
+        const count = await this.syncSlackMembersForWorkspace(workspace);
+        synced = count > 0;
+        source = 'slack_api';
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Slack member sync failed for workspace ${workspace.id}: ${message}. Falling back to DB.`,
+        );
+      }
+    }
+
+    const search = params?.search?.trim().toLowerCase() ?? '';
+    const profileRows = await this.prisma.$queryRaw<
+      Array<{
+        id: string;
+        slackUserId: string;
+        slackDisplayName: string;
+        slackRealName: string | null;
+        slackAvatarUrl: string | null;
+        email: string | null;
+        timezone: string | null;
+      }>
+    >`
+      SELECT
+        id,
+        "slackUserId",
+        "slackDisplayName",
+        "slackRealName",
+        "slackAvatarUrl",
+        email,
+        timezone
+      FROM "User"
+      WHERE "workspaceId" = ${workspaceId}
+      ORDER BY COALESCE("slackRealName", "slackDisplayName") ASC
+    `;
+
+    const memberships = params?.teamId
+      ? await this.prisma.teamMember.findMany({
+          where: {
+            teamId: params.teamId,
+            userId: { in: profileRows.map((row) => row.id) },
+          },
+          select: {
+            id: true,
+            userId: true,
+            teamId: true,
+            role: true,
+            team: { select: { id: true, name: true } },
+          },
+        })
+      : await this.prisma.teamMember.findMany({
+          where: {
+            userId: { in: profileRows.map((row) => row.id) },
+            team: { workspaceId },
+          },
+          select: {
+            id: true,
+            userId: true,
+            teamId: true,
+            role: true,
+            team: { select: { id: true, name: true } },
+          },
+        });
+
+    const membershipsByUser = new Map<string, typeof memberships>();
+    for (const membership of memberships) {
+      const list = membershipsByUser.get(membership.userId) ?? [];
+      list.push(membership);
+      membershipsByUser.set(membership.userId, list);
+    }
+
+    const members = profileRows
+      .filter(
+        (user) =>
+          !isPlaceholderSlackUser({
+            slackUserId: user.slackUserId,
+            slackDisplayName: user.slackDisplayName,
+            email: user.email,
+          }),
+      )
+      .filter((user) => {
+        if (!search) return true;
+        const haystack = [
+          user.slackRealName,
+          user.slackDisplayName,
+          user.email,
+          user.slackUserId,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(search);
+      })
+      .map((user) => {
+        const userMemberships = membershipsByUser.get(user.id) ?? [];
+        const membership = params?.teamId
+          ? userMemberships.find((m) => m.teamId === params.teamId) ?? null
+          : userMemberships[0] ?? null;
+
+        const fullName =
+          user.slackRealName?.trim() ||
+          user.slackDisplayName?.trim() ||
+          user.slackUserId;
+        const displayName = user.slackDisplayName?.trim() || null;
+
+        return {
+          id: user.id,
+          slackUserId: user.slackUserId,
+          fullName,
+          displayName,
+          email: user.email,
+          avatarUrl: user.slackAvatarUrl,
+          timezone: user.timezone,
+          alreadyOnTeam: Boolean(
+            params?.teamId &&
+              userMemberships.some((m) => m.teamId === params.teamId),
+          ),
+          currentRole: membership?.role ?? null,
+          teamMemberships: userMemberships.map((m) => ({
+            teamId: m.teamId,
+            teamName: m.team.name,
+            role: m.role,
+          })),
+        };
+      });
+
+    return {
+      members,
+      source: synced ? source : 'database',
+      synced,
+      workspaceId: workspace.id,
+      slackWorkspaceId: workspace.slackWorkspaceId,
+      slackWorkspaceName: workspace.slackWorkspaceName,
+      total: members.length,
+    };
+  }
+
+  async syncWorkspaceMembers() {
+    const workspaceId = await this.activeWorkspaceId();
+    if (!workspaceId) {
+      throw new NotFoundException('No workspace found');
+    }
+
+    const workspace = await this.prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: {
+        id: true,
+        botToken: true,
+        slackWorkspaceId: true,
+        slackWorkspaceName: true,
+      },
+    });
+    if (!workspace) throw new NotFoundException('Workspace not found');
+
+    if (!isUsableSlackBotToken(workspace.botToken)) {
+      return {
+        synced: false,
+        reason:
+          'No usable Slack bot token for this workspace. Showing members already stored in Pulse.',
+        count: await this.prisma.user.count({ where: { workspaceId } }),
+      };
+    }
+
+    const count = await this.syncSlackMembersForWorkspace(workspace);
+    this.workspaceMembers.invalidateWorkspace(workspace.id);
+    return { synced: true, count, reason: null };
+  }
+
+  private async syncSlackMembersForWorkspace(workspace: {
+    id: string;
+    botToken: string;
+    slackWorkspaceId: string;
+  }): Promise<number> {
+    const result = await this.slackMemberCache.syncFromLive(workspace.id);
+    return result.humans.length || result.synced;
   }
 
   async addTeamMember(teamId: string, data: { userId?: string; slackUserId?: string; role?: string }) {
     const team = await this.prisma.team.findUnique({ where: { id: teamId } });
     if (!team) throw new NotFoundException(`Team ${teamId} not found`);
 
+    const activeWorkspaceId = await this.activeWorkspaceId();
+    if (activeWorkspaceId && team.workspaceId !== activeWorkspaceId) {
+      throw new NotFoundException(`Team ${teamId} was not found.`);
+    }
+
     const user = data.userId
       ? await this.prisma.user.findUnique({ where: { id: data.userId } })
       : await this.prisma.user.findUnique({ where: { slackUserId: data.slackUserId } });
 
     if (!user) throw new NotFoundException('User not found');
+    if (user.workspaceId !== team.workspaceId) {
+      throw new BadRequestException(
+        'Cannot add a user from a different workspace to this team.',
+      );
+    }
 
     return this.prisma.teamMember.upsert({
       where: { teamId_userId: { teamId, userId: user.id } },

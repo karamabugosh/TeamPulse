@@ -26,6 +26,7 @@ import {
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { KpiCard } from '@/components/dashboard/KpiCard';
 import { AiAnalyticsSection } from '@/components/dashboard/AiAnalyticsSection';
+import { JiraOverviewWidget } from '@/components/jira/JiraOverviewWidget';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -34,10 +35,11 @@ import { apiFetch } from '@/lib/api';
 import { EnrichedRun, normalizeRun, reportStatusIcon } from '@/lib/run-status';
 
 const chartTooltipStyle = {
-  backgroundColor: '#111827',
-  borderColor: '#1F2937',
+  backgroundColor: 'hsl(240 8% 7%)',
+  borderColor: 'rgba(255,255,255,0.08)',
   borderRadius: '12px',
-  border: '1px solid #1F2937',
+  border: '1px solid rgba(255,255,255,0.08)',
+  boxShadow: '0 16px 40px -12px rgba(0,0,0,0.55)',
 };
 
 export const OverviewPage: React.FC = () => {
@@ -94,13 +96,13 @@ export const OverviewPage: React.FC = () => {
   };
 
   return (
-    <div className="space-y-10">
+    <div className="section-stack">
       {/* Hero Section */}
-      <div className="relative overflow-hidden rounded-2xl border border-border bg-gradient-to-br from-primary/10 via-card to-card p-8 lg:p-10">
+      <div className="hero-surface p-8 lg:p-10">
         <div className="relative z-10 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-3">
-            <Badge variant="secondary" className="gap-1.5">
-              <Zap className="h-3 w-3 text-primary" />
+            <Badge variant="ai" className="gap-1.5">
+              <Zap className="h-3 w-3" />
               Live Sync Active
             </Badge>
             <PageHeader
@@ -117,13 +119,15 @@ export const OverviewPage: React.FC = () => {
             </Button>
           </div>
         </div>
-        <div className="absolute -right-20 -top-20 h-64 w-64 rounded-full bg-primary/5 blur-3xl" />
-        <div className="absolute -bottom-10 -left-10 h-48 w-48 rounded-full bg-primary/10 blur-2xl" />
+        <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-module-ai/10 blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-12 -left-8 h-40 w-40 rounded-full bg-module-jira/8 blur-2xl" />
       </div>
+
+      <JiraOverviewWidget />
 
       {/* Active CheckIns Status */}
       {activeRuns.length > 0 && (
-        <Card className="border-primary/30">
+        <Card className="border-module-slack/25 shadow-glow-slack">
           <CardHeader>
             <CardTitle>Active Runs</CardTitle>
             <CardDescription>Standups currently collecting responses</CardDescription>
@@ -134,14 +138,14 @@ export const OverviewPage: React.FC = () => {
                 ? Math.round((run.participantsResponded / run.totalParticipants) * 100)
                 : 0;
               return (
-                <div key={run.id} className="rounded-xl border border-border bg-secondary/30 p-5 space-y-3">
+                <div key={run.id} className="surface-inset space-y-3 p-5 transition-colors hover:bg-white/[0.035]">
                   <div className="flex items-center justify-between gap-2">
                     <p className="font-semibold">{run.checkIn?.name}</p>
-                    <Badge variant="success">Collecting</Badge>
+                    <Badge variant="slack">Collecting</Badge>
                   </div>
                   <p className="text-sm text-muted-foreground">{run.team?.name}</p>
-                  <div className="h-2 overflow-hidden rounded-full bg-secondary">
-                    <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+                  <div className="h-2 overflow-hidden rounded-full bg-white/[0.06]">
+                    <div className="h-full rounded-full bg-module-slack transition-all" style={{ width: `${pct}%` }} />
                   </div>
                   <p className="text-xs text-muted-foreground">
                     {run.participantsResponded}/{run.totalParticipants} responses · {pct}% complete
@@ -158,30 +162,30 @@ export const OverviewPage: React.FC = () => {
 
       {/* KPI Grid */}
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
-        <KpiCard title="Active CheckIns" value={stats.activeCheckIns} icon={CheckSquare} />
-        <KpiCard title="Active Teams" value={stats.activeTeams} icon={Users} subtitle="Across workspace" />
-        <KpiCard title="Completion Rate" value={`${stats.completionRate}%`} icon={CheckCircle2} iconClassName="bg-emerald-500/10 text-emerald-400 group-hover:bg-emerald-500/20" />
-        <KpiCard title="Pending Responses" value={stats.pendingResponses} icon={Clock} subtitle="Awaiting submission" iconClassName="bg-amber-500/10 text-amber-400 group-hover:bg-amber-500/20" />
-        <KpiCard title="Today's Reports" value={stats.todayReports} icon={FileText} subtitle="Generated today" />
-        <KpiCard title="Avg Response Time" value={`${stats.avgResponseTimeMinutes} min`} icon={Activity} iconClassName="bg-cyan-500/10 text-cyan-400 group-hover:bg-cyan-500/20" />
+        <KpiCard title="Active CheckIns" value={stats.activeCheckIns} icon={CheckSquare} accent="slack" />
+        <KpiCard title="Active Teams" value={stats.activeTeams} icon={Users} subtitle="Across workspace" accent="jira" />
+        <KpiCard title="Completion Rate" value={`${stats.completionRate}%`} icon={CheckCircle2} accent="slack" />
+        <KpiCard title="Pending Responses" value={stats.pendingResponses} icon={Clock} subtitle="Awaiting submission" accent="reports" />
+        <KpiCard title="Today's Reports" value={stats.todayReports} icon={FileText} subtitle="Generated today" accent="reports" />
+        <KpiCard title="Avg Response Time" value={`${stats.avgResponseTimeMinutes} min`} icon={Activity} accent="ai" />
       </div>
 
       <AiAnalyticsSection data={aiAnalytics} />
 
       {aiInsights && (
-        <Card className="border-l-4 border-l-primary bg-gradient-to-r from-primary/5 to-transparent">
+        <Card className="border-l-4 border-l-module-ai bg-gradient-to-r from-module-ai/8 to-transparent shadow-glow-ai">
           <CardContent className="flex gap-4 p-6">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-module-ai/15 text-violet-300">
               <Sparkles className="h-5 w-5" />
             </div>
             <div className="space-y-2">
               <div className="flex items-center gap-3">
                 <h3 className="text-lg font-semibold">{aiInsights.headline}</h3>
-                <Badge variant="secondary">Insights</Badge>
+                <Badge variant="ai">Insights</Badge>
               </div>
-              <p className="text-base text-muted-foreground leading-relaxed">{aiInsights.summary}</p>
+              <p className="text-base leading-relaxed text-muted-foreground">{aiInsights.summary}</p>
               {aiInsights.recommendation && (
-                <p className="text-sm text-primary">{aiInsights.recommendation}</p>
+                <p className="text-sm text-violet-300">{aiInsights.recommendation}</p>
               )}
             </div>
           </CardContent>
@@ -204,11 +208,11 @@ export const OverviewPage: React.FC = () => {
               <div className="h-72">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={weeklyParticipation} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1F2937" />
-                    <XAxis dataKey="day" stroke="#9CA3AF" fontSize={12} tickLine={false} axisLine={false} />
-                    <YAxis stroke="#9CA3AF" fontSize={12} domain={[0, 100]} tickLine={false} axisLine={false} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                    <XAxis dataKey="day" stroke="#94A3B8" fontSize={12} tickLine={false} axisLine={false} />
+                    <YAxis stroke="#94A3B8" fontSize={12} domain={[0, 100]} tickLine={false} axisLine={false} />
                     <Tooltip contentStyle={chartTooltipStyle} />
-                    <Bar dataKey="completion" fill="#7C3AED" radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="completion" fill="#8B5CF6" radius={[6, 6, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -234,15 +238,15 @@ export const OverviewPage: React.FC = () => {
                   <AreaChart data={completionTrend} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                     <defs>
                       <linearGradient id="colorRate" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#7C3AED" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#7C3AED" stopOpacity={0} />
+                        <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.35} />
+                        <stop offset="95%" stopColor="#8B5CF6" stopOpacity={0} />
                       </linearGradient>
                     </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1F2937" />
-                    <XAxis dataKey="date" stroke="#9CA3AF" fontSize={12} tickLine={false} axisLine={false} />
-                    <YAxis stroke="#9CA3AF" fontSize={12} domain={[0, 100]} tickLine={false} axisLine={false} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                    <XAxis dataKey="date" stroke="#94A3B8" fontSize={12} tickLine={false} axisLine={false} />
+                    <YAxis stroke="#94A3B8" fontSize={12} domain={[0, 100]} tickLine={false} axisLine={false} />
                     <Tooltip contentStyle={chartTooltipStyle} />
-                    <Area type="monotone" dataKey="rate" stroke="#7C3AED" fillOpacity={1} fill="url(#colorRate)" strokeWidth={2} />
+                    <Area type="monotone" dataKey="rate" stroke="#8B5CF6" fillOpacity={1} fill="url(#colorRate)" strokeWidth={2} />
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
@@ -273,7 +277,7 @@ export const OverviewPage: React.FC = () => {
                     <div className="absolute left-[7px] top-4 h-full w-px bg-border" />
                   )}
                   <div className="relative z-10 mt-1 h-[15px] w-[15px] shrink-0 rounded-full border-2 border-primary bg-background" />
-                  <div className="flex-1 space-y-1 rounded-xl border border-border bg-secondary/30 p-4 transition-colors hover:bg-secondary/50">
+                  <div className="flex-1 space-y-1 rounded-xl border border-white/[0.05] bg-white/[0.02] p-4 transition-colors hover:bg-white/[0.04]">
                     <p className="text-sm font-medium">{act.title}</p>
                     <p className="text-xs text-muted-foreground">{act.team} · {act.timestamp}</p>
                   </div>
@@ -306,13 +310,15 @@ export const OverviewPage: React.FC = () => {
                   <div className="relative z-10 mt-1 flex h-[15px] w-[15px] shrink-0 items-center justify-center rounded-full bg-primary">
                     <div className="h-1.5 w-1.5 rounded-full bg-primary-foreground" />
                   </div>
-                  <div className="flex flex-1 items-center justify-between gap-3 rounded-xl border border-border bg-secondary/30 p-4 transition-colors hover:bg-secondary/50">
+                  <div className="flex flex-1 items-center justify-between gap-3 rounded-xl border border-white/[0.05] bg-white/[0.02] p-4 transition-colors hover:bg-white/[0.04]">
                     <div className="space-y-1">
                       <p className="text-sm font-medium">{sch.name}</p>
                       <p className="text-xs text-muted-foreground">{sch.team}</p>
-                      <code className="text-[10px] text-primary font-mono">{sch.cron}</code>
+                      <code className="font-mono text-[10px] text-primary">{sch.cron}</code>
                     </div>
-                    <Badge className="shrink-0">{sch.time}</Badge>
+                    <Badge className="shrink-0" variant="slack">
+                      {sch.time}
+                    </Badge>
                   </div>
                 </div>
                 ))}
@@ -324,10 +330,10 @@ export const OverviewPage: React.FC = () => {
         </Card>
 
         {/* Top Blockers */}
-        <Card className="card-lift lg:col-span-1">
+        <Card className="card-lift border-module-blockers/15 lg:col-span-1">
           <CardHeader>
             <div className="flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-amber-400" />
+              <AlertTriangle className="h-4 w-4 text-module-blockers" />
               <CardTitle>Top Blockers</CardTitle>
             </div>
             <CardDescription>Active issues reported by teams</CardDescription>
@@ -335,14 +341,19 @@ export const OverviewPage: React.FC = () => {
           <CardContent className="space-y-4">
             {topBlockers.length > 0 ? (
               topBlockers.map((blocker: any) => (
-                <div key={blocker.id} className="rounded-xl border border-border bg-secondary/30 p-4 space-y-2 transition-colors hover:bg-secondary/50">
+                <div
+                  key={blocker.id}
+                  className="space-y-2 rounded-xl border border-white/[0.05] bg-white/[0.02] p-4 transition-colors hover:border-module-blockers/20 hover:bg-white/[0.04]"
+                >
                   <div className="flex items-center justify-between">
                     <span className="text-sm font-medium">{blocker.team}</span>
                     <Badge variant={severityVariant(blocker.severity)}>{blocker.severity}</Badge>
                   </div>
                   <p className="text-sm text-muted-foreground">{blocker.description}</p>
                   <Separator />
-                  <p className="text-xs text-muted-foreground text-right">{blocker.count} member(s) impacted</p>
+                  <p className="text-right text-xs text-muted-foreground">
+                    {blocker.count} member(s) impacted
+                  </p>
                 </div>
               ))
             ) : (

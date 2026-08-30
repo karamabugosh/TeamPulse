@@ -18,6 +18,8 @@ import { Card, CardContent } from '@/components/ui/card';
 import { QuestionBuilder, QuestionItem } from './QuestionBuilder';
 import { ScheduleBuilder } from './ScheduleBuilder';
 import { ParticipantPicker } from './ParticipantPicker';
+import { SlackPreview } from './SlackPreview';
+import { jiraApi } from '@/lib/jira-api';
 import { parseCronToSchedule, scheduleToCron, ScheduleConfig, TIMEZONE_OPTIONS } from '@/lib/schedule';
 import { apiFetch, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -60,10 +62,21 @@ const mapQuestionFromApi = (q: any): QuestionItem => ({
   order: q.order,
 });
 
+/** Exclude questions retired from config (kept in DB for historical Answers only). */
+const activeConfigQuestions = (questions: any[] | undefined) =>
+  (questions ?? []).filter((q) => q.retiredAt == null);
+
 const DEFAULT_QUESTIONS: QuestionItem[] = [
-  { id: 'q1', question: 'What did you accomplish yesterday?', type: 'FREE_TEXT', isRequired: true, order: 1 },
-  { id: 'q2', question: 'What will you work on today?', type: 'FREE_TEXT', isRequired: true, order: 2 },
-  { id: 'q3', question: 'Are there any blockers in your way?', type: 'YES_NO', isRequired: true, order: 3 },
+  { id: 'q1', question: 'What did you complete since your last update?', type: 'FREE_TEXT', isRequired: true, order: 1 },
+  { id: 'q2', question: 'What are you working on now?', type: 'FREE_TEXT', isRequired: true, order: 2 },
+  { id: 'q3', question: 'Are you blocked?', type: 'BLOCKER', isRequired: true, order: 3 },
+  { id: 'q4', question: 'Which Jira issue are you working on?', type: 'ISSUE_REF', isRequired: false, order: 4 },
+  { id: 'q5', question: 'How confident are you about finishing today?', type: 'SCALE_1_5', isRequired: true, order: 5 },
+  { id: 'q6', question: 'Estimated completion date?', type: 'FREE_TEXT', isRequired: false, order: 6 },
+  { id: 'q7', question: 'Did anything slow you down today?', type: 'FREE_TEXT', isRequired: false, order: 7 },
+  { id: 'q8', question: 'Do you need help from someone?', type: 'YES_NO', isRequired: true, order: 8 },
+  { id: 'q9', question: 'Is this blocker linked to another Jira issue?', type: 'YES_NO', isRequired: false, order: 9 },
+  { id: 'q10', question: 'Additional notes', type: 'FREE_TEXT', isRequired: false, order: 10 },
 ];
 
 const defaultFormState = (): CheckInFormState => ({
@@ -123,8 +136,8 @@ function buildFormFromCheckIn(checkIn: any): CheckInFormState {
     enabled: checkIn.enabled ?? true,
     participantIds: (checkIn.participants || []).map((p: any) => p.teamMemberId),
     questions: checkIn.questions?.length
-      ? checkIn.questions
-          .filter((q: any) => q.isActive !== false)
+      ? activeConfigQuestions(checkIn.questions)
+          .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
           .map(mapQuestionFromApi)
       : [...DEFAULT_QUESTIONS],
   };
@@ -144,7 +157,10 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
   const [saving, setSaving] = useState(false);
   const [startingRun, setStartingRun] = useState(false);
   const [loadingForm, setLoadingForm] = useState(false);
+  const [jiraConnected, setJiraConnected] = useState(false);
   const initializedKeyRef = useRef<string | null>(null);
+  const formRef = useRef<CheckInFormState>(defaultFormState());
+  formRef.current = form;
 
   const applyFormState = useCallback((nextForm: CheckInFormState) => {
     setForm(nextForm);
@@ -202,6 +218,17 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
     };
   }, [open, editingCheckIn?.id, applyFormState, toast]);
 
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    jiraApi
+      .getStatus()
+      .then((status) => setJiraConnected(Boolean(status.connected)))
+      .catch(() => setJiraConnected(false));
+  }, [open]);
+
   // If teams load after opening the create dialog, set teamId once without resetting questions.
   useEffect(() => {
     if (!open || editingCheckIn?.id || form.teamId || !teams[0]?.id) {
@@ -227,12 +254,62 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    const currentForm = formRef.current;
+
+    if (!currentForm.teamId?.trim()) {
+      toast({
+        title: 'Team required',
+        description: 'Select a team before saving this CheckIn.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (!currentForm.name.trim()) {
+      toast({
+        title: 'Name required',
+        description: 'Enter a CheckIn name before saving.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (currentForm.questions.some((q) => !q.question.trim())) {
+      toast({
+        title: 'Empty question',
+        description: 'Every question needs text before saving.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     setSaving(true);
 
+    // Explicit payload — map form state 1:1 to the NestJS create/update DTOs.
     const payload = {
-      ...form,
-      updatesChannelId: form.updatesChannelId.trim() || null,
-      questions: form.questions.map((q, idx) => ({
+      teamId: currentForm.teamId,
+      name: currentForm.name.trim(),
+      description: currentForm.description.trim() || null,
+      introMessage: currentForm.introMessage.trim() || null,
+      outroMessage: currentForm.outroMessage.trim() || null,
+      enabled: currentForm.enabled,
+      timezone: currentForm.timezone,
+      collectionCron: currentForm.collectionCron,
+      updatesChannelId: currentForm.updatesChannelId.trim() || null,
+      reminderEnabled: currentForm.reminderEnabled,
+      reminderMinutesAfter: currentForm.reminderMinutesAfter,
+      reminderRecurringEnabled: currentForm.reminderRecurringEnabled,
+      reminderIntervalMinutes: currentForm.reminderIntervalMinutes,
+      reminderOnlyNonResponders: currentForm.reminderOnlyNonResponders,
+      reminderOnSlackActive: currentForm.reminderOnSlackActive,
+      reportTriggerMode: currentForm.reportTriggerMode,
+      reportCron: currentForm.reportCron?.trim() || null,
+      reportTimeoutMinutes: currentForm.reportTimeoutMinutes,
+      publishStatus: currentForm.publishStatus,
+      scheduleEnabled: currentForm.scheduleEnabled,
+      participantIds: currentForm.participantIds,
+      questions: currentForm.questions.map((q, idx) => ({
         ...(UUID_RE.test(q.id) ? { id: q.id } : {}),
         question: q.question.trim(),
         type: q.type,
@@ -242,6 +319,10 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
         order: idx + 1,
       })),
     };
+
+    if (import.meta.env.DEV) {
+      console.debug('[CheckIn save] payload questions:', payload.questions);
+    }
 
     try {
       const url = editingCheckIn ? `/api/check-ins/${editingCheckIn.id}` : '/api/check-ins';
@@ -364,8 +445,22 @@ export const CheckInFormDialog: React.FC<CheckInFormDialogProps> = ({
               </div>
             </TabsContent>
 
-            <TabsContent value="questions">
+            <TabsContent value="questions" className="space-y-6">
               <QuestionBuilder questions={form.questions} onChange={(q) => update('questions', q)} />
+              <div className="space-y-3">
+                <div>
+                  <h3 className="font-semibold">Slack Preview</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Preview the standup DM layout, including the searchable Jira issue picker.
+                  </p>
+                </div>
+                <SlackPreview
+                  introMessage={form.introMessage}
+                  outroMessage={form.outroMessage}
+                  questions={form.questions}
+                  showJiraLink={jiraConnected}
+                />
+              </div>
             </TabsContent>
 
             <TabsContent value="schedule" className="space-y-6">

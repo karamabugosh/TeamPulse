@@ -3,6 +3,7 @@
 import 'dotenv/config';
 import 'reflect-metadata';
 
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { AiService } from '../ai.service';
 import { AI_BASELINE } from '../ai.config';
 import {
@@ -18,6 +19,7 @@ import {
   ThemeSummary,
 } from '../dto/ai-result.dto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { MemoryOutboxService } from '../../memory/memory-outbox.service';
 
 interface CheckResult {
   name: string;
@@ -332,7 +334,11 @@ async function main(): Promise<void> {
   process.env.PULSE_AI_ENABLED = 'true';
 
   const prisma = new PrismaService();
-  const service = new AiService(prisma);
+  const service = new AiService(
+    prisma,
+    new EventEmitter2(),
+    new MemoryOutboxService(prisma),
+  );
 
   const results: CaseResult[] = [];
 

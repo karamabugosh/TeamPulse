@@ -91,6 +91,8 @@ export interface ReportSections {
 
 export interface RawResponseForAnalysis {
   userId: string;
+  /** Human display name when known — sent to OpenAI instead of raw Slack id. */
+  displayName?: string;
   answers: {
     questionId: string;
     questionText: string;

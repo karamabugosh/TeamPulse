@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { Search, UserPlus, X } from 'lucide-react';
 import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
+import { apiFetch, ApiError } from '@/lib/api';
 
 interface TeamMember {
   id: string;
@@ -30,17 +30,37 @@ export const ParticipantPicker: React.FC<ParticipantPickerProps> = ({
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!teamId) return;
+    if (!teamId) {
+      setMembers([]);
+      setError(null);
+      return;
+    }
+
+    let cancelled = false;
     setLoading(true);
-    fetch(`/api/admin/teams/${teamId}/members${search ? `?search=${encodeURIComponent(search)}` : ''}`)
-      .then((res) => res.json())
+    setError(null);
+
+    const qs = search.trim() ? `?search=${encodeURIComponent(search.trim())}` : '';
+    void apiFetch<TeamMember[]>(`/api/admin/teams/${teamId}/members${qs}`)
       .then((data) => {
+        if (cancelled) return;
         setMembers(Array.isArray(data) ? data : []);
-        setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((err) => {
+        if (cancelled) return;
+        setMembers([]);
+        setError(err instanceof ApiError ? err.message : 'Failed to load team members');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [teamId, search]);
 
   const toggleMember = (memberId: string) => {
@@ -52,6 +72,9 @@ export const ParticipantPicker: React.FC<ParticipantPickerProps> = ({
   };
 
   const selectedMembers = members.filter((m) => selectedIds.includes(m.id));
+  const orphanSelectedCount = selectedIds.filter(
+    (id) => !members.some((m) => m.id === id),
+  ).length;
 
   return (
     <div className="space-y-4">
@@ -62,8 +85,17 @@ export const ParticipantPicker: React.FC<ParticipantPickerProps> = ({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="pl-9"
+          disabled={!teamId}
         />
       </div>
+
+      {!teamId && (
+        <p className="text-sm text-muted-foreground">Select a team first to choose participants.</p>
+      )}
+
+      {error && (
+        <p className="text-sm text-destructive">{error}</p>
+      )}
 
       {selectedIds.length > 0 && (
         <div className="flex flex-wrap gap-2">
@@ -71,7 +103,7 @@ export const ParticipantPicker: React.FC<ParticipantPickerProps> = ({
             <Badge key={m.id} variant="secondary" className="gap-1.5 py-1.5 pl-1.5 pr-2">
               <Avatar className="h-5 w-5">
                 <AvatarFallback className="text-[10px]">
-                  {m.user.slackDisplayName[0]}
+                  {m.user.slackDisplayName?.[0] ?? '?'}
                 </AvatarFallback>
               </Avatar>
               {m.user.slackDisplayName}
@@ -80,6 +112,11 @@ export const ParticipantPicker: React.FC<ParticipantPickerProps> = ({
               </button>
             </Badge>
           ))}
+          {orphanSelectedCount > 0 && (
+            <Badge variant="outline">
+              {orphanSelectedCount} selected (not in current search)
+            </Badge>
+          )}
         </div>
       )}
 
@@ -87,7 +124,9 @@ export const ParticipantPicker: React.FC<ParticipantPickerProps> = ({
         {loading ? (
           <p className="p-4 text-sm text-muted-foreground">Loading members...</p>
         ) : members.length === 0 ? (
-          <p className="p-4 text-sm text-muted-foreground">No members found for this team.</p>
+          <p className="p-4 text-sm text-muted-foreground">
+            {teamId ? 'No members found for this team.' : 'No team selected.'}
+          </p>
         ) : (
           members.map((member) => {
             const selected = selectedIds.includes(member.id);
@@ -102,7 +141,7 @@ export const ParticipantPicker: React.FC<ParticipantPickerProps> = ({
                 )}
               >
                 <Avatar className="h-8 w-8">
-                  <AvatarFallback>{member.user.slackDisplayName[0]}</AvatarFallback>
+                  <AvatarFallback>{member.user.slackDisplayName?.[0] ?? '?'}</AvatarFallback>
                 </Avatar>
                 <div className="flex-1">
                   <p className="text-sm font-medium">{member.user.slackDisplayName}</p>

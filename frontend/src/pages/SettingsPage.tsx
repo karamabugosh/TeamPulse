@@ -83,7 +83,7 @@ export const SettingsPage: React.FC = () => {
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <Label>Workspace Name</Label>
-                <Input disabled value={settings?.workspace?.name || 'TeamPulse Workspace'} className="bg-secondary/50 text-muted-foreground" />
+                <Input disabled value={settings?.workspace?.name || '—'} className="bg-secondary/50 text-muted-foreground" />
               </div>
               <div className="space-y-2">
                 <Label>Slack Workspace ID</Label>

@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Header,
+  Logger,
   Param,
   Patch,
   Post,
@@ -19,6 +20,8 @@ import { UpdateCheckInDto } from './dto/update-check-in.dto';
 
 @Controller('check-ins')
 export class CheckInController {
+  private readonly logger = new Logger(CheckInController.name);
+
   constructor(
     private readonly checkInService: CheckInService,
     private readonly checkInRunService: CheckInRunService,
@@ -29,6 +32,9 @@ export class CheckInController {
 
   @Post()
   create(@Body() dto: CreateCheckInDto) {
+    this.logger.log(
+      `POST /check-ins teamId=${dto.teamId} name=${dto.name} questions=${dto.questions?.length ?? 0} participants=${dto.participantIds?.length ?? 0}`,
+    );
     return this.checkInService.create(dto);
   }
 
@@ -65,6 +71,9 @@ export class CheckInController {
     @Param('id') id: string,
     @Body() dto: UpdateCheckInDto,
   ) {
+    this.logger.log(
+      `PATCH /check-ins/${id} teamId=${dto.teamId ?? 'unchanged'} questions=${dto.questions?.length ?? 'unchanged'} participants=${dto.participantIds?.length ?? 'unchanged'}`,
+    );
     return this.checkInService.update(id, dto);
   }
 

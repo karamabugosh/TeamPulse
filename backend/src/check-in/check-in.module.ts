@@ -9,6 +9,7 @@ import { AiModule } from '../ai/ai.module';
 import { ReportsModule } from '../reports/reports.module';
 import { CollectionModule } from '../collection/collection.module';
 import { DigestModule } from '../digest/digest.module';
+import { SlackMemberCacheModule } from '../slack/slack-member-cache.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { DigestModule } from '../digest/digest.module';
     ReportsModule,
     CollectionModule,
     DigestModule,
+    SlackMemberCacheModule,
   ],
   controllers: [CheckInController],
   providers: [

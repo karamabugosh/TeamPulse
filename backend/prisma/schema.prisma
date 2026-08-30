@@ -14,6 +14,32 @@ enum QuestionType {
   YES_NO_MAYBE
   MULTIPLE_CHOICE
   SCALE_1_5
+  ISSUE_REF
+  /// Yes/No gate that opens the existing Slack Blocker Details modal on Yes.
+  /// Behavior is type-driven — not inferred from question text or position.
+  BLOCKER
+}
+
+/// Pulse V2 Team Memory ACL metadata (enforcement is NOT implemented in Phase 1).
+/// WORKSPACE = authorized workspace members; TEAM = team members; PRIVATE = owner (+ future ACL).
+enum MemoryVisibility {
+  WORKSPACE
+  TEAM
+  PRIVATE
+}
+
+/// Pulse V2 memory indexing outbox operation.
+enum MemoryOutboxOperation {
+  UPSERT
+  DELETE
+}
+
+/// Pulse V2 memory indexing outbox status.
+enum MemoryOutboxStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
 }
 
 model Workspace {
@@ -23,9 +49,27 @@ model Workspace {
   botToken           String
   installedAt        DateTime @default(now())
 
-  users         User[]
-  teams         Team[]
-  inboundEvents InboundEvent[]
+  users                   User[]
+  teams                   Team[]
+  inboundEvents           InboundEvent[]
+  jiraConnections         JiraConnection[]
+  jiraIssueCacheEntries   JiraIssueCacheEntry[]
+  pulseBlockers           PulseBlocker[]
+  jiraAuditLogs           JiraAuditLog[]
+  answerJiraIssueLinks    AnswerJiraIssueLink[]
+  slackChannels           SlackChannel[]
+  slackMemberCacheEntries SlackMemberCache[]
+  jiraMemberCacheEntries  JiraMemberCache[]
+  teamMemoryDocuments     TeamMemoryDocument[]
+  slackAiChatLogs         SlackAiChatLog[]
+  knowledgeEmbeddings     KnowledgeEmbedding[]
+  /// Pulse V2 Team Memory (Phase 1 foundation — not wired into RAG yet).
+  memoryChunks            MemoryChunk[]
+  memoryOutboxEvents      MemoryOutboxEvent[]
+  aiConversations         AiConversation[]
+  aiSlackExportLogs       AiSlackExportLog[]
+  aiEvalCases             AiEvalCase[]
+  aiEvalRuns              AiEvalRun[]
 }
 
 model User {
@@ -33,18 +77,31 @@ model User {
   workspaceId      String
   slackUserId      String   @unique
   slackDisplayName String
+  slackRealName    String?
+  slackAvatarUrl   String?
   email            String?
   timezone         String?
   createdAt        DateTime @default(now())
 
-  focusedSubmissionId String?            @unique
-  workspace           Workspace          @relation(fields: [workspaceId], references: [id])
-  teamMembers         TeamMember[]
-  answers             Answer[]
-  submissions         StandupSubmission[]
-  conversationStates  ConversationState[]
-  threadUpdates       StandupThreadUpdate[]
-  focusedSubmission   StandupSubmission? @relation("FocusedSubmission", fields: [focusedSubmissionId], references: [id], onDelete: SetNull)
+  focusedSubmissionId  String?               @unique
+  workspace            Workspace             @relation(fields: [workspaceId], references: [id])
+  teamMembers          TeamMember[]
+  answers              Answer[]
+  submissions          StandupSubmission[]
+  conversationStates   ConversationState[]
+  threadUpdates        StandupThreadUpdate[]
+  focusedSubmission    StandupSubmission?    @relation("FocusedSubmission", fields: [focusedSubmissionId], references: [id], onDelete: SetNull)
+  jiraConnection       JiraConnection?
+  jiraIssueCache       JiraIssueCacheEntry[]
+  pulseBlockers        PulseBlocker[]
+  pulseBlockerUpdates  PulseBlockerUpdate[]
+  jiraProposedActions  JiraProposedAction[]
+  jiraAuditLogs        JiraAuditLog[]
+  answerJiraIssueLinks AnswerJiraIssueLink[]
+  slackAiChatLogs      SlackAiChatLog[]
+  aiSlackExportLogs    AiSlackExportLog[]
+  /// Pulse V2 — optional owner of PRIVATE (or attributed) memory chunks.
+  ownedMemoryChunks    MemoryChunk[]         @relation("MemoryChunkOwner")
 }
 
 model Team {
@@ -58,11 +115,13 @@ model Team {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  workspace   Workspace    @relation(fields: [workspaceId], references: [id])
-  teamMembers TeamMember[]
-  standupRuns StandupRun[]
-  aiDigests   AiDigest[]
-  checkIns    CheckIn[]
+  workspace    Workspace     @relation(fields: [workspaceId], references: [id])
+  teamMembers  TeamMember[]
+  standupRuns  StandupRun[]
+  aiDigests    AiDigest[]
+  checkIns     CheckIn[]
+  /// Pulse V2 — optional team scope for TEAM-visible memory chunks.
+  memoryChunks MemoryChunk[]
 
   @@index([workspaceId])
 }
@@ -85,16 +144,16 @@ model TeamMember {
 }
 
 model CheckIn {
-  id          String  @id @default(uuid())
-  teamId      String
-  name        String
-  description String?
+  id           String  @id @default(uuid())
+  teamId       String
+  name         String
+  description  String?
   introMessage String?
   outroMessage String?
-  enabled     Boolean @default(true)
+  enabled      Boolean @default(true)
 
-  timezone       String
-  collectionCron String
+  timezone         String
+  collectionCron   String
   updatesChannelId String?
 
   reminderEnabled           Boolean @default(true)
@@ -139,7 +198,7 @@ model CheckInParticipant {
 }
 
 model Question {
-  id        String @id @default(uuid())
+  id        String  @id @default(uuid())
   checkInId String?
   question  String
   order     Int
@@ -148,26 +207,29 @@ model Question {
   options    Json?
   isRequired Boolean      @default(true)
   isActive   Boolean      @default(true)
+  /// Set when a question is removed from CheckIn config but kept for historical Answers.
+  retiredAt  DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  checkIn            CheckIn?             @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+  checkIn            CheckIn?              @relation(fields: [checkInId], references: [id], onDelete: Cascade)
   answers            Answer[]
   conversationStates ConversationState[]
+  jiraIssueLinks     AnswerJiraIssueLink[]
 
   @@index([checkInId])
   @@index([isActive])
 }
 
 model StandupRun {
-  id            String   @id @default(uuid())
+  id            String    @id @default(uuid())
   teamId        String
   checkInId     String?
   scheduledFor  DateTime
-  status        String   @default("collecting")
-  triggerSource String   @default("scheduler")
-  startedAt     DateTime @default(now())
+  status        String    @default("collecting")
+  triggerSource String    @default("scheduler")
+  startedAt     DateTime  @default(now())
   completedAt   DateTime?
 
   reminderDueAt  DateTime?
@@ -175,24 +237,25 @@ model StandupRun {
   reminderCount  Int       @default(0)
   lastReminderAt DateTime?
 
-  slackChannelId      String?
-  slackThreadTs       String?
-  slackRootMessageTs  String?
-  slackThreadUrl      String?
-  threadReplyCount    Int @default(0)
+  slackChannelId     String?
+  slackThreadTs      String?
+  slackRootMessageTs String?
+  slackThreadUrl     String?
+  threadReplyCount   Int     @default(0)
 
   reportDueAt       DateTime?
   reportGeneratedAt DateTime?
-  reportStatus      String   @default("waiting_for_responses")
+  reportStatus      String    @default("waiting_for_responses")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  team        Team                @relation(fields: [teamId], references: [id])
-  checkIn     CheckIn?            @relation(fields: [checkInId], references: [id])
-  submissions StandupSubmission[]
-  aiDigest    AiDigest?
-  threadUpdates StandupThreadUpdate[]
+  team           Team                  @relation(fields: [teamId], references: [id])
+  checkIn        CheckIn?              @relation(fields: [checkInId], references: [id])
+  submissions    StandupSubmission[]
+  aiDigest       AiDigest?
+  threadUpdates  StandupThreadUpdate[]
+  jiraIssueLinks AnswerJiraIssueLink[]
 
   @@unique([checkInId, scheduledFor])
   @@index([teamId])
@@ -206,23 +269,24 @@ model StandupRun {
 }
 
 model StandupSubmission {
-  id          String   @id @default(uuid())
-  runId       String
-  userId      String
-  status      String   @default("pending")
-  startedAt   DateTime?
-  completedAt DateTime?
+  id               String    @id @default(uuid())
+  runId            String
+  userId           String
+  status           String    @default("pending")
+  startedAt        DateTime?
+  completedAt      DateTime?
   slackDmChannelId String?
   slackDmThreadTs  String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  run               StandupRun         @relation(fields: [runId], references: [id])
-  user              User               @relation(fields: [userId], references: [id])
+  run               StandupRun            @relation(fields: [runId], references: [id])
+  user              User                  @relation(fields: [userId], references: [id])
   answers           Answer[]
   conversationState ConversationState?
   threadUpdates     StandupThreadUpdate[]
-  focusedByUser     User?              @relation("FocusedSubmission")
+  focusedByUser     User?                 @relation("FocusedSubmission")
+  jiraIssueLinks    AnswerJiraIssueLink[]
 
   @@unique([runId, userId])
   @@index([runId])
@@ -241,9 +305,10 @@ model Answer {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  user       User               @relation(fields: [userId], references: [id])
-  question   Question           @relation(fields: [questionId], references: [id])
-  submission StandupSubmission? @relation(fields: [submissionId], references: [id])
+  user           User                  @relation(fields: [userId], references: [id])
+  question       Question              @relation(fields: [questionId], references: [id])
+  submission     StandupSubmission?    @relation(fields: [submissionId], references: [id])
+  jiraIssueLinks AnswerJiraIssueLink[]
 
   @@unique([submissionId, questionId])
   @@index([userId])
@@ -270,20 +335,20 @@ model ConversationState {
 }
 
 model AiDigest {
-  id               String   @id @default(uuid())
-  teamId           String
-  runId            String   @unique
-  generatedAt      DateTime @default(now())
-  source           String
-  summary          String
-  blockers         Json
-  themes           Json
-  reportSections   Json?
-  slackReportText  String?
+  id                String   @id @default(uuid())
+  teamId            String
+  runId             String   @unique
+  generatedAt       DateTime @default(now())
+  source            String
+  summary           String
+  blockers          Json
+  themes            Json
+  reportSections    Json?
+  slackReportText   String?
   nonResponderNames Json?
   slackReportBlocks Json?
-  generationError  String?
-  createdAt        DateTime @default(now())
+  generationError   String?
+  createdAt         DateTime @default(now())
 
   team Team       @relation(fields: [teamId], references: [id])
   run  StandupRun @relation(fields: [runId], references: [id])
@@ -311,16 +376,16 @@ model StandupThreadUpdate {
 }
 
 model InboundEvent {
-  id              String   @id @default(uuid())
+  id              String    @id @default(uuid())
   workspaceId     String
-  provider        String   @default("slack")
-  idempotencyKey  String   @unique
+  provider        String    @default("slack")
+  idempotencyKey  String    @unique
   externalEventId String?
   eventType       String
   payloadHash     String?
-  status          String   @default("received")
+  status          String    @default("received")
   errorMessage    String?
-  receivedAt      DateTime @default(now())
+  receivedAt      DateTime  @default(now())
   processedAt     DateTime?
 
   workspace Workspace @relation(fields: [workspaceId], references: [id])
@@ -329,4 +394,620 @@ model InboundEvent {
   @@index([externalEventId])
   @@index([status])
   @@index([receivedAt])
+}
+
+/// Slack channel metadata for a workspace (Demo seeds rows; Real can sync later).
+/// There is no fake Slack API — Demo never calls Slack; it only stores rows here.
+model SlackChannel {
+  id             String   @id @default(uuid())
+  workspaceId    String
+  slackChannelId String
+  name           String
+  topic          String?
+  purpose        String?
+  isPrivate      Boolean  @default(false)
+  isArchived     Boolean  @default(false)
+  memberCount    Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, slackChannelId])
+  @@index([workspaceId])
+  @@index([name])
+}
+
+/// Cached Slack workspace directory (users.list) — Live Slack first, then this table.
+model SlackMemberCache {
+  id          String   @id @default(uuid())
+  workspaceId String
+  slackUserId String
+  displayName String
+  realName    String?
+  email       String?
+  isBot       Boolean  @default(false)
+  deleted     Boolean  @default(false)
+  updatedAt   DateTime @updatedAt
+  cachedAt    DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, slackUserId])
+  @@index([workspaceId])
+  @@index([workspaceId, isBot, deleted])
+  @@index([displayName])
+}
+
+/// Cached Jira site directory (users/search) — Live Jira first, then this table.
+model JiraMemberCache {
+  id          String   @id @default(uuid())
+  workspaceId String
+  accountId   String
+  displayName String
+  email       String?
+  avatarUrl   String?
+  accountType String?
+  active      Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+  cachedAt    DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, accountId])
+  @@index([workspaceId])
+  @@index([workspaceId, active])
+  @@index([displayName])
+}
+
+model JiraConnection {
+  id                   String    @id @default(uuid())
+  userId               String    @unique
+  workspaceId          String
+  cloudId              String
+  siteName             String
+  siteUrl              String
+  atlassianAccountId   String
+  atlassianDisplayName String
+  accessToken          String
+  refreshToken         String?
+  expiresAt            DateTime?
+  scopes               String?
+  connectedAt          DateTime  @default(now())
+  lastSyncAt           DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([cloudId])
+  @@index([workspaceId])
+}
+
+model JiraIssueCacheEntry {
+  id                String    @id @default(uuid())
+  /// Workspace that owns this cached issue (one active row per issue key).
+  workspaceId       String
+  /// User who last refreshed this row (sync / live lookup actor).
+  userId            String
+  issueKey          String
+  issueId           String
+  summary           String
+  status            String?
+  projectKey        String?
+  projectName       String?
+  issueType         String?
+  priority          String?
+  issueUrl          String?
+  assigneeAccountId String?
+  assigneeName      String?
+  jiraUpdatedAt     DateTime?
+  cachedAt          DateTime  @default(now())
+  refreshedAt       DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, issueKey])
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([workspaceId, summary])
+}
+
+model PulseBlocker {
+  id                 String    @id @default(uuid())
+  workspaceId        String
+  userId             String
+  teamId             String?
+  checkInId          String?
+  runId              String?
+  submissionId       String?
+  answerId           String?
+  title              String?
+  description        String
+  category           String?
+  severity           String    @default("medium")
+  dependency         String?
+  expectedResolution String?
+  preventingAllWork  Boolean   @default(false)
+  ownerLabel         String?
+  status             String    @default("open")
+  linkedIssueKey     String?
+  linkedIssueId      String?
+  linkedIssueUrl     String?
+  resolutionNotes    String?
+  resolutionType     String?
+  needsHelp          Boolean?
+  needsEscalation    Boolean?
+  createdAt          DateTime  @default(now())
+  resolvedAt         DateTime?
+  updatedAt          DateTime  @updatedAt
+
+  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  proposedActions JiraProposedAction[]
+  updates         PulseBlockerUpdate[]
+
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([status])
+  @@index([teamId])
+  @@index([runId])
+  @@index([createdAt])
+}
+
+model PulseBlockerUpdate {
+  id              String   @id @default(uuid())
+  blockerId       String
+  userId          String
+  createdAt       DateTime @default(now())
+  previousStatus  String
+  newStatus       String
+  notes           String?
+  resolutionType  String?
+  needsHelp       Boolean?
+  needsEscalation Boolean?
+  daysOpen        Int?
+  updatedFrom     String   @default("Slack Follow-up")
+
+  blocker PulseBlocker @relation(fields: [blockerId], references: [id], onDelete: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([blockerId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model BlockerFollowUpSession {
+  id           String   @id @default(uuid())
+  submissionId String   @unique
+  userId       String
+  pendingIds   Json
+  completedIds Json
+  status       String   @default("pending")
+  channelId    String?
+  threadTs     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}
+
+model JiraProposedAction {
+  id                 String    @id @default(uuid())
+  userId             String
+  blockerId          String?
+  actionType         String
+  status             String    @default("proposed")
+  idempotencyKey     String    @unique
+  payload            Json
+  jiraIssueKey       String?
+  slackChannelId     String?
+  slackMessageTs     String?
+  slackInteractionTs String?
+  proposedAt         DateTime  @default(now())
+  approvedAt         DateTime?
+  executedAt         DateTime?
+  cancelledAt        DateTime?
+  result             Json?
+  errorMessage       String?
+
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  blocker   PulseBlocker?  @relation(fields: [blockerId], references: [id], onDelete: SetNull)
+  auditLogs JiraAuditLog[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([blockerId])
+}
+
+model JiraAuditLog {
+  id               String   @id @default(uuid())
+  workspaceId      String
+  userId           String
+  proposedActionId String?
+  actionType       String
+  jiraIssueKey     String?
+  status           String
+  metadata         Json?
+  createdAt        DateTime @default(now())
+
+  workspace      Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  proposedAction JiraProposedAction? @relation(fields: [proposedActionId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([proposedActionId])
+  @@index([createdAt])
+}
+
+model AnswerJiraIssueLink {
+  id           String   @id @default(uuid())
+  workspaceId  String
+  userId       String
+  submissionId String
+  runId        String?
+  questionId   String
+  answerId     String?
+  issueId      String
+  issueKey     String
+  summary      String
+  status       String?
+  assigneeName String?
+  projectKey   String?
+  issueUrl     String?
+  cloudId      String?
+  capturedAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  workspace  Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  submission StandupSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  run        StandupRun?       @relation(fields: [runId], references: [id], onDelete: SetNull)
+  question   Question          @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  answer     Answer?           @relation(fields: [answerId], references: [id], onDelete: SetNull)
+
+  @@unique([submissionId, questionId, issueKey])
+  @@index([workspaceId])
+  @@index([submissionId, questionId])
+  @@index([answerId])
+  @@index([userId])
+  @@index([runId])
+  @@index([issueKey])
+  @@index([createdAt])
+}
+
+model TeamMemoryDocument {
+  id           String   @id @default(uuid())
+  workspaceId  String
+  userId       String?
+  sourceType   String
+  sourceId     String
+  title        String
+  content      String
+  issueKey     String?
+  runId        String?
+  submissionId String?
+  metadata     Json?
+  indexedAt    DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceType, sourceId])
+  @@index([workspaceId])
+  @@index([sourceType])
+  @@index([issueKey])
+  @@index([createdAt])
+}
+
+// Durable log of Slack to Pulse AI chat requests.
+model SlackAiChatLog {
+  id             String   @id @default(uuid())
+  workspaceId    String
+  userId         String
+  slackUserId    String
+  channelId      String
+  threadTs       String?
+  question       String
+  answer         String
+  sources        Json?
+  confidence     String?
+  intent         String?
+  conversationId String?
+  responseTimeMs Int
+  createdAt      DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([slackUserId])
+  @@index([createdAt])
+}
+
+// Vector embeddings for hybrid RAG.
+// Portable store: JSON float arrays (always).
+// When pgvector is available, KnowledgeEmbeddingService also syncs a native
+// `embedding_vec` column (managed via raw SQL — not Prisma-mapped) for ANN.
+model KnowledgeEmbedding {
+  id          String   @id @default(uuid())
+  workspaceId String
+  sourceType  String
+  sourceId    String
+  entityType  String
+  title       String
+  contentHash String
+  // OpenAI embedding vector as number[] (JSON fallback / portable store)
+  embedding   Json
+  model       String
+  dimensions  Int
+  indexedAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, sourceType, sourceId])
+  @@index([workspaceId])
+  @@index([workspaceId, entityType])
+  @@index([contentHash])
+}
+
+/// Pulse V2 Team Memory — searchable DERIVED unit (NOT business source of truth).
+/// Original Pulse tables (Answer, PulseBlocker, AiDigest, …) remain authoritative.
+/// Deleting/rebuilding MemoryChunk must never destroy original Pulse data.
+///
+/// Multiple chunks per source are required, e.g. AiDigest → chunkIndex 0..N.
+/// Unique key includes chunkIndex (unlike legacy TeamMemoryDocument / KnowledgeEmbedding).
+///
+/// linkedIssueKey is historical/context metadata only — NOT Live Jira field authority.
+/// Live Jira remains source of truth for status / assignee / priority / summary / reporter.
+///
+/// Embedding storage (Phase 1): nullable JSON float[] on the chunk (Approach A), matching
+/// KnowledgeEmbedding's portable store. Native pgvector column is NOT mapped in Prisma
+/// (same optional runtime pattern as KnowledgeEmbedding — Phase 3A detects/creates
+/// embedding_vec when the vector extension is available; JSON remains portable source).
+///
+/// Phase 3A also adds a GIN FTS index on to_tsvector('english', text) via migration.
+///
+/// Expected sourceType values (string, not enum — matches TeamMemoryDocument convention):
+/// STANDUP_ANSWER | BLOCKER | BLOCKER_RESOLUTION | REPORT | JIRA_LINK | STANDUP_THREAD
+/// (AI_CONVERSATION is intentionally excluded from Team Memory ingest.)
+model MemoryChunk {
+  id          String @id @default(uuid())
+  workspaceId String
+
+  /// Logical source kind (e.g. STANDUP_ANSWER, BLOCKER, REPORT).
+  sourceType String
+  /// Primary key of the original Pulse record (e.g. Answer.id).
+  sourceId   String
+  /// Zero-based chunk index within the source (supports multi-chunk reports).
+  chunkIndex Int
+
+  text        String
+  contentHash String
+
+  visibility MemoryVisibility @default(WORKSPACE)
+
+  ownerUserId String?
+  teamId      String?
+
+  /// Optional Jira issue key for historical/context linking (NOT current-field authority).
+  linkedIssueKey String?
+
+  metadata Json?
+
+  /// Portable embedding store (nullable until a future worker indexes the chunk).
+  embedding           Json?
+  embeddingModel      String?
+  embeddingDimensions Int?
+
+  indexedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerUser User?     @relation("MemoryChunkOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  team      Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  @@unique([workspaceId, sourceType, sourceId, chunkIndex])
+  @@index([workspaceId])
+  @@index([workspaceId, visibility])
+  @@index([workspaceId, sourceType])
+  @@index([workspaceId, linkedIssueKey])
+  @@index([workspaceId, teamId])
+  @@index([workspaceId, ownerUserId])
+  @@index([sourceType, sourceId])
+  @@index([contentHash])
+}
+
+/// Pulse V2 Team Memory indexing outbox (dedicated — do NOT reuse InboundEvent).
+/// InboundEvent remains Slack provider-event idempotency only.
+///
+/// Idempotency strategy (Phase 1 foundation):
+/// - Outbox rows are append-oriented; there is NO unique constraint on
+///   (workspaceId, sourceType, sourceId) so legitimate re-index UPSERTs are allowed.
+/// - Future worker claims PENDING → PROCESSING (lockedAt), rebuilds ALL MemoryChunk rows
+///   for that source idempotently via @@unique([workspaceId, sourceType, sourceId, chunkIndex]),
+///   then marks COMPLETED (or FAILED + attempts++ / availableAt for retry).
+/// - Duplicate PENDING events for the same source are safe: worker rebuild is idempotent.
+model MemoryOutboxEvent {
+  id          String @id @default(uuid())
+  workspaceId String
+
+  sourceType String
+  sourceId   String
+
+  operation MemoryOutboxOperation
+  status    MemoryOutboxStatus    @default(PENDING)
+
+  attempts  Int     @default(0)
+  lastError String?
+
+  /// When the event becomes eligible for claiming (supports delayed retry).
+  availableAt DateTime  @default(now())
+  lockedAt    DateTime?
+  processedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([status, availableAt])
+  @@index([workspaceId])
+  @@index([workspaceId, status, availableAt])
+  @@index([sourceType, sourceId])
+  @@index([workspaceId, sourceType, sourceId])
+}
+
+// Persisted AI Workspace chat sessions (survives server restart).
+model AiConversation {
+  id              String   @id @default(uuid())
+  workspaceId     String
+  /// Optional Slack/Pulse user who started the chat (web may be null).
+  userId          String?
+  title           String?
+  preview         String?
+  vacationPending Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  workspace Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages  AiConversationMessage[]
+
+  @@index([workspaceId])
+  @@index([workspaceId, updatedAt])
+  @@index([userId])
+  @@index([updatedAt])
+}
+
+model AiConversationMessage {
+  id             String   @id @default(uuid())
+  conversationId String
+  role           String
+  content        String
+  intent         String?
+  citations      Json?
+  /// High | Medium | Low — restored when reopening history
+  confidence     String?
+  createdAt      DateTime @default(now())
+
+  conversation AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+/// Audit log for AI Workspace "Send to Slack" exports.
+model AiSlackExportLog {
+  id              String   @id @default(uuid())
+  workspaceId     String
+  userId          String?
+  slackUserId     String?
+  channelId       String?
+  channelName     String?
+  destinationType String
+  reportType      String?
+  title           String
+  success         Boolean
+  errorCode       String?
+  errorMessage    String?
+  messageTs       String?
+  attachments     Json?
+  createdAt       DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([workspaceId, createdAt])
+  @@index([success])
+  @@index([createdAt])
+}
+
+/// Gold-answer evaluation case for AI Workspace quality measurement.
+model AiEvalCase {
+  id                 String   @id @default(uuid())
+  /// Stable key across re-seeds (e.g. demo-jira-scrum-8-status).
+  caseKey            String
+  workspaceId        String
+  category           String
+  question           String
+  expectedAnswer     String
+  expectedSources    Json
+  expectedConfidence String?
+  tags               Json
+  enabled            Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  results   AiEvalResult[]
+
+  @@unique([workspaceId, caseKey])
+  @@index([workspaceId])
+  @@index([workspaceId, category])
+  @@index([enabled])
+}
+
+/// One evaluation run for a single workspace.
+model AiEvalRun {
+  id                     String    @id @default(uuid())
+  workspaceId            String
+  label                  String?
+  status                 String    @default("pending")
+  totalQuestions         Int       @default(0)
+  passed                 Int       @default(0)
+  failed                 Int       @default(0)
+  averageAccuracy        Float     @default(0)
+  averageConfidenceScore Float     @default(0)
+  averageResponseTimeMs  Float     @default(0)
+  overallScore           Float     @default(0)
+  passThreshold          Float     @default(60)
+  startedAt              DateTime  @default(now())
+  finishedAt             DateTime?
+  meta                   Json?
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  results   AiEvalResult[]
+
+  @@index([workspaceId])
+  @@index([workspaceId, startedAt])
+  @@index([status])
+}
+
+/// Per-question evaluation result (full audit log).
+model AiEvalResult {
+  id                 String   @id @default(uuid())
+  runId              String
+  caseId             String?
+  caseKey            String
+  category           String
+  question           String
+  expectedAnswer     String
+  aiAnswer           String
+  expectedSources    Json
+  aiSources          Json
+  expectedConfidence String?
+  aiConfidence       String?
+  scores             Json
+  overallScore       Float
+  passed             Boolean
+  hallucinationFlags Json
+  missingContext     Json
+  responseTimeMs     Int
+  responseLength     Int
+  createdAt          DateTime @default(now())
+
+  run  AiEvalRun   @relation(fields: [runId], references: [id], onDelete: Cascade)
+  case AiEvalCase? @relation(fields: [caseId], references: [id], onDelete: SetNull)
+
+  @@index([runId])
+  @@index([caseId])
+  @@index([passed])
+  @@index([createdAt])
 }

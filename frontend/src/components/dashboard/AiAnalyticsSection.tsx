@@ -31,10 +31,11 @@ import {
 } from '@/components/ui/dialog';
 
 const chartTooltipStyle = {
-  backgroundColor: '#111827',
-  borderColor: '#1F2937',
+  backgroundColor: 'hsl(240 8% 7%)',
+  borderColor: 'rgba(255,255,255,0.08)',
   borderRadius: '12px',
-  border: '1px solid #1F2937',
+  border: '1px solid rgba(255,255,255,0.08)',
+  boxShadow: '0 16px 40px -12px rgba(0,0,0,0.55)',
 };
 
 export interface AiAnalyticsBlocker {
@@ -102,7 +103,7 @@ export const AiAnalyticsSection: React.FC<AiAnalyticsSectionProps> = ({ data }) 
     return (
       <section className="space-y-4">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-module-ai/12 text-violet-300">
             <Bot className="h-5 w-5" />
           </div>
           <div>
@@ -112,7 +113,7 @@ export const AiAnalyticsSection: React.FC<AiAnalyticsSectionProps> = ({ data }) 
             </p>
           </div>
         </div>
-        <Card className="border-dashed">
+        <Card className="border-dashed border-white/[0.08]">
           <CardContent className="py-12 text-center">
             <p className="text-sm text-muted-foreground">
               {data?.message || 'No data available yet'}
@@ -136,7 +137,7 @@ export const AiAnalyticsSection: React.FC<AiAnalyticsSectionProps> = ({ data }) 
     <section className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-module-ai/12 text-violet-300">
             <Bot className="h-5 w-5" />
           </div>
           <div>
@@ -148,8 +149,8 @@ export const AiAnalyticsSection: React.FC<AiAnalyticsSectionProps> = ({ data }) 
             </p>
           </div>
         </div>
-        <Badge variant="secondary" className="w-fit gap-1.5">
-          <Sparkles className="h-3 w-3 text-primary" />
+        <Badge variant="ai" className="w-fit gap-1.5">
+          <Sparkles className="h-3 w-3" />
           Database-backed
         </Badge>
       </div>
@@ -163,6 +164,7 @@ export const AiAnalyticsSection: React.FC<AiAnalyticsSectionProps> = ({ data }) 
             data.teamHealth ? health.iconClass : 'bg-secondary text-muted-foreground'
           }
           subtitle="Completion, blockers, and AI summary"
+          accent="ai"
         />
         <KpiCard
           title="Completion Rate"
@@ -175,7 +177,7 @@ export const AiAnalyticsSection: React.FC<AiAnalyticsSectionProps> = ({ data }) 
               : undefined
           }
           subtitle="Latest run: completed / participants"
-          iconClassName="bg-violet-500/10 text-violet-400 group-hover:bg-violet-500/20"
+          accent="ai"
         />
         <button
           type="button"
@@ -192,7 +194,7 @@ export const AiAnalyticsSection: React.FC<AiAnalyticsSectionProps> = ({ data }) 
                 ? 'From standup answers and AI report'
                 : 'No blockers detected'
             }
-            iconClassName="bg-amber-500/10 text-amber-400 group-hover:bg-amber-500/20"
+            accent="blockers"
           />
         </button>
         <KpiCard
@@ -200,20 +202,21 @@ export const AiAnalyticsSection: React.FC<AiAnalyticsSectionProps> = ({ data }) 
           value={data.averageConfidenceLabel || 'Not available'}
           icon={Star}
           subtitle="Scale (1–5) rating questions only"
-          iconClassName="bg-yellow-500/10 text-yellow-400 group-hover:bg-yellow-500/20"
+          accent="reports"
         />
         <KpiCard
           title="Active CheckIns"
           value={data.activeCheckIns ?? 0}
           icon={CheckSquare}
           subtitle="Published and enabled"
+          accent="slack"
         />
       </div>
 
-      <Card className="card-lift">
+      <Card className="card-lift border-module-ai/10 hover:border-module-ai/25 hover:shadow-glow-ai">
         <CardHeader>
           <div className="flex items-center gap-2">
-            <BarChart3 className="h-4 w-4 text-primary" />
+            <BarChart3 className="h-4 w-4 text-module-ai" />
             <CardTitle>Productivity Trend</CardTitle>
           </div>
           <CardDescription>

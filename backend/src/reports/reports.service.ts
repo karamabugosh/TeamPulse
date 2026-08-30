@@ -132,7 +132,7 @@ export class ReportsService {
         digest.blockers
           .map(
             (blocker) =>
-              `• <@${blocker.userId}> — ${blocker.description} (${blocker.severity})`,
+              `• ${blocker.description} (${blocker.severity})`,
           )
           .join('\n'),
       );
