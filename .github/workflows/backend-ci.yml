@@ -1,5 +1,5 @@
-# Backend CI v4 — quality gates, nest build, unit tests, integration tests.
-# Does not run Prisma migrate deploy, Playwright, or live Slack/OpenAI/Jira.
+# Backend CI v5 — quality gates, tests, then Playwright (existing screenshot helper).
+# Does not run Prisma migrate deploy or live Slack/OpenAI/Jira.
 name: Backend CI
 
 on:
@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   unit:
-    name: Quality gates, build, and tests
+    name: Quality gates, tests, and Playwright
     runs-on: ubuntu-latest
 
     defaults:
@@ -114,13 +114,94 @@ jobs:
       - name: Run integration tests
         run: npm run test:integration
 
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # Existing Playwright usage is docs/capture-screenshots.mjs (no playwright.config).
+      - name: Install Playwright browsers
+        working-directory: docs
+        run: |
+          npm install playwright
+          npx playwright install --with-deps
+
+      - name: Start backend
+        run: |
+          nohup node dist/main.js > /tmp/pulse-backend.log 2>&1 &
+          echo $! > /tmp/pulse-backend.pid
+          disown || true
+
+      - name: Start frontend
+        working-directory: frontend
+        run: |
+          nohup npm run dev -- --host 127.0.0.1 --port 5173 > /tmp/pulse-frontend.log 2>&1 &
+          echo $! > /tmp/pulse-frontend.pid
+          disown || true
+
+      - name: Wait for application
+        run: |
+          set +e
+          node -e "
+          const http = require('http');
+          const ping = (url) => new Promise((resolve, reject) => {
+            const req = http.get(url, (res) => { res.resume(); resolve(res.statusCode); });
+            req.on('error', reject);
+            req.setTimeout(3000, () => { req.destroy(); reject(new Error('timeout')); });
+          });
+          (async () => {
+            for (let i = 0; i < 45; i++) {
+              try {
+                await ping('http://127.0.0.1:3000/api/questions');
+                await ping('http://127.0.0.1:5173/');
+                console.log('Backend and frontend are ready');
+                process.exit(0);
+              } catch (err) {
+                console.log('Waiting for application...', err.message || err);
+                await new Promise((r) => setTimeout(r, 2000));
+              }
+            }
+            console.error('Application did not become ready');
+            process.exit(1);
+          })();
+          "
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo '--- backend log ---'
+            cat /tmp/pulse-backend.log || true
+            echo '--- frontend log ---'
+            cat /tmp/pulse-frontend.log || true
+            exit 1
+          fi
+
+      - name: Run Playwright tests
+        working-directory: docs
+        env:
+          PULSE_URL: http://127.0.0.1:5173
+        run: node capture-screenshots.mjs
+
       - name: Run unit tests with coverage
+        if: success()
         run: npm run test:coverage
 
       - name: Upload coverage artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: backend-unit-coverage
           path: backend/coverage
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            docs/screenshots/**
+            docs/playwright-report/**
+            docs/test-results/**
+            playwright-report/**
+            test-results/**
+          if-no-files-found: warn
           retention-days: 14
