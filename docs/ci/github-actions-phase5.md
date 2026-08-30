@@ -64,7 +64,7 @@ Existing commands:
 | App | Command | URL |
 |-----|---------|-----|
 | Backend | `node dist/main.js` (after `npm run build`) | `http://127.0.0.1:3000` |
-| Frontend | `npm run dev` (`vite`, port **5173** from `vite.config.ts`) | `http://127.0.0.1:5173` |
+Frontend is started with the existing **`npm run build`** then **`vite preview`** (`package.json` `preview` script) so CI does not depend on the Vite dev server.
 
 `PULSE_URL=http://127.0.0.1:5173` is set so the screenshot script matches Vite (the script default `5175` is not the Vite config port).
 

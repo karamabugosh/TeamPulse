@@ -134,9 +134,8 @@ jobs:
           PORT: "3000"
         run: |
           set -e
-          echo "Backend dist:"
-          ls -la backend/dist || true
-          (cd frontend && npm run dev -- --host 0.0.0.0 --port 5173 > /tmp/pulse-frontend.log 2>&1) &
+          (cd frontend && npm run build)
+          (cd frontend && CI= npx vite preview --host 0.0.0.0 --port 5173 --strictPort > /tmp/pulse-frontend.log 2>&1) &
           (cd backend && node dist/main.js > /tmp/pulse-backend.log 2>&1) &
           node -e "
           const http = require('http');
