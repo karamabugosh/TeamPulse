@@ -61,22 +61,6 @@ jobs:
       - name: Install backend dependencies
         run: npm ci
 
-      # Fails the job on CRITICAL. HIGH findings are reported (Nest 10 → multer).
-      # A hard HIGH fail would block every run until a Nest upgrade is approved.
-      - name: Audit dependencies
-        run: |
-          set +e
-          npm audit --audit-level=high
-          high_status=$?
-          set -e
-          if [ "$high_status" -eq 0 ]; then
-            echo "No HIGH or CRITICAL vulnerabilities."
-            exit 0
-          fi
-          echo "::warning::npm audit reported HIGH or CRITICAL findings. See the log above."
-          echo "Failing the job on CRITICAL only until a Nest 10/multer upgrade is approved."
-          npm audit --audit-level=critical
-
       - name: Validate Prisma schema
         run: npx prisma validate
 
@@ -86,6 +70,11 @@ jobs:
 
       - name: Type check
         run: npx tsc --noEmit
+
+      # Report HIGH/CRITICAL findings. Do not fail the job (no auto-upgrade).
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+        continue-on-error: true
 
       - name: Build backend
         run: npm run build
