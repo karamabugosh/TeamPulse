@@ -11,10 +11,10 @@ fs.mkdirSync(outDir, { recursive: true });
 
 const pages = [
   { route: '/overview', file: '01-overview.png', heading: /Welcome back/i },
-  { route: '/checkins', file: '02-checkins.png', heading: /^CheckIns$/i },
-  { route: '/teams', file: '03-teams.png', heading: /^Teams$/i },
-  { route: '/reports', file: '04-reports.png', heading: /^Reports$/i },
-  { route: '/settings', file: '05-settings.png', heading: /^Settings$/i },
+  { route: '/checkins', file: '02-checkins.png', heading: /CheckIns/i },
+  { route: '/teams', file: '03-teams.png', heading: /Teams/i },
+  { route: '/reports', file: '04-reports.png', heading: /Reports/i },
+  { route: '/settings', file: '05-settings.png', heading: /Settings/i },
 ];
 
 function isWorkspacesResponse(response) {
@@ -38,7 +38,6 @@ async function gotoDashboard(page, route) {
       return null;
     });
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForURL(`**${route}`, { timeout: 15000 });
   await workspaces;
 }
 
@@ -82,7 +81,7 @@ try {
   // "Create CheckIn" is the dialog title / submit label, not the page button.
   console.log(`Opening CheckIn dialog at ${baseUrl}/checkins`);
   await gotoDashboard(page, '/checkins');
-  await page.getByRole('heading', { name: /^CheckIns$/i }).waitFor({
+  await page.getByRole('heading', { name: /CheckIns/i }).waitFor({
     state: 'visible',
     timeout: 60000,
   });

@@ -209,7 +209,17 @@ jobs:
           rm -f docs/screenshots/0*.png docs/screenshots/06-checkin-create-dialog.png docs/screenshots/99-playwright-failure.*
 
           cd docs
+          set +e
           node capture-screenshots.mjs
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "--- frontend log ---"
+            tail -n 80 /tmp/pulse-frontend.log || true
+            echo "--- backend log ---"
+            tail -n 80 /tmp/pulse-backend.log || true
+            exit "$status"
+          fi
 
       - name: Run unit tests with coverage
         if: success()
