@@ -198,7 +198,9 @@ jobs:
           echo "Backend PID $!"
 
           cd "${GITHUB_WORKSPACE}/frontend"
-          npx vite --host 127.0.0.1 --port 5173 --strictPort --clearScreen false > /tmp/pulse-frontend.log 2>&1 &
+          echo "Building frontend with Vite (skip tsc)..."
+          npx vite build
+          npx vite preview --host 127.0.0.1 --port 5173 --strictPort > /tmp/pulse-frontend.log 2>&1 &
           echo "Frontend PID $!"
 
           cd "${GITHUB_WORKSPACE}"
