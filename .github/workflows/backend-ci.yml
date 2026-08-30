@@ -114,6 +114,11 @@ jobs:
       - name: Run integration tests
         run: npm run test:integration
 
+      # Screenshot script expects a workspace/team (placeholder Slack, no live APIs).
+      # Not seed:demo (that path requires live Jira).
+      - name: Seed CI database for Playwright
+        run: npx prisma db seed
+
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
@@ -176,6 +181,18 @@ jobs:
             return 1
           }
 
+          cd "${GITHUB_WORKSPACE}"
+
+          # Point Vite's /api proxy at IPv4 so it matches Nest bound to 0.0.0.0
+          # (localhost can resolve to ::1 on ubuntu-latest).
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("frontend/vite.config.ts")
+          text = path.read_text()
+          path.write_text(text.replace("http://localhost:3000", "http://127.0.0.1:3000"))
+          print("Vite API proxy -> http://127.0.0.1:3000")
+          PY
+
           cd "${GITHUB_WORKSPACE}/backend"
           node dist/main.js > /tmp/pulse-backend.log 2>&1 &
           echo "Backend PID $!"
@@ -188,23 +205,9 @@ jobs:
 
           wait_http "http://127.0.0.1:5173/" "frontend" /tmp/pulse-frontend.log
           wait_http "http://127.0.0.1:3000/api/questions" "backend" /tmp/pulse-backend.log
+          wait_http "http://127.0.0.1:3000/api/admin/workspaces" "workspaces API" /tmp/pulse-backend.log
 
-          # CI-only workarounds for the existing screenshot script (file is not committed).
-          node <<'PATCH'
-          const fs = require('fs');
-          const file = 'docs/capture-screenshots.mjs';
-          let source = fs.readFileSync(file, 'utf8');
-          source = source.replace(
-            ".getByRole('button', { name: /New CheckIn|Create CheckIn/i }).click()",
-            ".getByRole('button', { name: /New CheckIn|Create CheckIn/i }).first().click()",
-          );
-          source = source.replaceAll("{ waitUntil: 'networkidle', timeout: 60000 }", "{ waitUntil: 'domcontentloaded', timeout: 60000 }");
-          source = source.replaceAll("{ waitUntil: 'networkidle' }", "{ waitUntil: 'domcontentloaded' }");
-          fs.writeFileSync(file, source);
-          console.log('Applied CI-only Playwright navigation/selector patches');
-          PATCH
-
-          rm -f docs/screenshots/0*.png docs/screenshots/06-checkin-create-dialog.png
+          rm -f docs/screenshots/0*.png docs/screenshots/06-checkin-create-dialog.png docs/screenshots/99-playwright-failure.*
 
           cd docs
           node capture-screenshots.mjs
