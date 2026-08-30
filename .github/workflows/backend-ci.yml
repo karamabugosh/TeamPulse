@@ -1,4 +1,4 @@
-# Backend CI v5 — quality gates, tests, then Playwright (existing screenshot helper).
+# Backend CI — quality gates, tests, then Playwright (@playwright/test).
 # Does not run Prisma migrate deploy or live Slack/OpenAI/Jira.
 name: Backend CI
 
@@ -114,8 +114,7 @@ jobs:
       - name: Run integration tests
         run: npm run test:integration
 
-      # Screenshot script expects a workspace/team (placeholder Slack, no live APIs).
-      # Not seed:demo (that path requires live Jira).
+      # Placeholder Slack workspace/team for dashboard smoke tests. Not seed:demo.
       - name: Seed CI database for Playwright
         run: npx prisma db seed
 
@@ -123,109 +122,25 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      # Existing Playwright usage is docs/capture-screenshots.mjs (no playwright.config).
-      - name: Install Playwright and browsers
-        working-directory: docs
-        run: |
-          npm install playwright
-          npx playwright install --with-deps
-
-      - name: Verify Chromium is available
-        working-directory: docs
-        run: |
-          node --input-type=module -e "
-          import { chromium } from 'playwright';
-          const browser = await chromium.launch();
-          console.log('Chromium launch OK');
-          await browser.close();
-          "
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps
 
       - name: Verify backend build output
         working-directory: backend
         run: test -f dist/main.js
 
-      # Start apps and run Playwright in the same step so background servers
-      # are not reaped between GitHub Actions steps.
-      - name: Start application and run Playwright tests
-        working-directory: ${{ github.workspace }}
+      - name: Run Playwright tests
+        working-directory: frontend
         env:
+          CI: "true"
           PULSE_URL: http://127.0.0.1:5173
+          PULSE_API_URL: http://127.0.0.1:3000
           PORT: "3000"
           SLACK_SOCKET_MODE_ENABLED: "false"
           CHECKIN_SCHEDULER_ENABLED: "false"
           DIGEST_SCHEDULER_ENABLED: "false"
-        run: |
-          set -e
-
-          wait_http() {
-            url="$1"
-            name="$2"
-            log="$3"
-            for attempt in $(seq 1 45); do
-              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$url" || true)
-              code=$(printf '%s' "$code" | tr -cd '0-9' | tail -c 3)
-              echo "Waiting for ${name} (attempt ${attempt}): HTTP ${code}"
-              if printf '%s' "$code" | grep -qE '^[2345][0-9][0-9]$'; then
-                echo "${name} is ready"
-                return 0
-              fi
-              if [ "$attempt" -eq 10 ] || [ "$attempt" -eq 20 ]; then
-                echo "--- ${log} (partial) ---"
-                tail -n 40 "$log" || true
-              fi
-              sleep 2
-            done
-            echo "${name} did not become ready"
-            echo "--- ${log} ---"
-            cat "$log" || true
-            return 1
-          }
-
-          cd "${GITHUB_WORKSPACE}/backend"
-          node dist/main.js > /tmp/pulse-backend.log 2>&1 &
-          echo "Backend PID $!"
-
-          cd "${GITHUB_WORKSPACE}/frontend"
-          npx vite --host 127.0.0.1 --port 5173 --strictPort --clearScreen false > /tmp/pulse-frontend.log 2>&1 &
-          echo "Frontend PID $!"
-
-          cd "${GITHUB_WORKSPACE}"
-
-          wait_http "http://127.0.0.1:5173/" "frontend" /tmp/pulse-frontend.log
-          wait_http "http://127.0.0.1:3000/api/questions" "backend" /tmp/pulse-backend.log
-
-          rm -f docs/screenshots/0*.png docs/screenshots/06-checkin-create-dialog.png docs/screenshots/99-playwright-failure.* docs/screenshots/99-playwright-debug.txt docs/screenshots/10-slack-dm-conversation.png
-
-          cd docs
-          set +e
-          node capture-screenshots.mjs
-          status=$?
-          set -e
-          if [ "$status" -ne 0 ]; then
-            echo "--- frontend log ---"
-            tail -n 80 /tmp/pulse-frontend.log || true
-            echo "--- backend log ---"
-            tail -n 80 /tmp/pulse-backend.log || true
-            {
-              echo "## Playwright failure"
-              echo
-              echo "- URL and dumps are in the playwright-artifacts artifact."
-              echo
-              echo '### debug'
-              echo
-              echo '```'
-              cat screenshots/99-playwright-debug.txt || echo "(no debug)"
-              echo '```'
-              echo
-              echo '### failure.html (truncated)'
-              echo
-              echo '```html'
-              head -c 20000 screenshots/99-playwright-failure.html || echo "(no failure.html)"
-              echo
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit "$status"
-          fi
+        run: npm run test:e2e
 
       - name: Run unit tests with coverage
         if: success()
@@ -246,10 +161,7 @@ jobs:
         with:
           name: playwright-artifacts
           path: |
-            docs/screenshots/**
-            docs/playwright-report/**
-            docs/test-results/**
-            playwright-report/**
-            test-results/**
+            frontend/playwright-report/**
+            frontend/test-results/**
           if-no-files-found: warn
           retention-days: 14

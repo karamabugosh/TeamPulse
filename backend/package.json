@@ -13,6 +13,7 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:integration": "node integration/ensure-pulse-test-db.js && jest --config integration/jest.integration.config.js",
+    "test:e2e": "npm --prefix ../frontend run test:e2e",
     "test:integration:coverage": "node integration/ensure-pulse-test-db.js && jest --config integration/jest.integration.config.js --coverage",
     "seed": "prisma db seed",
     "seed:demo": "ts-node prisma/seed-demo.ts",
