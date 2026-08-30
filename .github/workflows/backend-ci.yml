@@ -1,5 +1,4 @@
-# Backend CI v3 — generate, nest build, unit tests, then integration tests
-# against an ephemeral GitHub Actions PostgreSQL service (never teampulse).
+# Backend CI v4 — quality gates, nest build, unit tests, integration tests.
 # Does not run Prisma migrate deploy, Playwright, or live Slack/OpenAI/Jira.
 name: Backend CI
 
@@ -26,7 +25,7 @@ permissions:
 
 jobs:
   unit:
-    name: Build, unit, and integration tests
+    name: Quality gates, build, and tests
     runs-on: ubuntu-latest
 
     defaults:
@@ -62,9 +61,31 @@ jobs:
       - name: Install backend dependencies
         run: npm ci
 
+      # Fails the job on CRITICAL. HIGH findings are reported (Nest 10 → multer).
+      # A hard HIGH fail would block every run until a Nest upgrade is approved.
+      - name: Audit dependencies
+        run: |
+          set +e
+          npm audit --audit-level=high
+          high_status=$?
+          set -e
+          if [ "$high_status" -eq 0 ]; then
+            echo "No HIGH or CRITICAL vulnerabilities."
+            exit 0
+          fi
+          echo "::warning::npm audit reported HIGH or CRITICAL findings. See the log above."
+          echo "Failing the job on CRITICAL only until a Nest 10/multer upgrade is approved."
+          npm audit --audit-level=critical
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
       # Generate @prisma/client without requiring a live query (schema env only).
       - name: Generate Prisma Client
         run: npx prisma generate
+
+      - name: Type check
+        run: npx tsc --noEmit
 
       - name: Build backend
         run: npm run build
