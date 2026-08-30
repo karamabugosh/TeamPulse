@@ -181,17 +181,6 @@ jobs:
             return 1
           }
 
-          cd "${GITHUB_WORKSPACE}"
-
-          # Point Vite's /api proxy at IPv4 so it matches Nest bound to 0.0.0.0
-          # (localhost can resolve to ::1 on ubuntu-latest).
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("frontend/vite.config.ts")
-          path.write_text(path.read_text().replace("http://localhost:3000", "http://127.0.0.1:3000"))
-          print("Vite API proxy -> http://127.0.0.1:3000")
-          PY
-
           cd "${GITHUB_WORKSPACE}/backend"
           node dist/main.js > /tmp/pulse-backend.log 2>&1 &
           echo "Backend PID $!"
