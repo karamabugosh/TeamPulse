@@ -1,15 +1,20 @@
-# Backend CI v1 — Jest unit tests only.
-# Does not run Build, Prisma migrate, PostgreSQL, integration tests, or Playwright.
+# Backend CI v3 — generate, nest build, unit tests, then integration tests
+# against an ephemeral GitHub Actions PostgreSQL service (never teampulse).
+# Does not run Prisma migrate deploy, Playwright, or live Slack/OpenAI/Jira.
 name: Backend CI
 
 on:
   push:
   pull_request:
 
-# Dummy URL satisfies `env("DATABASE_URL")` in schema.prisma for `prisma generate`.
-# Prisma generate does not open a database connection. Do not use real credentials.
+# CI-only Postgres credentials. The service container is created for this job
+# and destroyed when the job ends. It is not the developer machine database.
 env:
-  DATABASE_URL: postgresql://ci:ci@localhost:5432/ci?schema=public
+  POSTGRES_DB: pulse_test
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgres
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pulse_test?schema=public
+  DATABASE_URL_TEST: postgresql://postgres:postgres@localhost:5432/pulse_test?schema=public
 
 # Cancel superseded runs on the same branch / PR.
 concurrency:
@@ -21,20 +26,32 @@ permissions:
 
 jobs:
   unit:
-    name: Unit tests
+    name: Build, unit, and integration tests
     runs-on: ubuntu-latest
 
-    # All `run:` steps execute in backend/ (NestJS package at the repository root).
     defaults:
       run:
         working-directory: backend
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: pulse_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d pulse_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
-      # Clone the commit under test.
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Node 20 matches @types/node ^20. Cache keyed off backend/package-lock.json.
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
@@ -42,27 +59,54 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
-      # Reproducible install from the lockfile.
-      # postinstall already runs `prisma generate`; the next step makes that explicit.
       - name: Install backend dependencies
         run: npm ci
 
-      # Generate @prisma/client without connecting to PostgreSQL.
-      # Required because unit tests import Prisma enums (e.g. MemoryVisibility).
+      # Generate @prisma/client without requiring a live query (schema env only).
       - name: Generate Prisma Client
         run: npx prisma generate
 
-      # Jest discovers src/**/*.unit.spec.ts only (DigestService + MemoryChunkerService).
-      # Legacy ts-node *.spec.ts scripts are excluded and are not run here.
+      - name: Build backend
+        run: npm run build
+
       - name: Run unit tests
         run: npm test
 
-      # Same suite with coverage. No coverageThreshold — this step must not fail
-      # on low global % while most of src/ is still untested.
+      # Extra wait: service healthcheck already gated job start; this confirms
+      # TCP + SQL before db push / integration tests.
+      - name: Wait for PostgreSQL
+        run: |
+          node -e "
+          const net = require('net');
+          const tryConnect = () => new Promise((resolve, reject) => {
+            const s = net.connect(5432, 'localhost', () => { s.end(); resolve(); });
+            s.on('error', reject);
+          });
+          (async () => {
+            for (let i = 0; i < 30; i++) {
+              try {
+                await tryConnect();
+                console.log('PostgreSQL is accepting connections on localhost:5432');
+                process.exit(0);
+              } catch {
+                await new Promise((r) => setTimeout(r, 2000));
+              }
+            }
+            console.error('PostgreSQL did not become ready');
+            process.exit(1);
+          })();
+          "
+
+      # Apply current schema to the CI database only. Not migrate deploy.
+      - name: Push Prisma schema to CI database
+        run: npx prisma db push --skip-generate
+
+      - name: Run integration tests
+        run: npm run test:integration
+
       - name: Run unit tests with coverage
         run: npm run test:coverage
 
-      # Persist coverage/ for download from the Actions run (lcov, json-summary, text).
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
