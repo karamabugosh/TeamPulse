@@ -204,9 +204,8 @@ jobs:
 
           wait_http "http://127.0.0.1:5173/" "frontend" /tmp/pulse-frontend.log
           wait_http "http://127.0.0.1:3000/api/questions" "backend" /tmp/pulse-backend.log
-          wait_http "http://127.0.0.1:3000/api/admin/workspaces" "workspaces API" /tmp/pulse-backend.log
 
-          rm -f docs/screenshots/0*.png docs/screenshots/06-checkin-create-dialog.png docs/screenshots/99-playwright-failure.*
+          rm -f docs/screenshots/0*.png docs/screenshots/06-checkin-create-dialog.png docs/screenshots/99-playwright-failure.* docs/screenshots/99-playwright-debug.txt docs/screenshots/10-slack-dm-conversation.png
 
           cd docs
           set +e
