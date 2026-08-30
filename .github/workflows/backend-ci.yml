@@ -162,7 +162,7 @@ jobs:
           BACKEND_PID=$!
 
           echo "Starting frontend (Vite dev)..."
-          (cd frontend && CI= npm run dev -- --host 127.0.0.1 --port 5173 --strictPort > /tmp/pulse-frontend.log 2>&1) &
+          (cd frontend && npm run dev -- --host 0.0.0.0 --port 5173 > /tmp/pulse-frontend.log 2>&1) &
           FRONTEND_PID=$!
 
           echo "Waiting for frontend..."
@@ -171,8 +171,8 @@ jobs:
               echo "Frontend is ready"
               break
             fi
-            if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
-              echo "Frontend process exited early"
+            if [ "$attempt" -ge 5 ] && ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
+              echo "Frontend process exited before becoming ready"
               cat /tmp/pulse-frontend.log || true
               exit 1
             fi
@@ -187,16 +187,20 @@ jobs:
           echo "Waiting for backend..."
           for attempt in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:3000/api/questions >/dev/null 2>&1; then
-              echo "Backend is ready"
+              echo "Backend is ready (direct)"
               break
             fi
-            if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-              echo "Backend process exited early"
+            if curl -fsS http://127.0.0.1:5173/api/questions >/dev/null 2>&1; then
+              echo "Backend is ready (via frontend proxy)"
+              break
+            fi
+            if [ "$attempt" -ge 5 ] && ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+              echo "Backend process exited before becoming ready"
               cat /tmp/pulse-backend.log || true
               exit 1
             fi
             if grep -q "Application is running on:" /tmp/pulse-backend.log 2>/dev/null; then
-              echo "Backend log shows listen; retrying HTTP probe..."
+              echo "Backend log shows listen; continuing HTTP probe..."
             fi
             if [ "$attempt" -eq 60 ]; then
               echo "Backend did not become ready"
