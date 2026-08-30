@@ -156,15 +156,18 @@ jobs:
             url="$1"
             name="$2"
             log="$3"
-            for attempt in $(seq 1 60); do
-              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$url" || echo 000)
+            for attempt in $(seq 1 45); do
+              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$url" || true)
+              code=$(printf '%s' "$code" | tr -cd '0-9' | tail -c 3)
               echo "Waiting for ${name} (attempt ${attempt}): HTTP ${code}"
-              case "$code" in
-                2*|3*|4*)
-                  echo "${name} is ready"
-                  return 0
-                  ;;
-              esac
+              if printf '%s' "$code" | grep -qE '^[2345][0-9][0-9]$'; then
+                echo "${name} is ready"
+                return 0
+              fi
+              if [ "$attempt" -eq 10 ] || [ "$attempt" -eq 20 ]; then
+                echo "--- ${log} (partial) ---"
+                tail -n 40 "$log" || true
+              fi
               sleep 2
             done
             echo "${name} did not become ready"
@@ -173,30 +176,32 @@ jobs:
             return 1
           }
 
-          echo "Starting backend from ${GITHUB_WORKSPACE}/backend"
-          nohup bash -c 'cd "$GITHUB_WORKSPACE/backend" && exec node dist/main.js' > /tmp/pulse-backend.log 2>&1 &
-          BACKEND_PID=$!
-          echo "Backend PID ${BACKEND_PID}"
+          cd "${GITHUB_WORKSPACE}/backend"
+          node dist/main.js > /tmp/pulse-backend.log 2>&1 &
+          echo "Backend PID $!"
 
-          echo "Starting frontend from ${GITHUB_WORKSPACE}/frontend"
-          nohup bash -c 'cd "$GITHUB_WORKSPACE/frontend" && exec npm run dev -- --host 0.0.0.0 --port 5173' > /tmp/pulse-frontend.log 2>&1 &
-          FRONTEND_PID=$!
-          echo "Frontend PID ${FRONTEND_PID}"
+          cd "${GITHUB_WORKSPACE}/frontend"
+          npx vite --host 127.0.0.1 --port 5173 --strictPort --clearScreen false > /tmp/pulse-frontend.log 2>&1 &
+          echo "Frontend PID $!"
+
+          cd "${GITHUB_WORKSPACE}"
 
           wait_http "http://127.0.0.1:5173/" "frontend" /tmp/pulse-frontend.log
           wait_http "http://127.0.0.1:3000/api/questions" "backend" /tmp/pulse-backend.log
 
-          # CI-only workaround: empty CheckIns page exposes two "New CheckIn" buttons.
+          # CI-only workarounds for the existing screenshot script (file is not committed).
           node <<'PATCH'
           const fs = require('fs');
           const file = 'docs/capture-screenshots.mjs';
           let source = fs.readFileSync(file, 'utf8');
-          const needle = ".getByRole('button', { name: /New CheckIn|Create CheckIn/i }).click()";
-          const patch = ".getByRole('button', { name: /New CheckIn|Create CheckIn/i }).first().click()";
-          if (source.includes(needle)) {
-            fs.writeFileSync(file, source.replace(needle, patch));
-            console.log('Applied CI-only strict-mode patch for New CheckIn button');
-          }
+          source = source.replace(
+            ".getByRole('button', { name: /New CheckIn|Create CheckIn/i }).click()",
+            ".getByRole('button', { name: /New CheckIn|Create CheckIn/i }).first().click()",
+          );
+          source = source.replaceAll("{ waitUntil: 'networkidle', timeout: 60000 }", "{ waitUntil: 'domcontentloaded', timeout: 60000 }");
+          source = source.replaceAll("{ waitUntil: 'networkidle' }", "{ waitUntil: 'domcontentloaded' }");
+          fs.writeFileSync(file, source);
+          console.log('Applied CI-only Playwright navigation/selector patches');
           PATCH
 
           rm -f docs/screenshots/0*.png docs/screenshots/06-checkin-create-dialog.png
