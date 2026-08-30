@@ -125,22 +125,17 @@ jobs:
           npm install playwright
           npx playwright install --with-deps
 
-      - name: Start backend
+      # Start apps and run Playwright in the same step so background servers
+      # are not reaped between GitHub Actions steps.
+      - name: Start application and run Playwright tests
+        working-directory: ${{ github.workspace }}
+        env:
+          PULSE_URL: http://127.0.0.1:5173
+          PORT: "3000"
         run: |
-          nohup node dist/main.js > /tmp/pulse-backend.log 2>&1 &
-          echo $! > /tmp/pulse-backend.pid
-          disown || true
-
-      - name: Start frontend
-        working-directory: frontend
-        run: |
-          nohup npm run dev -- --host 127.0.0.1 --port 5173 > /tmp/pulse-frontend.log 2>&1 &
-          echo $! > /tmp/pulse-frontend.pid
-          disown || true
-
-      - name: Wait for application
-        run: |
-          set +e
+          set -e
+          node backend/dist/main.js > /tmp/pulse-backend.log 2>&1 &
+          (cd frontend && npx vite --host 127.0.0.1 --port 5173 > /tmp/pulse-frontend.log 2>&1) &
           node -e "
           const http = require('http');
           const ping = (url) => new Promise((resolve, reject) => {
@@ -163,21 +158,14 @@ jobs:
             console.error('Application did not become ready');
             process.exit(1);
           })();
-          "
-          status=$?
-          if [ "$status" -ne 0 ]; then
+          " || {
             echo '--- backend log ---'
             cat /tmp/pulse-backend.log || true
             echo '--- frontend log ---'
             cat /tmp/pulse-frontend.log || true
             exit 1
-          fi
-
-      - name: Run Playwright tests
-        working-directory: docs
-        env:
-          PULSE_URL: http://127.0.0.1:5173
-        run: node capture-screenshots.mjs
+          }
+          (cd docs && node capture-screenshots.mjs)
 
       - name: Run unit tests with coverage
         if: success()

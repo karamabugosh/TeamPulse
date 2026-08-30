@@ -68,7 +68,7 @@ Existing commands:
 
 `PULSE_URL=http://127.0.0.1:5173` is set so the screenshot script matches Vite (the script default `5175` is not the Vite config port).
 
-Processes run in the background on the job. Slack socket mode does not block HTTP listen.
+GitHub Actions reaps background processes at the end of a step, so **start, readiness, and Playwright run in one step**. That is still: start apps → wait for HTTP → `node capture-screenshots.mjs`.
 
 ---
 
