@@ -135,6 +135,10 @@ jobs:
           await browser.close();
           "
 
+      - name: Verify backend build output
+        working-directory: backend
+        run: test -f dist/main.js
+
       # Start apps and run Playwright in the same step so background servers
       # are not reaped between GitHub Actions steps.
       - name: Start application and run Playwright tests
@@ -146,118 +150,63 @@ jobs:
           CHECKIN_SCHEDULER_ENABLED: "false"
           DIGEST_SCHEDULER_ENABLED: "false"
         run: |
-          set -euo pipefail
+          set -e
 
-          echo "Building frontend for vite preview..."
-          (cd frontend && npm run build)
+          cleanup() {
+            kill "$FRONTEND_PID" "$BACKEND_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
 
-          echo "Starting backend and frontend..."
+          echo "Starting backend..."
           (cd backend && node dist/main.js > /tmp/pulse-backend.log 2>&1) &
           BACKEND_PID=$!
-          (cd frontend && npx vite preview --host 127.0.0.1 --port 5173 --strictPort > /tmp/pulse-frontend.log 2>&1) &
+
+          echo "Starting frontend (Vite dev)..."
+          (cd frontend && CI= npm run dev -- --host 127.0.0.1 --port 5173 --strictPort > /tmp/pulse-frontend.log 2>&1) &
           FRONTEND_PID=$!
 
-          node -e "
-          const http = require('http');
-          const net = require('net');
+          echo "Waiting for frontend..."
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:5173/ >/dev/null 2>&1; then
+              echo "Frontend is ready"
+              break
+            fi
+            if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
+              echo "Frontend process exited early"
+              cat /tmp/pulse-frontend.log || true
+              exit 1
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "Frontend did not become ready"
+              cat /tmp/pulse-frontend.log || true
+              exit 1
+            fi
+            sleep 2
+          done
 
-          const ping = (url) => new Promise((resolve, reject) => {
-            const req = http.get(url, (res) => {
-              res.resume();
-              if (res.statusCode && res.statusCode >= 200 && res.statusCode < 500) {
-                resolve(res.statusCode);
-                return;
-              }
-              reject(new Error('HTTP ' + res.statusCode + ' for ' + url));
-            });
-            req.on('error', reject);
-            req.setTimeout(5000, () => {
-              req.destroy();
-              reject(new Error('timeout for ' + url));
-            });
-          });
+          echo "Waiting for backend..."
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3000/api/questions >/dev/null 2>&1; then
+              echo "Backend is ready"
+              break
+            fi
+            if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+              echo "Backend process exited early"
+              cat /tmp/pulse-backend.log || true
+              exit 1
+            fi
+            if grep -q "Application is running on:" /tmp/pulse-backend.log 2>/dev/null; then
+              echo "Backend log shows listen; retrying HTTP probe..."
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "Backend did not become ready"
+              cat /tmp/pulse-backend.log || true
+              exit 1
+            fi
+            sleep 2
+          done
 
-          const portOpen = (port) => new Promise((resolve) => {
-            const socket = net.connect(port, '127.0.0.1', () => {
-              socket.end();
-              resolve(true);
-            });
-            socket.on('error', () => resolve(false));
-            socket.setTimeout(2000, () => {
-              socket.destroy();
-              resolve(false);
-            });
-          });
-
-          const alive = (pid) => {
-            try {
-              process.kill(pid, 0);
-              return true;
-            } catch {
-              return false;
-            }
-          };
-
-          (async () => {
-            let frontendReady = false;
-            let backendReady = false;
-
-            for (let attempt = 1; attempt <= 60; attempt++) {
-              if (!alive(${BACKEND_PID})) {
-                console.error('Backend process exited before becoming ready');
-                process.exit(2);
-              }
-              if (!alive(${FRONTEND_PID})) {
-                console.error('Frontend process exited before becoming ready');
-                process.exit(3);
-              }
-
-              if (!frontendReady) {
-                try {
-                  await ping('http://127.0.0.1:5173/');
-                  frontendReady = true;
-                  console.log('Frontend is ready');
-                } catch (err) {
-                  console.log('[frontend]', err.message || err);
-                }
-              }
-
-              if (!backendReady) {
-                const tcpReady = await portOpen(3000);
-                if (tcpReady) {
-                  try {
-                    await ping('http://127.0.0.1:3000/api/questions');
-                    backendReady = true;
-                    console.log('Backend is ready');
-                  } catch (err) {
-                    console.log('[backend]', err.message || err);
-                  }
-                } else {
-                  console.log('[backend] waiting for port 3000');
-                }
-              }
-
-              if (frontendReady && backendReady) {
-                console.log('Frontend and backend are ready');
-                process.exit(0);
-              }
-
-              await new Promise((resolve) => setTimeout(resolve, 2000));
-            }
-
-            console.error('Application did not become ready');
-            process.exit(1);
-          })();
-          " || {
-            echo '--- frontend log ---'
-            cat /tmp/pulse-frontend.log || true
-            echo '--- backend log ---'
-            cat /tmp/pulse-backend.log || true
-            kill "$FRONTEND_PID" "$BACKEND_PID" 2>/dev/null || true
-            exit 1
-          }
-
-          # CI-only workaround: empty CheckIns page exposes two \"New CheckIn\" buttons.
+          # CI-only workaround: empty CheckIns page exposes two "New CheckIn" buttons.
           node <<'PATCH'
           const fs = require('fs');
           const file = 'docs/capture-screenshots.mjs';
@@ -274,8 +223,6 @@ jobs:
 
           cd docs
           node capture-screenshots.mjs
-
-          kill "$FRONTEND_PID" "$BACKEND_PID" 2>/dev/null || true
 
       - name: Run unit tests with coverage
         if: success()
