@@ -28,10 +28,15 @@ function isWorkspacesResponse(response) {
 
 async function gotoDashboard(page, route) {
   const url = `${baseUrl}${route}`;
-  const workspaces = page.waitForResponse(
-    (response) => isWorkspacesResponse(response) && response.status() < 500,
-    { timeout: 60000 },
-  );
+  const workspaces = page
+    .waitForResponse(
+      (response) => isWorkspacesResponse(response) && response.status() < 500,
+      { timeout: 60000 },
+    )
+    .catch((error) => {
+      console.warn(`workspaces API was not observed for ${route}:`, error.message);
+      return null;
+    });
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForURL(`**${route}`, { timeout: 15000 });
   await workspaces;

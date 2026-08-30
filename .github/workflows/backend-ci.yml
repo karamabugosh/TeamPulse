@@ -188,8 +188,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           path = Path("frontend/vite.config.ts")
-          text = path.read_text()
-          path.write_text(text.replace("http://localhost:3000", "http://127.0.0.1:3000"))
+          path.write_text(path.read_text().replace("http://localhost:3000", "http://127.0.0.1:3000"))
           print("Vite API proxy -> http://127.0.0.1:3000")
           PY
 
@@ -198,9 +197,7 @@ jobs:
           echo "Backend PID $!"
 
           cd "${GITHUB_WORKSPACE}/frontend"
-          echo "Building frontend with Vite (skip tsc)..."
-          npx vite build
-          npx vite preview --host 127.0.0.1 --port 5173 --strictPort > /tmp/pulse-frontend.log 2>&1 &
+          npx vite --host 127.0.0.1 --port 5173 --strictPort --clearScreen false > /tmp/pulse-frontend.log 2>&1 &
           echo "Frontend PID $!"
 
           cd "${GITHUB_WORKSPACE}"
