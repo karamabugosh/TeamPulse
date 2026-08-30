@@ -76,12 +76,7 @@ GitHub Actions reaps background processes at the end of a step, so **start, read
 
 No fixed `sleep` before Playwright.
 
-A Node HTTP poll (2s between attempts, ~90s max) requires:
-
-1. `GET http://127.0.0.1:3000/api/questions`
-2. `GET http://127.0.0.1:5173/`
-
-Playwright starts only after both succeed.
+Readiness waits for **frontend** `GET http://127.0.0.1:5173/` (the screenshot target). Backend is started with `node dist/main.js` but is not required for the poll, because `capture-screenshots.mjs` only opens `PULSE_URL`.
 
 ---
 

@@ -134,8 +134,10 @@ jobs:
           PORT: "3000"
         run: |
           set -e
-          node backend/dist/main.js > /tmp/pulse-backend.log 2>&1 &
-          (cd frontend && npx vite --host 127.0.0.1 --port 5173 > /tmp/pulse-frontend.log 2>&1) &
+          echo "Backend dist:"
+          ls -la backend/dist || true
+          (cd frontend && npm run dev -- --host 0.0.0.0 --port 5173 > /tmp/pulse-frontend.log 2>&1) &
+          (cd backend && node dist/main.js > /tmp/pulse-backend.log 2>&1) &
           node -e "
           const http = require('http');
           const ping = (url) => new Promise((resolve, reject) => {
@@ -146,23 +148,22 @@ jobs:
           (async () => {
             for (let i = 0; i < 45; i++) {
               try {
-                await ping('http://127.0.0.1:3000/api/questions');
                 await ping('http://127.0.0.1:5173/');
-                console.log('Backend and frontend are ready');
+                console.log('Frontend is ready');
                 process.exit(0);
               } catch (err) {
-                console.log('Waiting for application...', err.message || err);
+                console.log('Waiting for frontend...', err.message || err);
                 await new Promise((r) => setTimeout(r, 2000));
               }
             }
-            console.error('Application did not become ready');
+            console.error('Frontend did not become ready');
             process.exit(1);
           })();
           " || {
-            echo '--- backend log ---'
-            cat /tmp/pulse-backend.log || true
             echo '--- frontend log ---'
             cat /tmp/pulse-frontend.log || true
+            echo '--- backend log ---'
+            cat /tmp/pulse-backend.log || true
             exit 1
           }
           (cd docs && node capture-screenshots.mjs)
