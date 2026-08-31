@@ -1,6 +1,7 @@
 # TeamPulse — Render Blueprint (backend web service)
 # Branch: karam-final1 | Root: backend/
-# Database: set DATABASE_URL in Render dashboard (Neon PostgreSQL — Phase 3).
+# Database: set DATABASE_URL in Render dashboard (Neon PostgreSQL).
+# See docs/deployment/neon-postgresql.md for URL format (direct vs pooler, SSL).
 # Secrets: never commit values; configure in Render Environment only.
 
 services:

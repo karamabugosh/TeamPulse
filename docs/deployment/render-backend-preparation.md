@@ -1,6 +1,6 @@
 # Render backend preparation (Phase 1)
 
-**Status:** Complete — see [Phase 2 deployment guide](./render-backend-deployment.md).  
+**Status:** Complete — see [Phase 2 deployment guide](./render-backend-deployment.md) and [Neon PostgreSQL](./neon-postgresql.md).  
 **Date:** August 31, 2026  
 **Service:** TeamPulse NestJS backend (`backend/`)  
 **Target:** [Render](https://render.com) Web Service + PostgreSQL

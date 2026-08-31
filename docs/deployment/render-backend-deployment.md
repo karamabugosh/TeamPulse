@@ -1,7 +1,8 @@
 # Render backend deployment (Phase 2)
 
-**Status:** Configured — connect Neon PostgreSQL in Phase 3 before first production traffic.  
+**Status:** Ready for Phase 4 — set Neon `DATABASE_URL` in Render, then deploy.  
 **Date:** August 31, 2026  
+**Database:** [Neon PostgreSQL setup](./neon-postgresql.md)  
 **Repository:** [karamabugosh/TeamPulse](https://github.com/karamabugosh/TeamPulse)  
 **Branch:** `karam-final1`  
 **Blueprint:** [`render.yaml`](../../render.yaml) (repo root)
@@ -21,7 +22,7 @@ Render Web Service — teampulse-backend
   start:  npm run start:prod
   health: GET /api/health
         │
-        ├──► Neon PostgreSQL (DATABASE_URL) — Phase 3
+        ├──► Neon PostgreSQL (DATABASE_URL) — see neon-postgresql.md
         ├──► Slack (Socket Mode + Web API)
         ├──► OpenAI
         └──► Atlassian Jira OAuth
@@ -100,10 +101,10 @@ If the first deploy fails on `migrate deploy`, **`DATABASE_URL`** is likely miss
 
 ## Database connection
 
-Production uses a **hosted PostgreSQL** connection string only:
+Production uses a **Neon PostgreSQL** connection string only. Full setup: [neon-postgresql.md](./neon-postgresql.md).
 
 ```env
-DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require
+DATABASE_URL=postgresql://USER:PASSWORD@ep-xxxx.region.aws.neon.tech/neondb?sslmode=require
 ```
 
 | Rule | Detail |
@@ -168,6 +169,7 @@ Set in **Render → Environment** (never commit secrets). Template: [`backend/.e
 | Variable | Note |
 |----------|------|
 | `JWT_SECRET` | **Not used** — auth is Slack/workspace-based, not JWT |
+| `JWT_EXPIRES_IN` | **Not used** |
 
 ### Optional / feature toggles
 
@@ -196,7 +198,7 @@ In Render Environment, add all **Required** variables. Leave values empty in git
 
 ### 4. Phase 3 — Neon
 
-Add Neon **`DATABASE_URL`**, redeploy, confirm `prisma migrate deploy` succeeds in deploy logs.
+Add Neon **`DATABASE_URL`** (direct endpoint + `sslmode=require`), redeploy, confirm `prisma migrate deploy` succeeds in deploy logs. See [neon-postgresql.md](./neon-postgresql.md).
 
 ### 5. Verify
 
@@ -256,5 +258,5 @@ Secrets are logged as **set/not set** only — never values.
 - [x] Health check documented (`/api/health`)
 - [x] Prisma generate (build) + migrate deploy (pre-deploy)
 - [x] No secrets in git
-- [ ] Neon `DATABASE_URL` — **Phase 3**
-- [ ] First successful Render deploy — after Phase 3
+- [ ] Neon `DATABASE_URL` — **Phase 4** (set in Render; see [neon-postgresql.md](./neon-postgresql.md))
+- [ ] First successful Render deploy — **Phase 4**
