@@ -1,34 +1,45 @@
-# Coverage-Driven Roadmap (August 31, 2026)
+# Coverage-Driven Roadmap (Gain-Score Strategy)
 
-**Project baseline:** 8.38% statements · 8.02% lines · 3.88% branches · 5.53% functions  
-**Source:** `npm run test:coverage` on `karam-final1`
+**Updated:** August 31, 2026  
+**Formula:** `Coverage Gain Score = uncovered statements + uncovered branches`
 
----
+## Priority tiers
 
-## Top 0% services by uncovered statement count
+1. Largest **0%** services (highest gain score first)
+2. Largest services **below 50%**
+3. Controllers with significant business logic
+4. Medium services
+5. Small helpers
+6. Tiny utilities/exports last
 
-| Rank | Service | Stmts | Lines | Branches | Unit spec? |
-|------|---------|------:|------:|---------:|:----------:|
-| 1 | `collection.service.ts` | 575 | 540 | 823 | No |
-| 2 | `admin.service.ts` | 575 | 540 | 823 | No |
-| 3 | `check-in.service.ts` | ~500+ | 1769 | — | No |
-| … | *(large services)* | | | | |
-| **Selected** | **`jira-standup-hook.service.ts`** | **72** | **69** | **61** | **No** |
+## Current project baseline
 
-**Why `JiraStandupHookService` for this iteration:** Strict priority #1 (0% service), completable to 100% in one pass, +72 statements of real gain vs attempting 500+ statement services.
+| Metric | Coverage |
+|--------|----------|
+| Statements | 10.21% |
+| Branches | 5.09% |
+| Functions | 7.19% |
+| Lines | 9.89% |
 
----
+## Top 10 services by gain score (untested / partial)
 
-## Next queue (after approval)
+| Rank | Service | Score | Stmts % | Status |
+|------|---------|------:|--------:|--------|
+| 1 | `workspace-knowledge.service.ts` | 2199 | 2.79% | **Next after admin** |
+| 2 | **`admin.service.ts`** | **1398** | **0%** | **IN PROGRESS** |
+| 3 | `jira.service.ts` | 1238 | 2.37% | Queued |
+| 4 | `check-in.service.ts` | 1093 | 0% | Queued |
+| 5 | `workspace-retrieval.service.ts` | 1062 | 2.93% | Queued |
+| 6 | `collection.service.ts` | 942 | 0% | Queued |
+| 7 | `check-in-report.service.ts` | 768 | 0% | Queued |
+| 8 | `jira-hub.service.ts` | 721 | 0% | Queued |
+| 9 | `slack.service.ts` | 698 | 0% | Queued |
+| 10 | `vacation-catchup.service.ts` | 686 | 0% | Queued |
 
-1. `pgvector-support.service.ts` — 11% partial → 100%
-2. `memory-fulltext-search.service.ts` — 10% partial → 100%
-3. `memory-evidence-merge.service.ts` — 6% partial → 100%
-4. Controllers (17 at 0%)
+## Completed (27 suites)
 
----
+PgVectorSupport, MemoryFullTextSearch, MemoryEvidenceMerge, JiraStandupHook, JiraMemberCache, MemoryRetrieval, and 21 prior services — all at or near 100% file coverage.
 
-## Skipped for now
+## Skipped
 
-- `*.module.ts`, `main.ts`, config files
-- Empty stubs: `notifications.service.ts`, `users.service.ts`
+- `*.module.ts`, config files, empty stubs, pure re-exports
