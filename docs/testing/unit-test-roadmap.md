@@ -10,9 +10,9 @@
 
 | Metric | Value |
 |--------|-------|
-| `*.unit.spec.ts` suites | **23** |
-| Services with unit specs | **23 / 72** |
-| Services remaining | **49** (2 empty stubs skipped) |
+| `*.unit.spec.ts` suites | **21** |
+| Services with unit specs | **21 / 72** |
+| Services remaining | **51** (2 empty stubs skipped) |
 | Controllers without unit specs | **17** |
 | Guards / interceptors / pipes | **0** in `src/` |
 
@@ -22,9 +22,9 @@
 
 | # | Service | Lines | Status |
 |---|---------|------:|--------|
-| 1 | `memory/memory-retrieval.service.ts` | 163 | **Done** |
-| 2 | `jira/jira-member-cache.service.ts` | 163 | **Done** |
-| 3 | `ai/workspace/retrieval/pgvector-support.service.ts` | 182 | **Next** |
+| 1 | `memory/memory-retrieval.service.ts` | 163 | **Next** |
+| 2 | `jira/jira-member-cache.service.ts` | 163 | Pending |
+| 3 | `ai/workspace/retrieval/pgvector-support.service.ts` | 182 | Pending |
 | 4 | `memory/memory-fulltext-search.service.ts` | 182 | Pending |
 | 5 | `jira/jira-standup-hook.service.ts` | 193 | Pending |
 | 6 | `memory/memory-evidence-merge.service.ts` | 202 | Pending |
@@ -36,7 +36,7 @@
 
 **Skipped (empty files):** `notifications.service.ts`, `users.service.ts`
 
-**Completed services (23):** Digest, MemoryChunker, Questions, Team, TimelineBuilder, WorkspaceSearch, JiraAudit, Auth, MemoryOutbox, ResponseRenderer, WorkspaceAi, LatestStandupResolver, AnalysisOrchestrator, MemoryHybridRanking, JiraIssueRef, MemoryEmbedding, EmbeddingReindex, MemoryAcl, Prisma, AiEvalDataset, AiEvalExport, MemoryRetrieval, JiraMemberCache
+**Completed services (21):** Digest, MemoryChunker, Questions, Team, TimelineBuilder, WorkspaceSearch, JiraAudit, Auth, MemoryOutbox, ResponseRenderer, WorkspaceAi, LatestStandupResolver, AnalysisOrchestrator, MemoryHybridRanking, JiraIssueRef, MemoryEmbedding, EmbeddingReindex, MemoryAcl, Prisma, AiEvalDataset, AiEvalExport
 
 ---
 
