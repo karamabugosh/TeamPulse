@@ -37,8 +37,11 @@ module.exports = {
     '!src/**/*.unit.spec.ts',
     '!src/main.ts',
   ],
-  coverageDirectory: '<rootDir>/coverage',
-  coverageReporters: ['text', 'lcov', 'html', 'json-summary'],
+
+  // Enabled by `npm run test:coverage` (--coverage); reporters/dir defined here.
+  collectCoverage: true,
+  coverageDirectory: 'coverage',
+  coverageReporters: ['text', 'html', 'lcov', 'json-summary'],
 
   modulePathIgnorePatterns: ['<rootDir>/dist/'],
   testPathIgnorePatterns: ['/node_modules/', '/dist/'],

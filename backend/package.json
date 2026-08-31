@@ -11,7 +11,7 @@
     "build": "nest build",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage",
+    "test:coverage": "jest --coverage --coverageDirectory=coverage",
     "test:integration": "node integration/ensure-pulse-test-db.js && jest --config integration/jest.integration.config.js",
     "test:e2e": "npm --prefix ../frontend run test:e2e",
     "test:integration:coverage": "node integration/ensure-pulse-test-db.js && jest --config integration/jest.integration.config.js --coverage",
