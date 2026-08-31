@@ -8,8 +8,12 @@
 # Do NOT run a command named `prisma` during install. The service root has a
 # `prisma/` directory; on Linux/Render that resolves to "Permission denied".
 # Client generation runs inside `npm run build` via node + prisma/build/index.js.
-# --include=dev is required because Nest CLI / TypeScript are devDependencies
-# and NODE_ENV=production would otherwise skip them during npm install.
+# Install note (Render vs GitHub Actions):
+# GHA runs `npm ci` on a fresh runner (no NODE_ENV=production) → lockfile tree always materializes.
+# Render sets NODE_ENV=production for the whole build and historically used `npm install`, which can
+# reuse a cached/partial node_modules and leave packages like @slack/socket-mode missing for tsc
+# (TS2307) even though they are listed in package.json. `npm ci --include=dev` deletes node_modules,
+# installs exactly from package-lock.json, and still pulls Nest/TypeScript under production NODE_ENV.
 
 services:
   - type: web
@@ -19,7 +23,7 @@ services:
     region: frankfurt
     branch: karam-final1
     rootDir: backend
-    buildCommand: npm install --include=dev && npm run build
+    buildCommand: npm ci --include=dev && node -e "console.log('cwd',process.cwd());console.log('deps',Object.keys(require('./package.json').dependencies).sort().join(','));console.log('resolve',require.resolve('@slack/socket-mode'));" && npm ls @slack/socket-mode && ls -la node_modules/@slack && npm run build
     preDeployCommand: npm run prisma:migrate:deploy
     startCommand: npm run start:prod
     healthCheckPath: /api/health

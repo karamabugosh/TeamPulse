@@ -17,7 +17,7 @@ GitHub (karam-final1)
         ▼
 Render Web Service — teampulse-backend
   rootDir: backend/
-  build:  npm install --include=dev && npm run build
+  build:  npm ci --include=dev && npm run build
   preDeploy: npm run prisma:migrate:deploy
   start:  npm run start:prod
   health: GET /api/health
@@ -46,7 +46,7 @@ Render Web Service — teampulse-backend
 | **Runtime** | Node |
 | **Root Directory** | `backend` |
 | **Branch** | `karam-final1` |
-| **Build Command** | `npm install --include=dev && npm run build` |
+| **Build Command** | `npm ci --include=dev && … && npm run build` (see `render.yaml`; must use `npm ci`, not `npm install`) |
 | **Pre-Deploy Command** | `npm run prisma:migrate:deploy` |
 | **Start Command** | `npm run start:prod` |
 | **Health Check Path** | `/api/health` |
@@ -65,18 +65,28 @@ Render Web Service — teampulse-backend
 ## Build command
 
 ```bash
-npm install --include=dev && npm run build
+npm ci --include=dev && npm run build
 ```
+
+(`render.yaml` also prints `npm ls @slack/socket-mode` and `ls node_modules/@slack` so Render logs prove the package is present.)
+
+### Why Render differed from GitHub Actions
+
+| | GitHub Actions | Render (before fix) |
+|--|----------------|---------------------|
+| Working directory | `backend/` | `rootDir: backend` |
+| Install | **`npm ci`** (deletes `node_modules`, exact lockfile) | **`npm install --include=dev`** (can reuse cache/partial tree) |
+| `NODE_ENV` during install | unset | **`production`** (env var on service) |
+| Result | `@slack/socket-mode` always materializes | Can compile with Nest while `node_modules/@slack/socket-mode` is missing → **TS2307** |
+
+Proven locally: removing `node_modules/@slack/socket-mode` reproduces the exact Render errors in `slack.service.ts` and `slack-socket.lifecycle.ts`.
 
 What happens:
 
-1. **`npm install --include=dev`** — installs production + build tooling (`@nestjs/cli`, `typescript`). Required because Render sets `NODE_ENV=production`.
-2. **`npm run build`** — runs `prisma:generate` then `nest build`.
-3. **`prisma:generate`** — `node node_modules/prisma/build/index.js generate` (avoids shell command named `prisma`, which collides with the `prisma/` directory).
+1. **`npm ci --include=dev`** — clean lockfile install; includes Nest CLI despite `NODE_ENV=production`.
+2. **`npm run build`** — `prisma:generate` then Nest compile via `node …/nest.js build`.
 
-Output artifact: **`backend/dist/`**.
-
-**Dashboard note:** If the service was created manually (not from Blueprint), update the Build Command in Render Settings to match. Stale commands like `npm install` alone will still hit the old `postinstall` failure until this commit is live *and* the dashboard command is updated.
+**Dashboard note:** If the service is not Blueprint-synced, set the Build Command in Render Settings to match `render.yaml`. Stale `npm install …` commands will keep failing.
 
 ---
 
