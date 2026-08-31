@@ -1,0 +1,70 @@
+# TeamPulse — Render Blueprint (backend web service)
+# Branch: karam-final1 | Root: backend/
+# Database: set DATABASE_URL in Render dashboard (Neon PostgreSQL — Phase 3).
+# Secrets: never commit values; configure in Render Environment only.
+
+services:
+  - type: web
+    name: teampulse-backend
+    runtime: node
+    plan: starter
+    region: frankfurt
+    branch: karam-final1
+    rootDir: backend
+    buildCommand: npm install && npm run build
+    preDeployCommand: npx prisma migrate deploy
+    startCommand: npm run start:prod
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: NODE_ENV
+        value: production
+      # --- Required secrets (set in Render dashboard; sync: false = manual) ---
+      - key: DATABASE_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: SLACK_APP_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: JIRA_CLIENT_ID
+        sync: false
+      - key: JIRA_CLIENT_SECRET
+        sync: false
+      - key: JIRA_REDIRECT_URI
+        sync: false
+      # --- Slack / AI / schedulers (defaults; override in dashboard if needed) ---
+      - key: SLACK_SOCKET_MODE_ENABLED
+        value: "true"
+      - key: SLACK_DIGEST_ENABLED
+        value: "true"
+      - key: PULSE_AI_ENABLED
+        value: "true"
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: DAILY_DIGEST_TIMEZONE
+        value: Asia/Riyadh
+      - key: DAILY_COLLECTION_CRON
+        value: "8 11 * * 1-5"
+      - key: DAILY_DIGEST_CRON
+        value: "8 11 * * 1-5"
+      - key: CHECKIN_SCHEDULER_ENABLED
+        value: "true"
+      - key: DIGEST_SCHEDULER_ENABLED
+        value: "true"
+      - key: JIRA_AUTH_URL
+        value: https://auth.atlassian.com/authorize
+      - key: JIRA_TOKEN_URL
+        value: https://auth.atlassian.com/oauth/token
+      - key: JIRA_API_URL
+        value: https://api.atlassian.com
+      - key: JIRA_SCOPES
+        value: read:jira-work write:jira-work read:jira-user offline_access
+      - key: MEMORY_V2_ASK_MODE
+        value: hybrid
