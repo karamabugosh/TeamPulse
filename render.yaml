@@ -3,6 +3,13 @@
 # Database: set DATABASE_URL in Render dashboard (Neon PostgreSQL).
 # See docs/deployment/neon-postgresql.md for URL format (direct vs pooler, SSL).
 # Secrets: never commit values; configure in Render Environment only.
+#
+# Prisma note:
+# Do NOT run a command named `prisma` during install. The service root has a
+# `prisma/` directory; on Linux/Render that resolves to "Permission denied".
+# Client generation runs inside `npm run build` via node + prisma/build/index.js.
+# --include=dev is required because Nest CLI / TypeScript are devDependencies
+# and NODE_ENV=production would otherwise skip them during npm install.
 
 services:
   - type: web
@@ -12,8 +19,8 @@ services:
     region: frankfurt
     branch: karam-final1
     rootDir: backend
-    buildCommand: npm install && npm exec prisma generate && npm run build
-    preDeployCommand: npm exec prisma migrate deploy
+    buildCommand: npm install --include=dev && npm run build
+    preDeployCommand: npm run prisma:migrate:deploy
     startCommand: npm run start:prod
     healthCheckPath: /api/health
     envVars:

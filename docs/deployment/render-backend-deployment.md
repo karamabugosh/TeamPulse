@@ -17,8 +17,8 @@ GitHub (karam-final1)
         ▼
 Render Web Service — teampulse-backend
   rootDir: backend/
-  build:  npm install && npm run build
-  preDeploy: npx prisma migrate deploy
+  build:  npm install --include=dev && npm run build
+  preDeploy: npm run prisma:migrate:deploy
   start:  npm run start:prod
   health: GET /api/health
         │
@@ -30,7 +30,9 @@ Render Web Service — teampulse-backend
 
 - NestJS binds **`0.0.0.0`** and **`process.env.PORT`** (Render-injected).
 - Global API prefix: **`/api`**.
-- Prisma Client is generated during **`npm install`** via `postinstall` → `npm exec prisma generate` (Render-safe; avoids bare `prisma` Permission denied). The Blueprint build command also runs generate explicitly.
+- Prisma Client is generated during **`npm run build`** via `node node_modules/prisma/build/index.js generate` (never a bare `prisma` command — that collides with the `prisma/` schema directory on Linux/Render → `Permission denied`).
+- There is **no** `postinstall` Prisma hook (install-time generate was the failure point on Render).
+- Build uses **`npm install --include=dev`** so Nest CLI / TypeScript are available while `NODE_ENV=production`.
 - Schema is applied with **`npx prisma migrate deploy`** (Render `preDeployCommand`); migrations are **not** modified in this phase.
 - **Do not** use local PostgreSQL, `pulse_test`, or `teampulse` in production.
 
@@ -44,8 +46,8 @@ Render Web Service — teampulse-backend
 | **Runtime** | Node |
 | **Root Directory** | `backend` |
 | **Branch** | `karam-final1` |
-| **Build Command** | `npm install && npm exec prisma generate && npm run build` |
-| **Pre-Deploy Command** | `npx prisma migrate deploy` |
+| **Build Command** | `npm install --include=dev && npm run build` |
+| **Pre-Deploy Command** | `npm run prisma:migrate:deploy` |
 | **Start Command** | `npm run start:prod` |
 | **Health Check Path** | `/api/health` |
 | **Node version** | 20 (`NODE_VERSION=20` or `engines.node` in `package.json`) |
@@ -63,16 +65,18 @@ Render Web Service — teampulse-backend
 ## Build command
 
 ```bash
-npm install && npm run build
+npm install --include=dev && npm run build
 ```
 
 What happens:
 
-1. **`npm install`** — installs dependencies; **`postinstall`** runs **`npm exec prisma generate`**.
-2. **`npm exec prisma generate`** — explicit client generation (redundant with postinstall; ensures client exists if hooks are skipped).
-3. **`npm run build`** — Nest compiles TypeScript to **`dist/main.js`** (`tsconfig.build.json` uses `incremental: false` for reliable full output).
+1. **`npm install --include=dev`** — installs production + build tooling (`@nestjs/cli`, `typescript`). Required because Render sets `NODE_ENV=production`.
+2. **`npm run build`** — runs `prisma:generate` then `nest build`.
+3. **`prisma:generate`** — `node node_modules/prisma/build/index.js generate` (avoids shell command named `prisma`, which collides with the `prisma/` directory).
 
 Output artifact: **`backend/dist/`**.
+
+**Dashboard note:** If the service was created manually (not from Blueprint), update the Build Command in Render Settings to match. Stale commands like `npm install` alone will still hit the old `postinstall` failure until this commit is live *and* the dashboard command is updated.
 
 ---
 
@@ -90,9 +94,11 @@ Runs **`node dist/main.js`**. Render sets **`PORT`** automatically; the app must
 
 | Step | When | Command |
 |------|------|---------|
-| Generate client | Build (`postinstall` + build command) | `npm exec prisma generate` |
-| Apply migrations | Pre-deploy (Render) | `npx prisma migrate deploy` |
+| Generate client | During `npm run build` | `node node_modules/prisma/build/index.js generate` |
+| Apply migrations | Pre-deploy (Render) | `npm run prisma:migrate:deploy` |
 | Modify migration files | **Never** in deploy phases | — |
+
+**Why `prisma` stays in `dependencies` (not only `devDependencies`):** Render sets `NODE_ENV=production`. A production-only install omits `devDependencies`. The Prisma **CLI** must exist at build and pre-deploy for `generate` / `migrate deploy`. `@prisma/client` alone is not enough.
 
 Prisma reads **`DATABASE_URL`** from the environment (`schema.prisma` → `env("DATABASE_URL")`).
 
@@ -222,7 +228,8 @@ Expect HTTP **200** and `"ok": true`.
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | Build fails: `Cannot find module` | Incomplete `dist/` | Ensure `npm run build` completes; `tsconfig.build.json` has `incremental: false` |
-| Build fails: Prisma client | `prisma generate` skipped / Permission denied | Confirm `postinstall` uses `npm exec prisma generate`; check build logs |
+| Build fails: `prisma: Permission denied` | Shell resolved `prisma` to the `prisma/` **directory** | Use `node node_modules/prisma/build/index.js …`; no `postinstall` generate; no bare `prisma` in scripts |
+| Build fails: Prisma client missing | Generate skipped | Confirm `npm run build` includes `prisma:generate` |
 | Pre-deploy fails: migrate | No DB / wrong URL | Set Neon `DATABASE_URL` (Phase 3); check SSL |
 | Service unhealthy | App not listening on `PORT` | App uses `process.env.PORT` and `0.0.0.0` |
 | Health 404 | Wrong path | Use `/api/health` (global prefix `api`) |
