@@ -12,8 +12,8 @@ services:
     region: frankfurt
     branch: karam-final1
     rootDir: backend
-    buildCommand: npm install && npm run build
-    preDeployCommand: npx prisma migrate deploy
+    buildCommand: npm install && npm exec prisma generate && npm run build
+    preDeployCommand: npm exec prisma migrate deploy
     startCommand: npm run start:prod
     healthCheckPath: /api/health
     envVars:

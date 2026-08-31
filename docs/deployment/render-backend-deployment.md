@@ -30,7 +30,7 @@ Render Web Service — teampulse-backend
 
 - NestJS binds **`0.0.0.0`** and **`process.env.PORT`** (Render-injected).
 - Global API prefix: **`/api`**.
-- Prisma Client is generated during **`npm install`** via `postinstall` → `prisma generate`.
+- Prisma Client is generated during **`npm install`** via `postinstall` → `npm exec prisma generate` (Render-safe; avoids bare `prisma` Permission denied). The Blueprint build command also runs generate explicitly.
 - Schema is applied with **`npx prisma migrate deploy`** (Render `preDeployCommand`); migrations are **not** modified in this phase.
 - **Do not** use local PostgreSQL, `pulse_test`, or `teampulse` in production.
 
@@ -44,7 +44,7 @@ Render Web Service — teampulse-backend
 | **Runtime** | Node |
 | **Root Directory** | `backend` |
 | **Branch** | `karam-final1` |
-| **Build Command** | `npm install && npm run build` |
+| **Build Command** | `npm install && npm exec prisma generate && npm run build` |
 | **Pre-Deploy Command** | `npx prisma migrate deploy` |
 | **Start Command** | `npm run start:prod` |
 | **Health Check Path** | `/api/health` |
@@ -68,8 +68,9 @@ npm install && npm run build
 
 What happens:
 
-1. **`npm install`** — installs dependencies; **`postinstall`** runs **`prisma generate`**.
-2. **`npm run build`** — Nest compiles TypeScript to **`dist/main.js`** (`tsconfig.build.json` uses `incremental: false` for reliable full output).
+1. **`npm install`** — installs dependencies; **`postinstall`** runs **`npm exec prisma generate`**.
+2. **`npm exec prisma generate`** — explicit client generation (redundant with postinstall; ensures client exists if hooks are skipped).
+3. **`npm run build`** — Nest compiles TypeScript to **`dist/main.js`** (`tsconfig.build.json` uses `incremental: false` for reliable full output).
 
 Output artifact: **`backend/dist/`**.
 
@@ -89,7 +90,7 @@ Runs **`node dist/main.js`**. Render sets **`PORT`** automatically; the app must
 
 | Step | When | Command |
 |------|------|---------|
-| Generate client | Build (`postinstall`) | `prisma generate` |
+| Generate client | Build (`postinstall` + build command) | `npm exec prisma generate` |
 | Apply migrations | Pre-deploy (Render) | `npx prisma migrate deploy` |
 | Modify migration files | **Never** in deploy phases | — |
 
@@ -221,7 +222,7 @@ Expect HTTP **200** and `"ok": true`.
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | Build fails: `Cannot find module` | Incomplete `dist/` | Ensure `npm run build` completes; `tsconfig.build.json` has `incremental: false` |
-| Build fails: Prisma client | `prisma generate` skipped | Confirm `postinstall` runs; run `npx prisma generate` in build logs |
+| Build fails: Prisma client | `prisma generate` skipped / Permission denied | Confirm `postinstall` uses `npm exec prisma generate`; check build logs |
 | Pre-deploy fails: migrate | No DB / wrong URL | Set Neon `DATABASE_URL` (Phase 3); check SSL |
 | Service unhealthy | App not listening on `PORT` | App uses `process.env.PORT` and `0.0.0.0` |
 | Health 404 | Wrong path | Use `/api/health` (global prefix `api`) |
