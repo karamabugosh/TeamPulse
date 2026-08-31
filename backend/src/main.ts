@@ -31,6 +31,7 @@ async function bootstrap(): Promise<void> {
 
   const app = await NestFactory.create(AppModule);
   app.enableCors({
+    origin: resolveCorsOrigin(),
     exposedHeaders: ['X-Workspace-Id'],
   });
   app.setGlobalPrefix('api');
@@ -42,8 +43,31 @@ async function bootstrap(): Promise<void> {
     runWithWorkspaceId(workspaceId?.trim() || null, () => next());
   });
 
+  // Render (and most PaaS hosts) inject PORT; bind all interfaces for the proxy.
   const port = Number(process.env.PORT) || 3000;
   await app.listen(port, '0.0.0.0');
   console.log(`Application is running on: http://localhost:${port}`);
 }
+
+/**
+ * Production: restrict to FRONTEND_URL and/or comma-separated CORS_ORIGINS.
+ * Local/dev without those vars: allow any origin (previous default behavior).
+ */
+function resolveCorsOrigin(): boolean | string | string[] {
+  const fromList = (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (fromList.length > 0) {
+    return fromList;
+  }
+
+  const frontendUrl = process.env.FRONTEND_URL?.trim();
+  if (frontendUrl) {
+    return frontendUrl;
+  }
+
+  return true;
+}
+
 void bootstrap();

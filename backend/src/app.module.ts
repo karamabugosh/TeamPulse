@@ -13,6 +13,7 @@ import { JiraModule } from './jira/jira.module';
 import { DemoModule } from './demo/demo.module';
 import { WorkspaceMembersModule } from './common/workspace-members.module';
 import { MemoryModule } from './memory/memory.module';
+import { HealthController } from './health/health.controller';
 
 @Module({
   imports: [
@@ -33,7 +34,7 @@ import { MemoryModule } from './memory/memory.module';
     JiraModule,
     DemoModule,
   ],
-  controllers: [],
+  controllers: [HealthController],
   providers: [],
 })
 export class AppModule {}
