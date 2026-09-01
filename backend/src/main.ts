@@ -8,6 +8,7 @@ import {
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { runWithWorkspaceId } from './common/workspace-context';
+import { logRegisteredHttpRoutes } from './common/log-routes.util';
 
 const envFilePath = resolveBackendEnvPath();
 loadEnv({ path: envFilePath });
@@ -22,10 +23,17 @@ async function bootstrap(): Promise<void> {
   console.log('JIRA_CLIENT_ID set:', jiraDiagnostics.jiraClientIdSet);
   console.log('JIRA_CLIENT_SECRET set:', jiraDiagnostics.jiraClientSecretSet);
   console.log('JIRA_REDIRECT_URI set:', jiraDiagnostics.jiraRedirectUriSet);
+  console.log('JWT_SECRET set:', !!process.env.JWT_SECRET?.trim());
   const appToken = process.env.SLACK_APP_TOKEN ?? '';
   if (appToken && !appToken.startsWith('xapp-')) {
     console.warn(
       'SLACK_APP_TOKEN should be an App-Level Token starting with "xapp-".',
+    );
+  }
+
+  if (!process.env.JWT_SECRET?.trim()) {
+    throw new Error(
+      'JWT_SECRET is required. Set it in Render environment variables or backend/.env before starting.',
     );
   }
 
@@ -42,6 +50,8 @@ async function bootstrap(): Promise<void> {
     exposedHeaders: ['X-Workspace-Id'],
   });
   app.setGlobalPrefix('api');
+
+  logRegisteredHttpRoutes(app);
 
   // Propagate selected workspace to AsyncLocalStorage for tenant-scoped queries
   app.use((req: IncomingMessage, _res: ServerResponse, next: () => void) => {
