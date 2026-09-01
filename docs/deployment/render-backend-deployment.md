@@ -19,7 +19,7 @@ Render Web Service — teampulse-backend
   rootDir: backend/
   build:  npm ci --include=dev && npm run build
   preDeploy: npm run prisma:migrate:deploy
-  start:  npm run start:prod
+  start:  npm run start:render  (migrate deploy, then node dist/main.js)
   health: GET /api/health
         │
         ├──► Neon PostgreSQL (DATABASE_URL) — see neon-postgresql.md
@@ -48,7 +48,7 @@ Render Web Service — teampulse-backend
 | **Branch** | `karam-final1` |
 | **Build Command** | `npm ci --include=dev && … && npm run build` (see `render.yaml`; must use `npm ci`, not `npm install`) |
 | **Pre-Deploy Command** | `npm run prisma:migrate:deploy` |
-| **Start Command** | `npm run start:prod` |
+| **Start Command** | `npm run start:render` (`migrate deploy` then `start:prod`) |
 | **Health Check Path** | `/api/health` |
 | **Node version** | 20 (`NODE_VERSION=20` or `engines.node` in `package.json`) |
 
@@ -105,10 +105,14 @@ What happens:
 ## Start command
 
 ```bash
-npm run start:prod
+npm run start:render
 ```
 
-Runs **`node dist/main.js`**. Render sets **`PORT`** automatically; the app must not hardcode it.
+Runs **`npm run prisma:migrate:deploy`** then **`node dist/main.js`**. Migrations must run before the app serves traffic; `start:render` guarantees that even when the Render dashboard is not Blueprint-synced and **Pre-Deploy Command** is missing.
+
+**Dashboard note:** Set **Start Command** to `npm run start:render` (not bare `npm run start:prod`). Optionally keep **Pre-Deploy Command** as `npm run prisma:migrate:deploy` for an extra apply before container start (`migrate deploy` is idempotent).
+
+Render sets **`PORT`** automatically; the app must not hardcode it.
 
 ---
 

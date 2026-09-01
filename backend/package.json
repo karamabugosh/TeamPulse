@@ -12,6 +12,7 @@
     "start": "ts-node src/main.ts",
     "start:dev": "node node_modules/@nestjs/cli/bin/nest.js start --watch",
     "start:prod": "node dist/main.js",
+    "start:render": "npm run prisma:migrate:deploy && npm run start:prod",
     "build": "npm run prisma:generate && node node_modules/@nestjs/cli/bin/nest.js build",
     "test": "jest",
     "test:watch": "jest --watch",

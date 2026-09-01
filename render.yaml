@@ -8,6 +8,8 @@
 # Do NOT run a command named `prisma` during install. The service root has a
 # `prisma/` directory; on Linux/Render that resolves to "Permission denied".
 # Client generation runs inside `npm run build` via node + prisma/build/index.js.
+# Migrations: preDeployCommand + start:render both run `npm run prisma:migrate:deploy`
+# so schema is applied even if the dashboard Pre-Deploy Command is not Blueprint-synced.
 # Install note (Render vs GitHub Actions):
 # GHA runs `npm ci` on a fresh runner (no NODE_ENV=production) → lockfile tree always materializes.
 # Render sets NODE_ENV=production for the whole build and historically used `npm install`, which can
@@ -25,7 +27,7 @@ services:
     rootDir: backend
     buildCommand: npm ci --include=dev && npm run build
     preDeployCommand: npm run prisma:migrate:deploy
-    startCommand: npm run start:prod
+    startCommand: npm run start:render
     healthCheckPath: /api/health
     envVars:
       - key: NODE_VERSION
