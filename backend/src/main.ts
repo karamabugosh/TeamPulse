@@ -32,6 +32,13 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
   app.enableCors({
     origin: resolveCorsOrigin(),
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Workspace-Id',
+      'X-Requested-With',
+    ],
     exposedHeaders: ['X-Workspace-Id'],
   });
   app.setGlobalPrefix('api');
@@ -53,21 +60,50 @@ async function bootstrap(): Promise<void> {
  * Production: restrict to FRONTEND_URL and/or comma-separated CORS_ORIGINS.
  * Local/dev without those vars: allow any origin (previous default behavior).
  */
-function resolveCorsOrigin(): boolean | string | string[] {
-  const fromList = (process.env.CORS_ORIGINS ?? '')
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean);
-  if (fromList.length > 0) {
-    return fromList;
+function normalizeOrigin(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return url.trim().replace(/\/+$/, '');
+  }
+}
+
+function collectAllowedOrigins(): string[] {
+  const origins = new Set<string>();
+
+  for (const value of (process.env.CORS_ORIGINS ?? '').split(',')) {
+    const trimmed = value.trim();
+    if (trimmed) origins.add(normalizeOrigin(trimmed));
   }
 
   const frontendUrl = process.env.FRONTEND_URL?.trim();
   if (frontendUrl) {
-    return frontendUrl;
+    origins.add(normalizeOrigin(frontendUrl));
   }
 
-  return true;
+  return [...origins];
+}
+
+function resolveCorsOrigin():
+  | boolean
+  | string[]
+  | ((
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void,
+    ) => void) {
+  const allowed = collectAllowedOrigins();
+  if (allowed.length === 0) {
+    return true;
+  }
+
+  return (origin, callback) => {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+    callback(null, allowed.includes(normalizeOrigin(origin)));
+  };
 }
 
 void bootstrap();

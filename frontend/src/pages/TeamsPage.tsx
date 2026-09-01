@@ -34,7 +34,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Separator } from '@/components/ui/separator';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, ApiError } from '@/lib/api';
+import { useToast } from '@/hooks/use-toast';
 import { useWorkspace } from '@/lib/workspace-context';
 
 type TeamSummary = {
@@ -90,6 +91,7 @@ function initials(name: string): string {
 
 export const TeamsPage: React.FC = () => {
   const { workspaceId } = useWorkspace();
+  const { toast } = useToast();
   const [teams, setTeams] = useState<TeamSummary[]>([]);
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
   const [membersSource, setMembersSource] = useState<string>('database');
@@ -102,6 +104,7 @@ export const TeamsPage: React.FC = () => {
   const [name, setName] = useState('');
   const [slackChannelId, setSlackChannelId] = useState('');
   const [timezone, setTimezone] = useState('Asia/Riyadh');
+  const [creating, setCreating] = useState(false);
 
   const loadTeams = useCallback(async () => {
     try {
@@ -171,13 +174,51 @@ export const TeamsPage: React.FC = () => {
 
   const handleCreateTeam = async (e: React.FormEvent) => {
     e.preventDefault();
-    await apiFetch('/api/admin/teams', {
-      method: 'POST',
-      body: JSON.stringify({ name, slackChannelId, timezone }),
-    });
-    setIsCreateOpen(false);
-    setName('');
-    void loadTeams();
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      toast({
+        title: 'Team name required',
+        description: 'Enter a team name before creating.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setCreating(true);
+    try {
+      await apiFetch('/api/admin/teams', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: trimmedName,
+          slackChannelId: slackChannelId.trim() || undefined,
+          timezone: timezone.trim() || undefined,
+        }),
+      });
+      setIsCreateOpen(false);
+      setName('');
+      setSlackChannelId('');
+      setTimezone('Asia/Riyadh');
+      await loadTeams();
+      toast({
+        title: 'Team created',
+        description: `"${trimmedName}" was added to your workspace.`,
+        variant: 'success',
+      });
+    } catch (error) {
+      const message =
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : 'Failed to create team';
+      toast({
+        title: 'Create team failed',
+        description: message,
+        variant: 'destructive',
+      });
+    } finally {
+      setCreating(false);
+    }
   };
 
   const handleDeleteTeam = async (id: string) => {
@@ -367,7 +408,9 @@ export const TeamsPage: React.FC = () => {
               <Button type="button" variant="outline" onClick={() => setIsCreateOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit">Create Team</Button>
+              <Button type="submit" disabled={creating}>
+                {creating ? 'Creating…' : 'Create Team'}
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>

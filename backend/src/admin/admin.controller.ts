@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Header,
+  HttpCode,
   Param,
   Patch,
   Post,
@@ -97,6 +98,7 @@ export class AdminController {
   }
 
   @Post('teams')
+  @HttpCode(201)
   createTeam(@Body() body: { name: string; slackChannelId?: string; timezone?: string; scheduleCron?: string }) {
     return this.adminService.createTeam(body);
   }

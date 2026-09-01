@@ -31,19 +31,47 @@ export async function apiFetch<T = unknown>(
   options?: RequestInit,
 ): Promise<T> {
   const workspaceId = getStoredWorkspaceId();
+  const resolvedUrl = apiUrl(url);
 
-  const response = await fetch(apiUrl(url), {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(workspaceId ? { 'X-Workspace-Id': workspaceId } : {}),
-      ...(options?.headers ?? {}),
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(resolvedUrl, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(workspaceId ? { 'X-Workspace-Id': workspaceId } : {}),
+        ...(options?.headers ?? {}),
+      },
+    });
+  } catch (error) {
+    const message =
+      error instanceof TypeError
+        ? `Network error — could not reach ${resolvedUrl}. Check VITE_API_BASE_URL and that FRONTEND_URL on the backend matches this site.`
+        : error instanceof Error
+          ? error.message
+          : 'Network request failed';
+    throw new ApiError(message, 0);
+  }
 
   const contentType = response.headers.get('content-type') ?? '';
+  const rawText = await response.text();
   const isJson = contentType.includes('application/json');
-  const body = isJson ? await response.json().catch(() => null) : null;
+  let body: unknown = null;
+
+  if (rawText) {
+    if (isJson) {
+      try {
+        body = JSON.parse(rawText);
+      } catch {
+        body = null;
+      }
+    } else if (rawText.trimStart().startsWith('<!')) {
+      throw new ApiError(
+        `API returned HTML instead of JSON (${response.status}). Set VITE_API_BASE_URL to the backend URL (not the frontend static site).`,
+        response.status,
+      );
+    }
+  }
 
   if (!response.ok) {
     throw new ApiError(formatApiErrorMessage(body, response.status), response.status);

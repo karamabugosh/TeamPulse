@@ -38,7 +38,10 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: FRONTEND_URL
-        sync: false
+        fromService:
+          type: web
+          name: teampulse-frontend
+          envVarKey: RENDER_EXTERNAL_URL
       - key: SLACK_BOT_TOKEN
         sync: false
       - key: SLACK_SIGNING_SECRET

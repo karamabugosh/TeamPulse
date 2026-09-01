@@ -1123,6 +1123,12 @@ describe('AdminService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
+    it('throws when name is blank', async () => {
+      await expect(service.createTeam({ name: '   ' })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    });
+
     it('creates team with defaults', async () => {
       prisma.team.create.mockResolvedValue({ id: 'team-new', name: 'New Team' });
 

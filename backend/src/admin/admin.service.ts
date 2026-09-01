@@ -2081,18 +2081,25 @@ ${JSON.stringify(digest.themes, null, 2)}
   }
 
   async createTeam(data: { name: string; slackChannelId?: string; timezone?: string; scheduleCron?: string }) {
+    const name = data.name?.trim();
+    if (!name) {
+      throw new BadRequestException('name is required.');
+    }
+
     const workspaceId = await this.activeWorkspaceId();
     if (!workspaceId) {
       throw new NotFoundException('No workspace found');
     }
 
+    const slackChannelId = data.slackChannelId?.trim() || null;
+
     return this.prisma.team.create({
       data: {
         workspaceId,
-        name: data.name,
-        slackChannelId: data.slackChannelId || null,
-        timezone: data.timezone || 'Asia/Riyadh',
-        scheduleCron: data.scheduleCron || '0 9 * * 1-5',
+        name,
+        slackChannelId,
+        timezone: data.timezone?.trim() || 'Asia/Riyadh',
+        scheduleCron: data.scheduleCron?.trim() || '0 9 * * 1-5',
         schedulerEnabled: true,
       },
     });
