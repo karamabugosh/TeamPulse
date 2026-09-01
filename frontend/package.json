@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "verify:dist": "node -e \"const fs=require('fs'); if(!fs.existsSync('dist/index.html')){console.error('dist/index.html missing'); process.exit(1)} if(!fs.existsSync('dist/assets')){console.error('dist/assets missing'); process.exit(1)} console.log('dist OK:', fs.readdirSync('dist').join(', '))\"",
-    "build:render": "npm run build",
+    "build:render": "npm run build && node scripts/spa-fallback.mjs && npm run verify:dist",
+    "start:static": "serve -s dist -l $PORT",
     "preview": "vite preview",
     "test:e2e": "playwright test",
     "playwright": "playwright test"
@@ -37,6 +38,7 @@
     "react-dom": "^18.2.0",
     "react-router-dom": "^7.18.1",
     "recharts": "^3.10.1",
+    "serve": "^14.2.4",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^3.4.19",
     "tailwindcss-animate": "^1.0.7"

@@ -42,9 +42,11 @@ No trailing slash. Requests become `${VITE_API_BASE_URL}/api/...`.
 
 ## SPA routing (React Router)
 
-React Router uses client-side routes (`/overview`, `/checkins`, etc.). Render must rewrite unknown paths to `index.html`.
+The app uses **`BrowserRouter`** (client-side routing). Direct visits to `/overview`, `/teams`, etc. require the host to serve `index.html` for unknown paths.
 
-**Blueprint** (`render.yaml`):
+### Render static site (CDN)
+
+Blueprint rewrite (`render.yaml`):
 
 ```yaml
 routes:
@@ -53,15 +55,21 @@ routes:
     destination: /index.html
 ```
 
-**Manual dashboard:** Settings → Redirects/Rewrites → Add Rule:
+**Manual dashboard:** Settings → Redirects/Rewrites → Add Rule: Source `/*`, Destination `/index.html`, Action **Rewrite**.
 
-| Field | Value |
-|-------|--------|
-| Source | `/*` |
-| Destination | `/index.html` |
-| Action | Rewrite |
+`frontend/public/_redirects` is copied into `dist/` but **Render static sites ignore it** unless configured in the dashboard or Blueprint `routes`.
 
-`frontend/public/_redirects` (Netlify format) is copied into `dist/` but **Render ignores it** — use Blueprint `routes` or dashboard rewrites.
+### Render web service (recommended — `serve -s`)
+
+Blueprint service `teampulse-frontend` runs as a **Node web service** with [`serve`](https://www.npmjs.com/package/serve) `-s` (SPA mode). This rewrites all non-file requests to `index.html` without dashboard rules.
+
+```yaml
+runtime: node
+startCommand: npm run start:static
+healthCheckPath: /
+```
+
+After `npm run build:render`, `scripts/spa-fallback.mjs` also writes `404.html` and per-route `index.html` copies as a belt-and-suspenders fallback.
 
 ---
 
@@ -87,8 +95,11 @@ dist/
 After the frontend URL is live, set on **backend** Render service:
 
 ```
-FRONTEND_URL=https://<your-frontend>.onrender.com
+FRONTEND_URL=https://teampulse-1-zm1x.onrender.com
+CORS_ORIGINS=https://teampulse-1-zm1x.onrender.com
 ```
+
+(`CORS_ORIGINS` is optional if `FRONTEND_URL` matches the live frontend URL.)
 
 ---
 
