@@ -1,4 +1,7 @@
 import { getStoredWorkspaceId } from '@/lib/workspace-storage';
+import { apiUrl } from '@/lib/api-config';
+
+export { API_BASE_URL, apiUrl } from '@/lib/api-config';
 
 export class ApiError extends Error {
   status: number;
@@ -29,7 +32,7 @@ export async function apiFetch<T = unknown>(
 ): Promise<T> {
   const workspaceId = getStoredWorkspaceId();
 
-  const response = await fetch(url, {
+  const response = await fetch(apiUrl(url), {
     ...options,
     headers: {
       'Content-Type': 'application/json',

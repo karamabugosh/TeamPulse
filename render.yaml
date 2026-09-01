@@ -82,3 +82,22 @@ services:
         value: read:jira-work write:jira-work read:jira-user offline_access
       - key: MEMORY_V2_ASK_MODE
         value: hybrid
+
+  - type: web
+    name: teampulse-frontend
+    runtime: static
+    plan: starter
+    region: frankfurt
+    branch: karam-final1
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: VITE_API_BASE_URL
+        value: https://teampulse-go8z.onrender.com

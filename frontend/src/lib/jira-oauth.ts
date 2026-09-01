@@ -1,9 +1,12 @@
-/** Build /api/auth/jira URL that binds OAuth to the currently selected workspace. */
+import { apiUrl } from '@/lib/api-config';
+
+/** Build backend OAuth URL that binds Jira connect to the selected workspace. */
 export function buildJiraOAuthStartUrl(workspaceId: string | null | undefined): string {
   const params = new URLSearchParams();
   if (workspaceId?.trim()) {
     params.set('workspaceId', workspaceId.trim());
   }
   const qs = params.toString();
-  return qs ? `/api/auth/jira?${qs}` : '/api/auth/jira';
+  const path = qs ? `/api/auth/jira?${qs}` : '/api/auth/jira';
+  return apiUrl(path);
 }

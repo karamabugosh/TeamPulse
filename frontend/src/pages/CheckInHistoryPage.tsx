@@ -28,7 +28,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { apiFetch, ApiError } from '@/lib/api';
+import { apiFetch, apiUrl, ApiError } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import {
   EnrichedRun,
@@ -65,7 +65,7 @@ function hasExistingReport(run: EnrichedRun): boolean {
 }
 
 async function downloadRunExport(runId: string, type: 'csv' | 'pdf'): Promise<void> {
-  const response = await fetch(`/api/check-ins/runs/${runId}/export/${type}`);
+  const response = await fetch(apiUrl(`/api/check-ins/runs/${runId}/export/${type}`));
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     const message =

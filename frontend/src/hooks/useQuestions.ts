@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 
-const API_URL = 'http://localhost:3000/questions';
+import { apiFetch } from '@/lib/api';
+
+const QUESTIONS_API = '/api/questions';
 
 export function useQuestions() {
   const [questions, setQuestions] = useState<any[]>([]);
@@ -10,9 +12,7 @@ export function useQuestions() {
   const fetchQuestions = async () => {
     try {
       setLoading(true);
-      const res = await fetch(API_URL);
-      if (!res.ok) throw new Error('Failed to fetch questions');
-      const data = await res.json();
+      const data = await apiFetch<any[]>(QUESTIONS_API);
       setQuestions(data);
     } catch (err: any) {
       setError(err.message);
@@ -27,15 +27,10 @@ export function useQuestions() {
 
   const addQuestion = async (data: any) => {
     try {
-      const res = await fetch(API_URL, {
+      await apiFetch(QUESTIONS_API, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       });
-      if (!res.ok) {
-         const err = await res.json();
-         throw new Error(err.message || 'Failed to add question');
-      }
       fetchQuestions();
     } catch (err: any) {
       setError(err.message);
@@ -44,15 +39,10 @@ export function useQuestions() {
 
   const updateQuestion = async (id: string, data: any) => {
     try {
-      const res = await fetch(`${API_URL}/${id}`, {
+      await apiFetch(`${QUESTIONS_API}/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       });
-      if (!res.ok) {
-         const err = await res.json();
-         throw new Error(err.message || 'Failed to update question');
-      }
       fetchQuestions();
     } catch (err: any) {
       setError(err.message);
@@ -61,8 +51,7 @@ export function useQuestions() {
 
   const removeQuestion = async (id: string) => {
     try {
-      const res = await fetch(`${API_URL}/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete question');
+      await apiFetch(`${QUESTIONS_API}/${id}`, { method: 'DELETE' });
       fetchQuestions();
     } catch (err: any) {
       setError(err.message);
@@ -71,8 +60,7 @@ export function useQuestions() {
 
   const toggleActive = async (id: string) => {
     try {
-      const res = await fetch(`${API_URL}/${id}/toggle`, { method: 'PATCH' });
-      if (!res.ok) throw new Error('Failed to toggle status');
+      await apiFetch(`${QUESTIONS_API}/${id}/toggle`, { method: 'PATCH' });
       fetchQuestions();
     } catch (err: any) {
       setError(err.message);
@@ -91,12 +79,10 @@ export function useQuestions() {
     });
 
     try {
-      const res = await fetch(`${API_URL}/reorder`, {
+      await apiFetch(`${QUESTIONS_API}/reorder`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ updates }),
       });
-      if (!res.ok) throw new Error('Failed to reorder questions');
       fetchQuestions();
     } catch (err: any) {
       setError(err.message);

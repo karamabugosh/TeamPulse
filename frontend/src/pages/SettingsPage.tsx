@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { apiFetch } from '@/lib/api';
 import { Settings, MessageSquare, Cpu, Clock, CheckCircle2, ShieldCheck, Save } from 'lucide-react';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -20,8 +21,7 @@ export const SettingsPage: React.FC = () => {
   const [digestChannel, setDigestChannel] = useState('C0BLMEY71QR');
 
   useEffect(() => {
-    fetch('/api/admin/settings')
-      .then((res) => res.json())
+    apiFetch<any>('/api/admin/settings')
       .then((data) => {
         setSettings(data);
         if (data.openai?.model) setOpenaiModel(data.openai.model);
@@ -39,9 +39,8 @@ export const SettingsPage: React.FC = () => {
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await fetch('/api/admin/settings', {
+      await apiFetch('/api/admin/settings', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ openaiModel, aiEnabled, timezone, digestChannel }),
       });
       setSavedSuccess(true);

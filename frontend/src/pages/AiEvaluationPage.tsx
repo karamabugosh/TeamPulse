@@ -8,7 +8,7 @@ import {
   Play,
   XCircle,
 } from 'lucide-react';
-import { apiFetch, ApiError } from '@/lib/api';
+import { apiFetch, apiUrl, ApiError } from '@/lib/api';
 import { useWorkspace } from '@/lib/workspace-context';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -191,7 +191,9 @@ const AiEvaluationPage: React.FC = () => {
 
   const openExport = (format: 'markdown' | 'csv' | 'pdf') => {
     if (!selectedRunId || !workspaceId) return;
-    const url = `/api/ai/eval/runs/${encodeURIComponent(selectedRunId)}/export?workspaceId=${encodeURIComponent(workspaceId)}&format=${format}`;
+    const url = apiUrl(
+      `/api/ai/eval/runs/${encodeURIComponent(selectedRunId)}/export?workspaceId=${encodeURIComponent(workspaceId)}&format=${format}`,
+    );
     window.open(url, '_blank', 'noopener,noreferrer');
   };
 
