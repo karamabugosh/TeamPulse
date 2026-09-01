@@ -7,6 +7,8 @@ import {
   it,
   jest,
 } from '@jest/globals';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from './auth.service';
 
@@ -25,6 +27,11 @@ type PrismaMock = {
     findFirst: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
     create: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
   };
+  adminUser: {
+    count: jest.MockedFunction<(...args: unknown[]) => Promise<number>>;
+    create: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
+    findUnique: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
+  };
 };
 
 describe('AuthService', () => {
@@ -38,12 +45,18 @@ describe('AuthService', () => {
       user: { upsert: jest.fn() },
       teamMember: { findFirst: jest.fn(), upsert: jest.fn() },
       team: { findFirst: jest.fn(), create: jest.fn() },
+      adminUser: { count: jest.fn(), create: jest.fn(), findUnique: jest.fn() },
     };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
         { provide: PrismaService, useValue: prisma },
+        { provide: JwtService, useValue: { sign: jest.fn().mockReturnValue('jwt-token') } },
+        {
+          provide: ConfigService,
+          useValue: { get: jest.fn().mockReturnValue('test-secret') },
+        },
       ],
     }).compile();
 

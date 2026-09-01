@@ -125,7 +125,7 @@ export const LoginPage: React.FC = () => {
                   Signing in…
                 </>
               ) : (
-                'Sign in'
+                'Login'
               )}
             </Button>
           </form>

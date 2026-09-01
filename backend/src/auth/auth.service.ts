@@ -1,36 +1,129 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 
+export type AuthUserProfile = {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+};
+
+export type JwtPayload = {
+  sub: string;
+  email: string;
+  name: string;
+  role: string;
+};
+
+const DEFAULT_ADMIN_EMAIL = 'admin@teampulse.com';
+const DEFAULT_ADMIN_PASSWORD = 'Admin@123456';
+const DEFAULT_ADMIN_NAME = 'Admin';
+const DEFAULT_ADMIN_ROLE = 'admin';
+
 @Injectable()
-export class AuthService {
+export class AuthService implements OnModuleInit {
   private readonly logger = new Logger(AuthService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+  ) {}
 
-  async syncSlackUser(slackUserId: string, slackWorkspaceId: string, slackWorkspaceName = 'Unknown Workspace') {
-    // 1. Upsert Workspace
+  async onModuleInit(): Promise<void> {
+    try {
+      await this.ensureDefaultAdmin();
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Default admin bootstrap failed: ${message}`);
+    }
+  }
+
+  async login(email: string, password: string): Promise<{
+    accessToken: string;
+    user: AuthUserProfile;
+  }> {
+    const user = await this.validateUser(email, password);
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+    };
+
+    return {
+      accessToken: this.jwtService.sign(payload),
+      user,
+    };
+  }
+
+  async validateUser(email: string, password: string): Promise<AuthUserProfile> {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail || !password) {
+      throw new UnauthorizedException('Invalid email or password.');
+    }
+
+    const account = await this.prisma.adminUser.findUnique({
+      where: { email: normalizedEmail },
+    });
+
+    if (!account) {
+      throw new UnauthorizedException('Invalid email or password.');
+    }
+
+    const valid = await bcrypt.compare(password, account.password);
+    if (!valid) {
+      throw new UnauthorizedException('Invalid email or password.');
+    }
+
+    return this.toProfile(account);
+  }
+
+  async getProfile(accountId: string): Promise<AuthUserProfile> {
+    const account = await this.prisma.adminUser.findUnique({
+      where: { id: accountId },
+    });
+
+    if (!account) {
+      throw new UnauthorizedException('Session is no longer valid.');
+    }
+
+    return this.toProfile(account);
+  }
+
+  async syncSlackUser(
+    slackUserId: string,
+    slackWorkspaceId: string,
+    slackWorkspaceName = 'Unknown Workspace',
+  ) {
     const workspace = await this.prisma.workspace.upsert({
       where: { slackWorkspaceId },
       update: {},
       create: {
         slackWorkspaceId,
         slackWorkspaceName,
-        botToken: process.env.SLACK_BOT_TOKEN || '', // Assuming single-workspace for now
+        botToken: process.env.SLACK_BOT_TOKEN || '',
       },
     });
 
-    // 2. Upsert User
     const user = await this.prisma.user.upsert({
       where: { slackUserId },
       update: {},
       create: {
         slackUserId,
         workspaceId: workspace.id,
-        slackDisplayName: slackUserId, // Can be updated with Slack API info later
+        slackDisplayName: slackUserId,
       },
     });
 
-    // 3. Ensure User belongs to a Team
     const existingMembership = await this.prisma.teamMember.findFirst({
       where: { userId: user.id },
     });
@@ -71,5 +164,40 @@ export class AuthService {
     }
 
     return user;
+  }
+
+  private async ensureDefaultAdmin(): Promise<void> {
+    const count = await this.prisma.adminUser.count();
+    if (count > 0) {
+      return;
+    }
+
+    const passwordHash = await bcrypt.hash(DEFAULT_ADMIN_PASSWORD, 12);
+    await this.prisma.adminUser.create({
+      data: {
+        email: DEFAULT_ADMIN_EMAIL,
+        name: DEFAULT_ADMIN_NAME,
+        password: passwordHash,
+        role: DEFAULT_ADMIN_ROLE,
+      },
+    });
+
+    this.logger.log(
+      `Created default admin account (${DEFAULT_ADMIN_EMAIL}). Change the password after first login.`,
+    );
+  }
+
+  private toProfile(account: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+  }): AuthUserProfile {
+    return {
+      id: account.id,
+      name: account.name,
+      email: account.email,
+      role: account.role,
+    };
   }
 }

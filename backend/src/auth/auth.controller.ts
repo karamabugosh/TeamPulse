@@ -6,19 +6,19 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { DashboardAuthService } from './dashboard-auth.service';
+import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { CurrentUser } from './current-user.decorator';
-import type { JwtPayload } from './dashboard-auth.service';
+import type { AuthUserProfile } from './auth.service';
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly dashboardAuth: DashboardAuthService) {}
+  constructor(private readonly authService: AuthService) {}
 
   @Post('login')
   @HttpCode(200)
   login(@Body() body: { email?: string; password?: string }) {
-    return this.dashboardAuth.login(body.email ?? '', body.password ?? '');
+    return this.authService.login(body.email ?? '', body.password ?? '');
   }
 
   @Post('logout')
@@ -29,7 +29,13 @@ export class AuthController {
 
   @Get('me')
   @UseGuards(JwtAuthGuard)
-  me(@CurrentUser() user: JwtPayload) {
-    return this.dashboardAuth.getProfile(user.sub);
+  me(@CurrentUser() user: AuthUserProfile) {
+    return user;
+  }
+
+  @Get('profile')
+  @UseGuards(JwtAuthGuard)
+  profile(@CurrentUser() user: AuthUserProfile) {
+    return user;
   }
 }

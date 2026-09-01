@@ -72,14 +72,15 @@ model Workspace {
   aiEvalRuns              AiEvalRun[]
 }
 
-/// Email/password login for the Pulse web dashboard (separate from Slack User records).
-model DashboardAccount {
-  id           String   @id @default(uuid())
-  email        String   @unique
-  passwordHash String
-  name         String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+/// Dashboard login accounts (separate from Slack-linked User records).
+model AdminUser {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  role      String   @default("admin")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model User {
