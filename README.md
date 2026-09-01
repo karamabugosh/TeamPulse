@@ -50,13 +50,13 @@ Blueprint: [`render.yaml`](render.yaml) service **`teampulse-frontend`**.
 |---------|--------|
 | **Service type** | Static Site |
 | **Root Directory** | `frontend` |
-| **Build Command** | `npm install && npm run build` |
-| **Publish Directory** | `dist` |
+| **Build Command** | `npm install && npm run build:render` |
+| **Publish Directory** | `dist` (relative to Root Directory — **not** `frontend/dist`) |
 | **Environment variable** | `VITE_API_BASE_URL=https://teampulse-go8z.onrender.com` |
 
 After the frontend URL is known, set **`FRONTEND_URL`** on the **backend** Render service (CORS + Jira OAuth redirects).
 
-SPA routing: `frontend/public/_redirects` rewrites all routes to `index.html`.
+SPA routing: add a Render rewrite `/*` → `/index.html` (in [`render.yaml`](render.yaml) `routes`, or dashboard Redirects/Rewrites). See [`docs/deployment/render-frontend-deployment.md`](docs/deployment/render-frontend-deployment.md).
 
 ### API configuration
 

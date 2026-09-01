@@ -86,12 +86,11 @@ services:
   - type: web
     name: teampulse-frontend
     runtime: static
-    plan: starter
     region: frankfurt
     branch: karam-final1
     rootDir: frontend
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
+    buildCommand: npm install && npm run build:render
+    staticPublishPath: ./dist
     routes:
       - type: rewrite
         source: /*

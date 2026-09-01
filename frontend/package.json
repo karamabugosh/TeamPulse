@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "verify:dist": "node -e \"const fs=require('fs'); if(!fs.existsSync('dist/index.html')){console.error('dist/index.html missing'); process.exit(1)} if(!fs.existsSync('dist/assets')){console.error('dist/assets missing'); process.exit(1)} console.log('dist OK:', fs.readdirSync('dist').join(', '))\"",
+    "build:render": "npm run build && npm run verify:dist",
     "preview": "vite preview",
     "test:e2e": "playwright test",
     "playwright": "playwright test"
