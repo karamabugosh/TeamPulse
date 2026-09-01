@@ -23,7 +23,7 @@ services:
     region: frankfurt
     branch: karam-final1
     rootDir: backend
-    buildCommand: npm ci --include=dev && node -e "console.log('cwd',process.cwd());console.log('deps',Object.keys(require('./package.json').dependencies).sort().join(','));console.log('resolve',require.resolve('@slack/socket-mode'));" && npm ls @slack/socket-mode && ls -la node_modules/@slack && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     preDeployCommand: npm run prisma:migrate:deploy
     startCommand: npm run start:prod
     healthCheckPath: /api/health

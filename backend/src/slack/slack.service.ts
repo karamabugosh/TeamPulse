@@ -1,7 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { App, LogLevel, SocketModeReceiver } from '@slack/bolt';
-import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
 import { PrismaService } from '../prisma/prisma.service';
 import { OutgoingMessageDto } from './dto/outgoing-message.dto';
@@ -10,6 +9,7 @@ import {
   formatSocketError,
   maskToken,
   registerSocketDisconnectGuard,
+  SlackSocketModeClient,
   validateSlackSocketConfig,
 } from './slack-socket.lifecycle';
 
@@ -26,7 +26,7 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
 
   private app?: App;
   private webClient?: WebClient;
-  private socketClient?: SocketModeClient;
+  private socketClient?: SlackSocketModeClient;
 
   private socketStartInProgress = false;
   private socketConnected = false;
@@ -208,7 +208,7 @@ export class SlackService implements OnModuleInit, OnModuleDestroy {
     this.listenersRegistered = true;
   }
 
-  private attachReconnectListeners(client: SocketModeClient): void {
+  private attachReconnectListeners(client: SlackSocketModeClient): void {
     client.on('connected', () => {
       this.socketConnected = true;
       this.reconnectAttempt = 0;

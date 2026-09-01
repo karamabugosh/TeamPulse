@@ -1,5 +1,19 @@
 import { Logger } from '@nestjs/common';
-import { SocketModeClient } from '@slack/socket-mode';
+
+/** Minimal surface of Bolt SocketModeReceiver.client — avoids a direct TS import from @slack/socket-mode. */
+export type SlackSocketModeClient = {
+  on(
+    event:
+      | 'connecting'
+      | 'connected'
+      | 'authenticated'
+      | 'reconnecting'
+      | 'disconnecting'
+      | 'disconnected'
+      | 'error',
+    listener: (...args: unknown[]) => void,
+  ): void;
+};
 
 export type SlackSocketConfig = {
   botToken?: string;
@@ -63,7 +77,7 @@ export function maskToken(token?: string): string {
 }
 
 export function attachSocketLifecycleLogging(
-  client: SocketModeClient,
+  client: SlackSocketModeClient,
   logger: Logger,
 ): void {
   client.on('connecting', () => {

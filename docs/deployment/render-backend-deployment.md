@@ -32,7 +32,7 @@ Render Web Service — teampulse-backend
 - Global API prefix: **`/api`**.
 - Prisma Client is generated during **`npm run build`** via `node node_modules/prisma/build/index.js generate` (never a bare `prisma` command — that collides with the `prisma/` schema directory on Linux/Render → `Permission denied`).
 - There is **no** `postinstall` Prisma hook (install-time generate was the failure point on Render).
-- Build uses **`npm install --include=dev`** so Nest CLI / TypeScript are available while `NODE_ENV=production`.
+- Build uses **`npm ci --include=dev`** so Nest CLI / TypeScript are available while `NODE_ENV=production`.
 - Schema is applied with **`npx prisma migrate deploy`** (Render `preDeployCommand`); migrations are **not** modified in this phase.
 - **Do not** use local PostgreSQL, `pulse_test`, or `teampulse` in production.
 
@@ -68,7 +68,13 @@ Render Web Service — teampulse-backend
 npm ci --include=dev && npm run build
 ```
 
-(`render.yaml` also prints `npm ls @slack/socket-mode` and `ls node_modules/@slack` so Render logs prove the package is present.)
+(`render.yaml` runs `npm ci --include=dev && npm run build`.)
+
+### Compile-time fix (TS2307)
+
+Application code no longer imports `@slack/socket-mode` directly. Socket lifecycle helpers use a minimal local type matching `SocketModeReceiver.client` from `@slack/bolt`. Runtime still uses Bolt's socket-mode client; the package remains installed transitively via `@slack/bolt` (and as a direct dependency in `package.json`).
+
+Proven locally: removing `node_modules/@slack/socket-mode` used to reproduce the exact Render TS2307 errors in `slack.service.ts` and `slack-socket.lifecycle.ts` when those files imported `@slack/socket-mode` directly.
 
 ### Why Render differed from GitHub Actions
 
