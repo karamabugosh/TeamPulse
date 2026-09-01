@@ -22,6 +22,8 @@ backend/dist/
 backend/coverage/
 backend/exports/*.json
 backend/exports/*.csv
+*.tsbuildinfo
+backend/*.tsbuildinfo
 
 # Logs
 *.log

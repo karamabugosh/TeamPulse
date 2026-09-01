@@ -72,9 +72,9 @@ npm ci --include=dev && npm run build
 
 ### Compile-time fix (TS2307)
 
-Application code no longer imports `@slack/socket-mode` directly. Socket lifecycle helpers use a minimal local type matching `SocketModeReceiver.client` from `@slack/bolt`. Runtime still uses Bolt's socket-mode client; the package remains installed transitively via `@slack/bolt` (and as a direct dependency in `package.json`).
+Application code no longer imports `@slack/socket-mode` directly. Socket lifecycle helpers use a minimal local type matching `SocketModeReceiver.client` from `@slack/bolt`. Runtime still uses Bolt's socket-mode client; **`@slack/socket-mode@2.0.7` is installed transitively via `@slack/bolt`** (no direct dependency in `package.json`).
 
-Proven locally: removing `node_modules/@slack/socket-mode` used to reproduce the exact Render TS2307 errors in `slack.service.ts` and `slack-socket.lifecycle.ts` when those files imported `@slack/socket-mode` directly.
+Proven locally: with direct imports removed, **`npm run build` succeeds even when `node_modules/@slack/socket-mode` is deleted** — compile no longer depends on that package being hoisted to the top level.
 
 ### Why Render differed from GitHub Actions
 
