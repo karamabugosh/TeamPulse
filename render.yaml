@@ -84,6 +84,16 @@ services:
         value: read:jira-work write:jira-work read:jira-user offline_access
       - key: MEMORY_V2_ASK_MODE
         value: hybrid
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: DASHBOARD_ADMIN_EMAIL
+        sync: false
+      - key: DASHBOARD_ADMIN_PASSWORD
+        sync: false
+      - key: DASHBOARD_ADMIN_NAME
+        value: Admin
 
   - type: web
     name: teampulse-frontend

@@ -20,6 +20,7 @@ copyFileSync(indexHtml, join(dist, '404.html'));
 console.log('spa-fallback: wrote dist/404.html');
 
 const routes = [
+  'login',
   'overview',
   'teams',
   'checkins',

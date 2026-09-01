@@ -1,4 +1,5 @@
 import { getStoredWorkspaceId } from '@/lib/workspace-storage';
+import { getStoredAuthToken } from '@/lib/auth-storage';
 import { apiUrl } from '@/lib/api-config';
 
 export { API_BASE_URL, apiUrl } from '@/lib/api-config';
@@ -31,6 +32,7 @@ export async function apiFetch<T = unknown>(
   options?: RequestInit,
 ): Promise<T> {
   const workspaceId = getStoredWorkspaceId();
+  const authToken = getStoredAuthToken();
   const resolvedUrl = apiUrl(url);
 
   let response: Response;
@@ -39,6 +41,7 @@ export async function apiFetch<T = unknown>(
       ...options,
       headers: {
         'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         ...(workspaceId ? { 'X-Workspace-Id': workspaceId } : {}),
         ...(options?.headers ?? {}),
       },

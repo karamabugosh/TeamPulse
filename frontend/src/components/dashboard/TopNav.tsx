@@ -31,6 +31,8 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useWorkspace } from '@/lib/workspace-context';
+import { useAuth } from '@/lib/auth-context';
+import { useNavigate } from 'react-router-dom';
 
 interface TopNavProps {
   onMenuClick?: () => void;
@@ -44,6 +46,24 @@ const notifications = [
 
 export const TopNav: React.FC<TopNavProps> = ({ onMenuClick }) => {
   const { workspaces, activeWorkspace, setActiveWorkspaceId, loading } = useWorkspace();
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const displayName = user?.name ?? 'User';
+  const displayEmail = user?.email ?? '';
+  const initials =
+    displayName
+      .trim()
+      .split(/\s+/)
+      .map((part) => part[0] ?? '')
+      .join('')
+      .slice(0, 2)
+      .toUpperCase() || 'U';
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login', { replace: true });
+  };
 
   return (
     <TooltipProvider>
@@ -167,10 +187,10 @@ export const TopNav: React.FC<TopNavProps> = ({ onMenuClick }) => {
                 className="gap-2 rounded-xl border border-transparent pl-2 pr-3 hover:border-white/[0.08] hover:bg-white/[0.03]"
               >
                 <Avatar className="h-8 w-8 ring-2 ring-primary/25">
-                  <AvatarFallback className="bg-primary/15 text-primary">K</AvatarFallback>
+                  <AvatarFallback className="bg-primary/15 text-primary">{initials}</AvatarFallback>
                 </Avatar>
                 <div className="hidden flex-col items-start text-left md:flex">
-                  <span className="text-sm font-medium">Karam</span>
+                  <span className="text-sm font-medium">{displayName}</span>
                   <span className="text-xs text-muted-foreground">Admin</span>
                 </div>
                 <ChevronDown className="hidden h-4 w-4 text-muted-foreground md:block" />
@@ -182,9 +202,9 @@ export const TopNav: React.FC<TopNavProps> = ({ onMenuClick }) => {
             >
               <DropdownMenuLabel>
                 <div className="flex flex-col">
-                  <span>Karam</span>
+                  <span>{displayName}</span>
                   <span className="text-xs font-normal text-muted-foreground">
-                    karam@teampulse.io
+                    {displayEmail}
                   </span>
                 </div>
               </DropdownMenuLabel>
@@ -198,7 +218,10 @@ export const TopNav: React.FC<TopNavProps> = ({ onMenuClick }) => {
                 Settings
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem className="text-destructive focus:text-destructive">
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onClick={() => void handleLogout()}
+              >
                 <LogOut className="mr-2 h-4 w-4" />
                 Sign out
               </DropdownMenuItem>
