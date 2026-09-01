@@ -44,12 +44,16 @@ export async function apiFetch<T = unknown>(
       },
     });
   } catch (error) {
-    const message =
-      error instanceof TypeError
-        ? `Network error — could not reach ${resolvedUrl}. Check VITE_API_BASE_URL and that FRONTEND_URL on the backend matches this site.`
-        : error instanceof Error
-          ? error.message
-          : 'Network request failed';
+    if (error instanceof ApiError) {
+      throw error;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    const isNetworkFailure =
+      error instanceof TypeError ||
+      /failed to fetch|networkerror|load failed/i.test(detail);
+    const message = isNetworkFailure
+      ? `Network error — could not reach ${resolvedUrl} (${detail}). The backend may be cold-starting, unreachable, or blocking cross-origin requests.`
+      : detail || 'Network request failed';
     throw new ApiError(message, 0);
   }
 

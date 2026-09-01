@@ -38,10 +38,7 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: FRONTEND_URL
-        fromService:
-          type: web
-          name: teampulse-frontend
-          envVarKey: RENDER_EXTERNAL_URL
+        value: https://teampulse-1-zmlx.onrender.com
       - key: SLACK_BOT_TOKEN
         sync: false
       - key: SLACK_SIGNING_SECRET

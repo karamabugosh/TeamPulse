@@ -14,6 +14,7 @@ import { QuestionType } from '@prisma/client';
 import { WorkspaceAnalyticsSnapshot } from '../analytics/workspace-analytics.types';
 import { WorkspaceAnalyticsService } from '../analytics/workspace-analytics.service';
 import { WorkspaceMembersService } from '../common/workspace-members.service';
+import { WorkspaceBootstrapService } from '../common/workspace-bootstrap.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SlackMemberCacheService } from '../slack/slack-member-cache.service';
 import { AdminService } from './admin.service';
@@ -460,6 +461,9 @@ describe('AdminService', () => {
       (workspaceId: string) => Promise<{ openBlockers: number }>
     >;
   };
+  let workspaceBootstrap: {
+    ensureFromSlackToken: jest.Mock;
+  };
 
   beforeEach(async () => {
     resolveWorkspaceIdMock.mockReset();
@@ -493,6 +497,11 @@ describe('AdminService', () => {
       collectSnapshot: jest.fn(),
       getBlockerStats: jest.fn(),
     };
+    workspaceBootstrap = {
+      ensureFromSlackToken: jest
+        .fn<() => Promise<string | null>>()
+        .mockResolvedValue('ws-1'),
+    };
 
     workspaceAnalytics.collectSnapshot.mockResolvedValue(makeAnalyticsSnapshot());
     workspaceAnalytics.getBlockerStats.mockResolvedValue({ openBlockers: 2 });
@@ -510,6 +519,7 @@ describe('AdminService', () => {
         { provide: WorkspaceMembersService, useValue: workspaceMembers },
         { provide: SlackMemberCacheService, useValue: slackMemberCache },
         { provide: WorkspaceAnalyticsService, useValue: workspaceAnalytics },
+        { provide: WorkspaceBootstrapService, useValue: workspaceBootstrap },
       ],
     }).compile();
 

@@ -25,6 +25,7 @@ import {
   isUsableSlackBotToken,
 } from '../common/slack-member.util';
 import { WorkspaceMembersService } from '../common/workspace-members.service';
+import { WorkspaceBootstrapService } from '../common/workspace-bootstrap.service';
 import { SlackMemberCacheService } from '../slack/slack-member-cache.service';
 import { WorkspaceAnalyticsService } from '../analytics/workspace-analytics.service';
 import { resolveSlackIdsInDigest } from '../common/report-slack-resolution.util';
@@ -43,9 +44,12 @@ export class AdminService {
     private readonly workspaceMembers: WorkspaceMembersService,
     private readonly slackMemberCache: SlackMemberCacheService,
     private readonly workspaceAnalytics: WorkspaceAnalyticsService,
+    private readonly workspaceBootstrap: WorkspaceBootstrapService,
   ) {}
 
   async listWorkspaces() {
+    await this.workspaceBootstrap.ensureFromSlackToken();
+
     const workspaces = await this.prisma.workspace.findMany({
       orderBy: { installedAt: 'asc' },
       select: {
@@ -2085,6 +2089,8 @@ ${JSON.stringify(digest.themes, null, 2)}
     if (!name) {
       throw new BadRequestException('name is required.');
     }
+
+    await this.workspaceBootstrap.ensureFromSlackToken();
 
     const workspaceId = await this.activeWorkspaceId();
     if (!workspaceId) {
