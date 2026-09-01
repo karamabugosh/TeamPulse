@@ -1,4 +1,4 @@
-import { KnownBlock } from '@slack/web-api';
+import { KnownBlock } from '@slack/types';
 import {
   SlackExportSendRequest,
   SlackExportSourceItem,

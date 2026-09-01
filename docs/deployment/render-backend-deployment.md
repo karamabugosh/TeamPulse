@@ -76,6 +76,12 @@ Application code no longer imports `@slack/socket-mode` directly. Socket lifecyc
 
 Proven locally: with direct imports removed, **`npm run build` succeeds even when `node_modules/@slack/socket-mode` is deleted** — compile no longer depends on that package being hoisted to the top level.
 
+### Runtime fix (`./types/request/index`)
+
+**Root cause:** `package.json` pinned `@slack/web-api@^8.0.0` while `@slack/bolt@4.7.3` depends on `@slack/web-api@^7.16.0`. npm installed **two major versions** (8.0.0 hoisted + 7.19.0 nested). On Render, the hoisted v8 tree could be incomplete at runtime → `Cannot find module './types/request/index'` from `dist/index.js`.
+
+**Fix:** Align the Slack SDK to one set — `@slack/bolt@^4.7.3`, `@slack/web-api@^7.19.0`, `@slack/types@^2.21.1`, plus npm **`overrides`** so Bolt/OAuth/Socket-Mode all dedupe to the same `@slack/web-api`.
+
 ### Why Render differed from GitHub Actions
 
 | | GitHub Actions | Render (before fix) |
